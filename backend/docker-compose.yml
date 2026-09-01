@@ -1,0 +1,52 @@
+# n8n Self-Service Portal — backend stack compose (runs on the portal environment)
+# Secrets come from stack.env (Portainer) — never commit real values.
+
+services:
+  n8n-portal-backend:
+    image: n8n-portal-backend:0.1.24
+    restart: unless-stopped
+    ports:
+      - "8788:8000"          # host port for NPM proxy (portal UI later); loopback-safe
+    environment:
+      - PORTAINER_URL=http://host.docker.internal:9000
+      - NPM_URL=http://host.docker.internal:81
+      - PORTAINER_TOKEN=${PORTAINER_TOKEN}
+      - NPM_ADMIN_EMAIL=${NPM_ADMIN_EMAIL}
+      - NPM_ADMIN_PASSWORD=${NPM_ADMIN_PASSWORD}
+      - BASE_DOMAIN=steprotech.com
+      - PORT_RANGE_START=32768
+      - PORT_RANGE_END=60999
+      - ADMIN_PASSWORD_HASH=${ADMIN_PASSWORD_HASH}
+      - JWT_SECRET=${JWT_SECRET}
+      - SMTP_HOST=smtp.purelymail.com
+      - SMTP_PORT=587
+      - SMTP_USER=admin@steprotech.com
+      - SMTP_PASS=${SMTP_PASS}
+      - N8N_SMTP_PASS=${SMTP_PASS}
+      - SMTP_SENDER="n8n Portal <no-reply@steprotech.com>"
+      - SMTP_STARTTLS=true
+      - DB_PATH=/data/portal.db
+      - PAYMENT_GATEWAY=${PAYMENT_GATEWAY}
+      - PLAN_NAME=${PLAN_NAME}
+      - PLAN_CURRENCY=${PLAN_CURRENCY}
+      - PLAN_AMOUNT_MINOR=${PLAN_AMOUNT_MINOR}
+      - PAYSTACK_SECRET_KEY=${PAYSTACK_SECRET_KEY}
+      - PAYSTACK_PLAN_CODE=${PAYSTACK_PLAN_CODE}
+      - PAYSTACK_CALLBACK_URL=${PAYSTACK_CALLBACK_URL}
+      - LOCK_GRACE_DAYS=${LOCK_GRACE_DAYS}
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET}
+      - STRIPE_PRICE_ID=${STRIPE_PRICE_ID}
+    volumes:
+      - portal_data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  portal_data:

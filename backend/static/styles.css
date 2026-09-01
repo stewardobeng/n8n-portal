@@ -1,0 +1,403 @@
+/* ============================================================
+   SteProTECH n8n Portal — CloudPanel-faithful theme
+   Design tokens extracted from the live CloudPanel
+   (cloudpanel.steprotech.com) on 2026-09-01:
+   bg #f9fafb · header 75px fixed white #e2e2e2 border ·
+   blue #267ddd (hover #2e87eb) · link hover #0078d4 ·
+   card shadow 0 2px 4px rgb(157 161 164 / 19%) ·
+   thead #fbfcfc / #9bacb6 uppercase · green #73bf4c ·
+   red #e15650 · yellow #eec300 · dark theme via html.dark
+   ============================================================ */
+
+:root {
+  --clp-text: #2e2e2e;
+  --clp-text-secondary: #666666;
+  --clp-text-hover: #0078d4;
+  --clp-bg: #f9fafb;
+  --clp-bg-input: #ffffff;
+  --clp-border-color: #eaeaea;
+  --clp-border-strong: #e2e2e2;
+  --clp-btn-blue: #267ddd;
+  --clp-btn-blue-hover: #2e87eb;
+  --clp-btn-red: #e15650;
+  --clp-btn-gray-bg: #e8e8e8;
+  --clp-btn-gray-color: #777777;
+  --clp-green: #73bf4c;
+  --clp-red: #e15650;
+  --clp-yellow: #eec300;
+  --clp-orange: #ff7200;
+  --clp-thead-bg: #fbfcfc;
+  --clp-thead-color: #9bacb6;
+  --clp-card-shadow: 0 2px 4px rgb(157 161 164 / 19%);
+  --clp-header-shadow: 0 2px 2px 0 hsl(0deg 0% 93% / 50%);
+}
+
+/* dark theme (html.dark like the real CloudPanel) */
+html.dark {
+  --clp-text: #fff;
+  --clp-text-secondary: #9b9b9b;
+  --clp-bg: #0e1217;
+  --clp-bg-input: #20242c;
+  --clp-border-color: #a8b3cf33;
+  --clp-border-strong: #a8b3cf33;
+  --clp-btn-gray-bg: #21262d;
+  --clp-btn-gray-color: #c9d1d9;
+}
+html.dark body { background: #0e1217; color: #fff; }
+
+html, body {
+  height: 100%;
+  padding: 0;
+  margin: 0;
+  font-size: 16px;
+  background: var(--clp-bg);
+}
+body {
+  font-family: 'Helvetica Neue', 'Segoe UI', Helvetica, Arial, sans-serif;
+  color: var(--clp-text);
+}
+a { color: #3c3c3c; text-decoration: none; }
+a:hover { text-decoration: none; }
+b, strong { font-weight: 600; }
+ul { margin: 0; padding: 0; list-style-type: none; }
+p { line-height: 1.6; }
+svg { fill: currentColor; }
+button:focus, input:focus, .btn:focus, .btn:active { outline: 0 !important; box-shadow: none !important; }
+
+/* ============ HEADER ============ */
+.header {
+  background: #ffffff;
+  height: 75px;
+  border-bottom: 1px solid var(--clp-border-strong);
+  box-shadow: var(--clp-header-shadow);
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  z-index: 1000;
+}
+html.dark .header { background: #1c1f26; border-bottom: 1px solid var(--clp-border-color); box-shadow: none; }
+.header-inner { display: flex; height: 75px; }
+.header .logo {
+  padding: 20px 0 0 20px;
+  margin: 0 20px 0 0;
+  border-right: 1px solid #eaeaea;
+  min-width: 235px;
+  display: flex; align-items: flex-start;
+}
+.header .logo img { height: 31px; }
+.navbar-right-container {
+  flex: 1;
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+}
+.nav-link-container a {
+  color: #aaaaaa;
+  margin: 0 0 0 10px;
+  padding: 0 15px;
+  font-weight: 700;
+  line-height: 75px;
+  font-size: 16px;
+  display: inline-block;
+}
+.nav-link-container a:hover { color: var(--clp-text-hover); }
+.nav-link-container a.active { color: #2e2e2e; }
+html.dark .nav-link-container a.active { color: #fff; }
+.navbar-right { display: flex; }
+.navbar-right > ul { display: flex; flex-direction: row; }
+.navbar-right > ul > li {
+  border-left: 1px solid #eaeaea;
+  white-space: nowrap;
+  height: 75px;
+  line-height: 75px;
+}
+.navbar-right > ul > li > a {
+  display: block;
+  color: #aaaaaa;
+  padding: 0 25px;
+  font-size: 16px;
+}
+.navbar-right > ul > li > a:hover { color: var(--clp-text-hover); }
+.navbar-right .avatar {
+  display: inline-block; width: 30px; height: 30px; border-radius: 50%;
+  background: #e8e8e8; color: #777; text-align: center; line-height: 30px; font-size: 14px;
+}
+
+/* ============ LAYOUT (no sidebar — CloudPanel is header + full-width content) ============ */
+.main-container {
+  padding: 0 0 60px 0;
+  min-height: 100vh;
+}
+.content-area {
+  /* top padding compensates the fixed 75px header — only inside the signed-in
+     shell, so the login gate has zero header offset by default */
+  padding: 85px 30px 30px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+/* ============ PAGE HEADER ============ */
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: 20px 0;
+}
+.page-header .page-title h1 {
+  font-size: 30px;
+  color: #2e2e2e;
+  font-weight: 600;
+  margin: 5px 0 0 0;
+}
+html.dark .page-header .page-title h1 { color: #fff; }
+.page-actions { display: flex; gap: 10px; align-items: center; }
+
+/* ============ STATS ============ */
+.stats-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 20px;
+  margin: 0 0 30px 0;
+}
+.stat-box {
+  background: #ffffff;
+  border: 1px solid #e5e5e5;
+  border-radius: 4px;
+  padding: 20px;
+  box-shadow: var(--clp-card-shadow);
+}
+html.dark .stat-box { background: #1c1f26; border-color: var(--clp-border-color); }
+.stat-box .stat-title {
+  font-size: 13px;
+  color: #9bacb6;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .03em;
+}
+.stat-box .stat-value { font-size: 28px; font-weight: 600; margin-top: 6px; color: #2e2e2e; }
+html.dark .stat-box .stat-value { color: #fff; }
+.stat-box .stat-sub { font-size: 13px; color: #707070; margin-top: 2px; }
+
+/* ============ CARDS ============ */
+.card {
+  background: #ffffff;
+  border: 1px solid #e5e5e5;
+  border-radius: 4px;
+  box-shadow: var(--clp-card-shadow);
+  margin: 0 0 30px 0;
+  overflow: hidden;
+}
+html.dark .card { background: #1c1f26; border-color: var(--clp-border-color); }
+.card .card-header {
+  background: #ffffff;
+  color: #333333;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 25px;
+  font-size: 18px;
+  font-weight: 600;
+  border-bottom: 1px solid #eaeaea;
+}
+html.dark .card .card-header { background: #1c1f26; color: #fff; border-bottom-color: var(--clp-border-color); }
+.card .card-header .head-actions { display: flex; gap: 8px; }
+.card .card-body { padding: 25px; }
+.card .card-body-no-padding { padding: 0; }
+.card .card-body-no-padding .table { margin-bottom: 0; }
+.card .card-body-no-padding .table td { padding: 18px 32px; }
+.card .card-footer { background: #ffffff; padding: 15px 25px; border-top: 1px solid #eaeaea; }
+html.dark .card .card-footer { background: #1c1f26; border-top-color: var(--clp-border-color); }
+
+/* ============ TABLE ============ */
+.table { width: 100%; border-collapse: collapse; }
+.table td, .table thead th { border-bottom: 1px solid #eaeaea; }
+.table thead th {
+  background: #fbfcfc;
+  color: #9bacb6;
+  font-size: 14px;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 18px 32px;
+  border-top: none;
+  text-align: left;
+}
+html.dark .table thead th { background: #182130; color: #9bacb6; }
+.table tbody td { padding: 18px 32px; vertical-align: middle; }
+.table tbody tr:hover td { background: #fafbfe; }
+html.dark .table tbody tr:hover td { background: #182130; }
+.table tbody td > a:hover { color: #0078d4; text-decoration: underline; }
+.table .empty { text-align: center; color: #9bacb6; padding: 30px; }
+.ta-r { text-align: right !important; }
+
+/* ============ BUTTONS ============ */
+.btn {
+  display: inline-block;
+  font-weight: 500;
+  font-size: 14px;
+  line-height: 1.9;
+  padding: 8px 14px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background .12s, color .12s;
+}
+.btn:hover { text-decoration: none !important; }
+.btn-blue { color: #ffffff; background-color: #267ddd; border: 0; }
+.btn-blue:hover { background-color: #2e87eb; }
+.btn-red { color: #ffffff; background-color: #e15650; border: 0; }
+.btn-red:hover { background-color: #d04840; }
+.btn-white { color: #777777; border-color: #d3d3d3; background: #ffffff; }
+.btn-white:hover { background-color: #e4e5e6; }
+.btn-gray { color: #777777; background-color: #e8e8e8; border-color: #e8e8e8; }
+.btn-gray:hover { background-color: #d4d4d4; }
+.btn-lg { padding: 8px 30px; line-height: 2.43; }
+.btn-sm { padding: 4px 14px; font-size: 13px; line-height: 1.7; }
+.btn-login, .btn-create-user { display: block; width: 100%; font-size: 16px; padding: 8px 30px; line-height: 2; margin-top: 6px; }
+
+/* ============ FORMS ============ */
+.form-control {
+  display: block;
+  width: 100%;
+  padding: 10px 14px;
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--clp-text);
+  background: var(--clp-bg-input);
+  border: 1px solid #d3d3d3;
+  border-radius: 4px;
+}
+.form-control:focus { border-color: #267ddd; }
+.form-control-lg { font-size: 1rem; padding: 12px 16px; }
+.form-text { font-size: 14px; color: #707070; margin: 0 0 16px 0; }
+.row { display: flex; margin: 0 0 20px 0; gap: 12px; }
+.row:last-child { margin: 0; }
+.col { flex: 1; }
+.col-auto { flex-shrink: 0; }
+.col-6 { flex: 0 0 calc(50% - 6px); }
+.login-form-container.narrow { max-width: 420px; margin: 0 auto; }
+.field { margin-bottom: 16px; }
+.field label { display: block; font-size: 14px; font-weight: 600; margin-bottom: 6px; color: var(--clp-text-secondary); }
+label.required:after { content: " *"; color: var(--clp-red); }
+
+/* ============ STATUS COLORS + LABEL-OUTLINE BADGES (CloudPanel-style) ============ */
+.color-green { color: #73bf4c; }
+.color-red { color: #e15650; }
+.color-yellow { color: #eec300; }
+.color-orange { color: #ff7200; }
+.color-grey { color: #cccccc; }
+.color-light-blue { color: #39c; }
+/* CloudPanel uses bordered outline labels for statuses (label-outline-green/red/orange/blue) */
+.pill {
+  display: inline-block;
+  padding: 4px 12px;
+  border: 1px solid;
+  border-radius: 4px;
+  font-size: 12.5px;
+  font-weight: 600;
+  background: transparent;
+}
+.pill.active, .pill.healthy, .pill.provisioned { color: #73bf4c; border-color: #73bf4c; }
+.pill.pending, .pill.none, .pill.past_due, .pill.provisioning { color: #ff7200; border-color: #ff7200; }
+.pill.locked, .pill.canceled, .pill.failed, .pill.unpaid { color: #d84531; border-color: #d84531; }
+
+/* ============ PLAN CARDS ============ */
+.plan-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 20px;
+  margin: 0 0 30px 0;
+}
+.plan-card {
+  background: #ffffff;
+  border: 1px solid #e5e5e5;
+  border-radius: 4px;
+  box-shadow: var(--clp-card-shadow);
+  padding: 30px;
+  text-align: center;
+  position: relative;
+}
+html.dark .plan-card { background: #1c1f26; border-color: var(--clp-border-color); }
+.plan-card.featured { border: 2px solid #267ddd; }
+.plan-badge-off { background: transparent; border: 1px solid #cccccc; color: #707070; }
+.plan-card .p-name { font-size: 17px; font-weight: 700; }
+.plan-card .p-price { font-size: 34px; font-weight: 600; margin: 12px 0 2px; color: #2e2e2e; }
+html.dark .plan-card .p-price { color: #fff; }
+.plan-card .p-price small { font-size: 14px; color: #707070; font-weight: 500; }
+.plan-card .p-per { font-size: 13px; color: #707070; margin-bottom: 14px; }
+.plan-card ul { text-align: left; font-size: 14px; color: #666666; padding-left: 18px; margin: 14px 0 18px; }
+html.dark .plan-card ul { color: #9b9b9b; }
+.plan-card ul li { margin-bottom: 6px; }
+.plan-badge {
+  position: absolute; top: -12px; left: 50%; transform: translateX(-50%);
+  background: #267ddd; color: #fff; font-size: 11px; font-weight: 700;
+  padding: 3px 14px; border-radius: 3px; white-space: nowrap;
+}
+
+/* ============ META / STATUS LINE ============ */
+.meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin: 10px 0; }
+.meta-grid .k { display: block; font-size: 12px; color: #9bacb6; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; }
+.meta-grid .v { font-size: 15px; font-weight: 600; word-break: break-all; }
+.meta-grid .v a { color: #0078d4; }
+.meta-grid .v a:hover { text-decoration: underline; }
+.status-line { margin: 4px 0 10px; }
+.signup-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 20px; }
+.signup-grid .field:nth-child(1) { grid-column: 1 / -1; }
+
+/* ============ MSG ============ */
+.msg { font-size: 13.5px; margin: 10px 0 0; }
+.msg.ok { color: var(--clp-green); }
+.msg.err { color: var(--clp-red); }
+.msg.warn { color: var(--clp-orange); }
+
+/* ============ LOGIN BOX (admin) ============ */
+.login-container {
+  width: 400px;
+  margin: 0 auto;
+  margin-top: 120px;
+}
+#view-gate {
+  min-height: 100vh;
+  background: #f3f3f3; /* CloudPanel login page bg (login.css) */
+  overflow: hidden; /* contain login-container's top margin (no collapse to body) */
+}
+html.dark #view-gate { background: #0e1217; }
+.login-container .logo {
+  text-align: center;
+  padding: 0 0 10px 0;
+}
+.login-container .logo img { height: 42px; }
+.login-form-container {
+  border: 1px solid #dfdfdf;
+  border-radius: 4px;
+  padding: 25px;
+  background: #ffffff;
+  box-shadow: var(--clp-card-shadow);
+}
+html.dark .login-form-container { background: #1c1f26; border-color: var(--clp-border-color); }
+.login-form-container h2 { margin: 0 0 20px 0; font-size: 28px; }
+.login-form-container .form-container .row { padding: 0 0 15px 0; }
+.login-form-container .form-container .row:last-child { padding: 0; }
+.login-form-container .form-text { margin: 14px 0 0; }
+
+/* ============ FOOTER ============ */
+.footer {
+  background: #ffffff;
+  padding: 10px 0;
+  border-top: 1px solid #e2e2e2;
+  box-shadow: var(--clp-header-shadow);
+  text-align: center;
+  margin-top: 20px;
+}
+html.dark .footer { background: #1c1f26; border-top-color: var(--clp-border-color); }
+.footer ul li { font-size: 14px; color: #707070; display: inline; }
+.footer ul li a { margin: 0 5px; color: #707070; }
+.footer ul li a:hover { color: #0078d4; }
+.footer ul li:after { content: "|"; margin: 0 5px; }
+.footer ul li:last-child:after { content: ""; margin: 0; }
+
+.hidden { display: none !important; }
+
+@media (max-width: 860px) {
+  .header .logo { min-width: auto; }
+  .content-area { padding: 10px 16px 20px; }
+  .table thead th, .table tbody td { padding: 12px 16px; }
+}

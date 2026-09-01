@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+<meta name="description" content="SteProTECH n8n Portal">
+<title>SteProTECH | n8n Portal</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<!-- ============ HEADER (fixed, CloudPanel-style) ============ -->
+<header class="header">
+  <div class="header-inner">
+    <div class="logo">
+      <a title="SteProTECH" href="#dashboard">
+        <img alt="SteProTECH" src="/logo.svg" height="31">
+      </a>
+    </div>
+    <div class="navbar-right-container">
+      <div class="nav-link-container" id="main-nav">
+        <a href="#dashboard" data-view="dashboard" class="active">Dashboard</a>
+        <a href="#instances" data-view="instances">Instances</a>
+        <a href="#plans" data-view="plans">Plans &amp; Billing</a>
+        <a href="#admin" data-view="admin">Admin</a>
+      </div>
+      <div class="navbar-right">
+        <ul>
+          <li class="theme-switcher">
+            <a href="#" id="theme-toggle" title="Toggle theme" aria-label="Toggle theme">◐</a>
+          </li>
+          <li class="user-avatar">
+            <a href="#dashboard" id="user-chip" title="Account">
+              <span class="avatar">◉</span>
+            </a>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</header>
+
+<div class="main-container">
+
+  <!-- ============ GATE VIEWS (email -> login/token/register) ============ -->
+  <section id="view-gate" class="view">
+    <div class="login-container">
+      <div class="logo">
+        <a title="SteProTECH" href="#">
+          <img alt="SteProTECH" src="/logo.svg" height="42">
+        </a>
+      </div>
+      <!-- step 1: email only -->
+      <div id="gate-step-email" class="login-form-container">
+        <h2>Sign in</h2>
+        <div class="form-container">
+          <div class="row">
+            <div class="col">
+              <label class="required" for="gate-email">Email</label>
+              <input type="email" id="gate-email" class="form-control form-control-lg" autocomplete="email" placeholder="you@example.com" required>
+            </div>
+          </div>
+          <div class="row">
+            <div class="col">
+              <button class="btn btn-blue btn-login" id="gate-next">Continue</button>
+            </div>
+          </div>
+        </div>
+        <p class="msg" id="gate-msg"></p>
+      </div>
+      <!-- step 2a: password login (returning user) -->
+      <div id="gate-step-login" class="login-form-container hidden">
+        <h2>Welcome back</h2>
+        <div class="form-container">
+          <div class="row">
+            <div class="col">
+              <label class="required" for="login-password">Password</label>
+              <input type="password" id="login-password" class="form-control form-control-lg" autocomplete="current-password" placeholder="Your password" required>
+            </div>
+          </div>
+          <div class="row">
+            <div class="col">
+              <button class="btn btn-blue btn-login" id="login-submit">Sign in</button>
+            </div>
+          </div>
+        </div>
+        <p class="msg" id="login-msg"></p>
+        <p class="form-text"><a href="#" id="login-back">Not your account? Enter a different email</a></p>
+      </div>
+      <!-- step 2b: access token (invited, not yet registered) -->
+      <div id="gate-step-token" class="login-form-container hidden">
+        <h2>Enter your access token</h2>
+        <div class="form-container">
+          <div class="row">
+            <div class="col">
+              <label class="required" for="gate-token">Access token</label>
+              <input type="text" id="gate-token" class="form-control form-control-lg" placeholder="K7FQ-2MXP" autocomplete="off" maxlength="16" required>
+            </div>
+          </div>
+          <div class="row">
+            <div class="col">
+              <button class="btn btn-blue btn-login" id="token-submit">Verify token</button>
+            </div>
+          </div>
+        </div>
+        <p class="msg" id="token-msg"></p>
+        <p class="form-text">An administrator sent this token to your email after approving your request.</p>
+        <p class="form-text"><a href="#" id="token-back">Enter a different email</a></p>
+      </div>
+      <!-- step 2c: request sent / waiting -->
+      <div id="gate-step-waiting" class="login-form-container hidden">
+        <h2>Request sent</h2>
+        <p class="color-grey" style="margin:0 0 16px">We have received your request. An administrator will review it and email you an access token to complete your registration.</p>
+        <p class="msg color-green" id="waiting-email"></p>
+        <p class="form-text"><a href="#" id="waiting-back">Enter a different email</a></p>
+      </div>
+      <!-- step 3: registration form (email locked after token verified) -->
+      <div id="gate-step-register" class="login-form-container hidden">
+        <h2>Create your account</h2>
+        <div class="form-container">
+          <div class="row">
+            <div class="col">
+              <label class="required">Email</label>
+              <input type="email" id="reg-email" class="form-control form-control-lg" disabled>
+            </div>
+          </div>
+          <div class="row">
+            <div class="col col-6">
+              <label class="required" for="reg-first">First name</label>
+              <input type="text" id="reg-first" class="form-control" required>
+            </div>
+            <div class="col col-6">
+              <label class="required" for="reg-last">Last name</label>
+              <input type="text" id="reg-last" class="form-control" required>
+            </div>
+          </div>
+          <div class="row">
+            <div class="col">
+              <label for="reg-username">Username (optional)</label>
+              <input type="text" id="reg-username" class="form-control" maxlength="62" placeholder="e.g. john (no dots)">
+            </div>
+          </div>
+          <div class="row">
+            <div class="col">
+              <label class="required" for="reg-password">Password</label>
+              <input type="password" id="reg-password" class="form-control" autocomplete="new-password" placeholder="At least 8 chars, 1 upper, 1 lower, 1 digit" required>
+            </div>
+          </div>
+          <div class="row">
+            <div class="col">
+              <button class="btn btn-blue btn-login" id="register-submit">Create account</button>
+            </div>
+          </div>
+        </div>
+        <p class="msg" id="register-msg"></p>
+        <p class="form-text"><a href="#" id="register-back">Enter a different email</a></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ APP VIEWS (signed in) ============ -->
+  <div id="app-shell" class="hidden">
+
+  <!-- ============ CONTENT ============ -->
+  <div class="content-area">
+
+    <!-- ============ DASHBOARD ============ -->
+    <section id="view-dashboard" class="view">
+      <div class="page-header">
+        <div class="page-title"><h1>Dashboard</h1></div>
+        <div class="page-actions" id="dash-actions"></div>
+      </div>
+      <div class="stats-row" id="dash-stats"></div>
+      <div class="card">
+        <div class="card-header">Your n8n workspace</div>
+        <div class="card-body" id="dash-body"></div>
+      </div>
+    </section>
+
+    <!-- ============ INSTANCES ============ -->
+    <section id="view-instances" class="view hidden">
+      <div class="page-header">
+        <div class="page-title"><h1>n8n Instances</h1></div>
+        <div class="page-actions">
+          <button class="btn btn-blue" id="inst-new">+ New Instance</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-body-no-padding">
+          <table class="table">
+            <thead>
+              <tr><th>Workspace</th><th>Status</th><th>Subscription</th><th>URL</th><th class="ta-r">Actions</th></tr>
+            </thead>
+            <tbody id="instances-tbody">
+              <tr><td colspan="5" class="empty">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ PLANS & BILLING ============ -->
+    <section id="view-plans" class="view hidden">
+      <div class="page-header">
+        <div class="page-title"><h1>Plans &amp; Billing</h1></div>
+      </div>
+      <div id="plan-grid"></div>
+      <div class="card">
+        <div class="card-header">Subscription</div>
+        <div class="card-body" id="sub-body"></div>
+      </div>
+    </section>
+
+    <!-- ============ ADMIN ============ -->
+    <section id="view-admin" class="view hidden">
+      <div class="page-header">
+        <div class="page-title"><h1>Admin</h1></div>
+      </div>
+      <div id="admin-login-wrap">
+        <div class="login-form-container narrow">
+          <h2>Admin access</h2>
+          <div class="form-container">
+            <div class="row">
+              <div class="col">
+                <input type="password" id="admin-password" class="form-control form-control-lg" placeholder="Admin password" autocomplete="current-password">
+              </div>
+            </div>
+            <div class="row">
+              <div class="col">
+                <button class="btn btn-blue btn-login" id="admin-login-btn">Sign in</button>
+              </div>
+            </div>
+          </div>
+          <p class="msg" id="admin-login-msg"></p>
+        </div>
+      </div>
+      <div id="admin-panel" class="hidden">
+        <div class="card">
+          <div class="card-header">Landing environments</div>
+          <div class="card-body">
+            <p class="form-text">New instances are provisioned on the first environment with a free port, in this order (comma separated IDs).</p>
+            <div class="row">
+              <div class="col" style="max-width:420px">
+                <input type="text" id="landing-envs" class="form-control" placeholder="8,4,9">
+              </div>
+              <div class="col-auto">
+                <button class="btn btn-blue" id="save-envs-btn">Save</button>
+              </div>
+            </div>
+            <p class="msg" id="envs-msg"></p>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header">
+            Accounts
+            <span class="head-actions">
+              <button class="btn btn-gray" id="sweep-btn">Run renewal sweep</button>
+              <button class="btn btn-gray" id="sweep-expired-btn">Stop expired instances</button>
+            </span>
+          </div>
+          <div class="card-body-no-padding">
+            <table class="table">
+              <thead>
+                <tr><th>Account</th><th>Status</th><th>Subscription</th><th>Paid until</th><th>Quota</th><th class="ta-r">Actions</th></tr>
+              </thead>
+              <tbody id="admin-tbody">
+                <tr><td colspan="6" class="empty">Loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="card-footer"><p class="msg" id="accounts-msg"></p></div>
+        </div>
+        <div class="card">
+          <div class="card-header">Access requests</div>
+          <div class="card-body-no-padding">
+            <table class="table">
+              <thead>
+                <tr><th>Email</th><th>Status</th><th>Requested</th><th class="ta-r">Actions</th></tr>
+              </thead>
+              <tbody id="requests-tbody">
+                <tr><td colspan="4" class="empty">Loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="card-footer"><p class="msg" id="requests-msg"></p></div>
+        </div>
+      </div>
+    </section>
+
+    <footer class="footer">
+      <ul>
+        <li>SteProTECH n8n Portal</li>
+        <li><a href="#plans" data-view="plans">Plans</a></li>
+        <li><a href="#admin" data-view="admin">Admin</a></li>
+      </ul>
+    </footer>
+  </div>
+  </div><!-- /app-shell -->
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

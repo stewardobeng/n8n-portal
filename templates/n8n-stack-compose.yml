@@ -1,0 +1,77 @@
+# n8n Self-Service Provisioning — canonical stack template (from Steward, 2026-09-01)
+# IDENTICAL for every account; per-account values injected via ${VARS} at provision time.
+
+services:
+  n8n:
+    image: n8nio/n8n:latest
+    restart: unless-stopped
+
+    # Resource limits for multi-tenant server
+    # Good starting point for running many n8n instances on 2 CPU / 12 GB RAM
+    cpus: "0.30"
+    mem_limit: "768m"
+    mem_reservation: "256m"
+
+    # Unique host port per tenant (example: 32768, 32769, ...)
+    ports:
+      - "${N8N_PORT}:5678"
+
+    environment:
+      # Node.js memory control — keeps n8n from exceeding container heap
+      - NODE_OPTIONS=--max-old-space-size=384
+
+      # Database — SQLite in Docker volume
+      - DB_TYPE=sqlite
+      - DB_SQLITE_VACUUM_ON_STARTUP=false
+
+      - N8N_LISTEN_ADDRESS=0.0.0.0
+
+      # Auth
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=${N8N_BASIC_AUTH_USER}
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD}
+
+      # Encryption key — unique and permanent per tenant
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+
+      # Public URL settings — fixes blank host, webhooks, OAuth callbacks
+      - N8N_HOST=${N8N_HOST}
+      - N8N_PROTOCOL=${N8N_PROTOCOL}
+      - N8N_PORT=5678
+      - WEBHOOK_URL=${WEBHOOK_URL}
+      - N8N_EDITOR_BASE_URL=${N8N_EDITOR_BASE_URL}
+
+      # Reverse proxy awareness (NPM)
+      - N8N_PROXY_HOPS=1
+
+      # Timezone
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
+      - TZ=${GENERIC_TIMEZONE}
+
+      # Execution timeout protection
+      - EXECUTIONS_TIMEOUT=300
+      - EXECUTIONS_TIMEOUT_MAX=600
+
+      # Execution pruning — keeps SQLite from growing too large
+      - EXECUTIONS_DATA_PRUNE=true
+      - EXECUTIONS_DATA_MAX_AGE=168
+      - EXECUTIONS_DATA_PRUNE_MAX_COUNT=10000
+
+      # Task runners — keep enabled for modern n8n
+      - N8N_RUNNERS_ENABLED=true
+
+      # SMTP for invites and password reset emails
+      - N8N_EMAIL_MODE=${N8N_EMAIL_MODE}
+      - N8N_SMTP_HOST=${N8N_SMTP_HOST}
+      - N8N_SMTP_PORT=${N8N_SMTP_PORT}
+      - N8N_SMTP_USER=${N8N_SMTP_USER}
+      - N8N_SMTP_PASS=${N8N_SMTP_PASS}
+      - N8N_SMTP_SENDER=${N8N_SMTP_SENDER}
+      - N8N_SMTP_SSL=${N8N_SMTP_SSL}
+      - N8N_SMTP_STARTTLS=${N8N_SMTP_STARTTLS}
+
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+volumes:
+  n8n_data:
