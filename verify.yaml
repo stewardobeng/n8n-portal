@@ -1,0 +1,16 @@
+# Hermes verify recipe for the n8n portal backend.
+# Runs: compile check -> unit tests -> boot the API -> poll /api/v1/health.
+verify:
+  root: backend
+  detect:
+    - file: requirements.txt
+  build:
+    - cmd: python3 -m compileall -q app
+  test:
+    - cmd: bash -lc "cd backend && python3 -m venv .venv >/dev/null 2>&1 || true; . .venv/bin/activate; pip install -q -r requirements.txt pytest >/dev/null 2>&1 || true; rm -f /tmp/portal-test.db*; DB_PATH=/tmp/portal-test.db python -m pytest tests/ -q"
+  boot:
+    - cmd: bash -lc "cd backend && . .venv/bin/activate; DB_PATH=/tmp/portal-verify.db ADMIN_PASSWORD_HASH=x JWT_SECRET=verify uvicorn app.main:app --host 127.0.0.1 --port 8877"
+      ready_pattern: "Application startup complete"
+  readiness:
+    - url: http://127.0.0.1:8877/api/v1/health
+      expect: '"ok":true'

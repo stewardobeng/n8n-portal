@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Environment & secrets (NEVER commit)
+.env
+.env.*
+*.pem
+*.key
+!*.pub
+stack.env
+
+# Databases (live data stays on the server)
+*.db
+*.db-wal
+*.db-shm
+portal-verify.db
+
+# Hermes profile (control-host operational state)
+.hermes/
+
+# Control-host operational scripts (server paths + credentials — not for the repo)
+/scripts/
+
+# Local scratch
+*.tar.gz
+/tmp/
