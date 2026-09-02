@@ -5,6 +5,7 @@ import smtplib
 import ssl
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.utils import formataddr, formatdate, make_msgid, parseaddr
 
 from ..config import settings
 
@@ -13,13 +14,26 @@ class EmailError(Exception):
     pass
 
 
+def _sender_parts(sender: str) -> tuple[str, str]:
+    """Split 'Name <addr>' (or '<addr>', or bare 'addr') into (name, addr)."""
+    name, addr = parseaddr(sender)
+    if not addr and "@" in sender and sender.strip().startswith("<"):
+        addr = sender.strip().strip("<>")
+    if not addr:
+        addr = settings.smtp_user
+    return name.strip(), addr.strip()
+
+
 def send_email(to: str, subject: str, html: str, text: str | None = None) -> None:
     if not settings.smtp_pass:
         raise EmailError("SMTP password not configured.")
+    name, addr = _sender_parts(settings.smtp_sender)
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
-    msg["From"] = settings.smtp_sender
+    msg["From"] = formataddr((name, addr)) if name else addr
     msg["To"] = to
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid(domain=addr.split("@")[-1])
     msg.attach(MIMEText(text or _strip(html), "plain"))
     msg.attach(MIMEText(html, "html"))
 
