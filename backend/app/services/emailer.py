@@ -103,6 +103,29 @@ def send_access_token(to: str, token: str) -> None:
     send_email(to, "Your SteProTECH n8n portal access token", html)
 
 
+def send_admin_welcome_credentials(to: str, email: str, username: str,
+                                   password: str) -> None:
+    """Admin-created portal account: sign-in details for the portal itself."""
+    html = f"""
+    <div style="font-family:Arial,sans-serif;max-width:560px;margin:auto">
+      <h2 style="color:#1f2937">Your SteProTECH n8n portal account</h2>
+      <p>Hello <b>{username}</b>, an administrator has created your account on the
+      SteProTECH n8n portal.</p>
+      <table style="border-collapse:collapse;width:100%;margin:16px 0">
+        <tr><td style="padding:6px;border:1px solid #e5e7eb"><b>Portal</b></td>
+            <td style="padding:6px;border:1px solid #e5e7eb"><a href="https://portal.steprotech.com/">https://portal.steprotech.com/</a></td></tr>
+        <tr><td style="padding:6px;border:1px solid #e5e7eb"><b>Email</b></td>
+            <td style="padding:6px;border:1px solid #e5e7eb">{email}</td></tr>
+        <tr><td style="padding:6px;border:1px solid #e5e7eb"><b>Temporary password</b></td>
+            <td style="padding:6px;border:1px solid #e5e7eb"><code>{password}</code></td></tr>
+      </table>
+      <p>Sign in with your email and this temporary password, then change it in
+      your profile. Your workspace is prepared by the administrator.</p>
+    </div>
+    """
+    send_email(to, "Your SteProTECH n8n portal account", html)
+
+
 def _strip(html: str) -> str:
     import re
     return re.sub(r"<[^>]+>", " ", html)

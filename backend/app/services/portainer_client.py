@@ -18,7 +18,9 @@ class PortainerClient:
 
     def _req(self, method: str, path: str, **kw) -> httpx.Response:
         url = f"{self.base_url}/api{path}"
-        resp = httpx.request(method, url, headers=self._headers(), timeout=30.0, **kw)
+        headers = dict(self._headers())
+        headers.update(kw.pop("headers", {}) or {})
+        resp = httpx.request(method, url, headers=headers, timeout=30.0, **kw)
         if resp.status_code >= 400:
             raise RuntimeError(
                 f"Portainer {method} {path} -> {resp.status_code}: {resp.text[:300]}"
@@ -38,6 +40,38 @@ class PortainerClient:
             "GET", f"/endpoints/{endpoint_id}/docker/containers/json",
             params={"all": "true" if all else "false"},
         ).json()
+
+    def get_container(self, endpoint_id: int, container_id: str) -> dict:
+        """Full container inspect (env vars, labels) on an environment."""
+        return self._req(
+            "GET", f"/endpoints/{endpoint_id}/docker/containers/{container_id}/json"
+        ).json()
+
+    def stop_container(self, endpoint_id: int, container_id: str) -> None:
+        """Stop a single container on an environment (fallback when a stack has
+        no valid Portainer stack record — e.g. compose stacks created directly on
+        the agent whose Portainer record is stale or missing)."""
+        try:
+            self._req("POST",
+                      f"/endpoints/{endpoint_id}/docker/containers/{container_id}/stop")
+        except Exception as e:
+            if "304" not in str(e) and "already" not in str(e).lower():
+                raise
+
+    def start_container(self, endpoint_id: int, container_id: str) -> None:
+        # Portainer's docker proxy forwards a non-empty body on plain POSTs,
+        # which Docker >=1.24 rejects for container start ("starting container
+        # with non-empty request body... removed in v1.24" — verified live
+        # 2026-09-02). Send an explicit empty JSON body + content-type; returns
+        # 204 and the container starts.
+        try:
+            self._req("POST",
+                      f"/endpoints/{endpoint_id}/docker/containers/{container_id}/start",
+                      content=b"{}",
+                      headers={"Content-Type": "application/json"})
+        except Exception as e:
+            if "304" not in str(e) and "already" not in str(e).lower():
+                raise
 
     def used_ports(self, endpoint_id: int) -> list[int]:
         """All published host ports currently bound on an environment."""

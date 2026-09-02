@@ -3,7 +3,7 @@
 
 services:
   n8n-portal-backend:
-    image: n8n-portal-backend:0.1.27
+    image: n8n-portal-backend:0.1.28
     restart: unless-stopped
     ports:
       - "8788:8000"          # host port for NPM proxy (portal UI later); loopback-safe

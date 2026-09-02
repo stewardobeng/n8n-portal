@@ -361,3 +361,22 @@ tbody tr:hover { background: #fbfdfd; }
 .auth-aside .trust-row { color: #aabcca; }
 .workspace-item .button .icon-svg { width: 14px; height: 14px; }
 .sidebar-footer .icon-svg { width: 16px; height: 16px; }
+
+/* ---- admin-assisted ops (2026-09-02): env cards + env checks ---- */
+.env-card { display:flex; flex-direction:column; gap:12px; padding:16px; border:1px solid var(--slate-200, #dfe5ea); border-radius:14px; background:white; box-shadow:0 1px 2px rgba(15,23,42,.04); }
+.env-card-head { display:flex; align-items:center; gap:10px; }
+.env-badge { display:inline-grid; place-items:center; width:32px; height:32px; border-radius:9px; background:var(--navy-950, #0d243d); color:white; font-weight:800; font-size:13px; flex:0 0 auto; }
+.env-card-head .status { margin-left:auto; }
+.env-stats { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; border-top:1px solid var(--slate-200, #dfe5ea); padding-top:12px; }
+.env-stat { display:flex; flex-direction:column; }
+.env-stat strong { font-size:16px; }
+.env-check { display:flex; align-items:center; gap:12px; padding:13px 14px; border:1px solid var(--slate-200, #dfe5ea); border-radius:12px; background:white; cursor:pointer; }
+.env-check:hover { border-color:var(--teal-600, #25b4b8); }
+.env-check input { position:absolute; opacity:0; pointer-events:none; }
+.env-check .check-ui { width:20px; height:20px; border:2px solid var(--slate-300, #cbd5e1); border-radius:6px; flex:0 0 auto; display:inline-grid; place-items:center; color:white; background:white; }
+.env-check input:checked + .check-ui { background:var(--teal-600, #25b4b8); border-color:var(--teal-600, #25b4b8); }
+.env-check input:checked + .check-ui::after { content:""; width:9px; height:5px; border-left:2px solid white; border-bottom:2px solid white; transform:rotate(-45deg) translateY(-1px); }
+.env-check > span:nth-child(3) { display:flex; flex-direction:column; min-width:0; }
+.env-check > span:nth-child(4) { margin-left:auto; text-align:right; white-space:nowrap; }
+.env-check .status { display:inline-flex; }
+.env-check-list { gap:9px; }
