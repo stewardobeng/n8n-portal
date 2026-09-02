@@ -170,12 +170,14 @@ var ICONS = {
     var acc = state.session ? state.session.account : null;
     var name = isAdmin ? "Administrator" : (acc ? (acc.display_name || cap(acc.username)) : "Account");
     var sub = isAdmin ? "SteProTECH staff" : (acc ? acc.email : "");
-    var initials = isAdmin ? "SO" : (acc ? initialsOf(acc.username) : "?");
+    var initials = isAdmin ? "SO" : (acc ? initialsOf(acc.display_name || acc.username) : "?");
     return '<div class="profile-chip"><span class="avatar">' + esc(initials) + "</span><span><strong>" + esc(name) + "</strong><small>" + esc(sub) + "</small></span></div>";
   }
-  function initialsOf(username) {
-    var parts = String(username || "?").split(/[-_]/);
-    return (parts[0] || "?").charAt(0).toUpperCase() + (parts[1] ? parts[1].charAt(0).toUpperCase() : "");
+  function initialsOf(name) {
+    var words = String(name || "?").split(/[\s._-]+/).filter(function (w) { return w.length; });
+    var a = (words[0] || "?").charAt(0).toUpperCase();
+    var b = words.length > 1 ? (words[1] || "").charAt(0).toUpperCase() : "";
+    return a + b;
   }
   function currentKind() {
     var h = location.hash || "";
@@ -331,8 +333,8 @@ var ICONS = {
         '<a class="button danger" href="mailto:support@steprotech.com">Contact support</a></div>';
     }
     if (s === "pastdue") {
-      return '<div class="hero-status warning"><span class="big-icon">' + icon("warning") + '</span><div><h2>Your renewal payment did not go through</h2><p>Retry before ' + esc(fmtDate(acc.paid_until)) + " to prevent your workspace from being switched off.</p></div>" +
-        '<button class="button warning" data-action="pay-now">Retry payment</button></div>';
+      return '<div class="hero-status warning"><span class="big-icon">' + icon("warning") + '</span><div><h2>Your renewal payment did not go through</h2><p>Renew before ' + esc(fmtDate(acc.paid_until)) + " to keep your workspace running.</p></div>" +
+        '<button class="button warning" data-action="pay-now">Renew now</button></div>';
     }
     if (s === "cancelled") {
       return '<div class="hero-status warning"><span class="big-icon">' + icon("warning") + '</span><div><h2>Your subscription is cancelled</h2><p>Your workspace remains available until the paid period ends on ' + esc(fmtDate(acc.paid_until)) + ".</p></div>" +
@@ -445,6 +447,10 @@ var ICONS = {
     }
     var addBtn = used < quota && acc && acc.subscription_status === "active"
       ? '<button class="button" data-action="add-workspace">' + icon("plus") + " Add workspace</button>" : "";
+    var subscribedNow = acc && acc.subscription_status === "active";
+    var emptyCopy = subscribedNow
+      ? "Your subscription is active. Add a workspace to start building automations."
+      : "Subscribe and provision to create your first workspace.";
     var listHtml = insts.length ? insts.map(function (i) {
       var st = i.locked ? "locked" : i.status;
       var badge = i.locked ? statusBadge("off", "Switched off")
@@ -458,7 +464,7 @@ var ICONS = {
         "<div><h3>" + esc(titleCase(i.stack_name)) + " workspace</h3><p>https://" + esc(i.domain) + "<br>Created " + esc(fmtDate(i.created_at)) + "</p></div>" +
         badge + action + "</article>";
     }).join("")
-      : '<div class="empty-state" style="min-height:240px"><div><h3>No workspaces yet</h3><p class="muted">Subscribe and provision to create your first workspace.</p></div></div>';
+      : '<div class="empty-state" style="min-height:240px"><div><h3>No workspaces yet</h3><p class="muted">' + esc(emptyCopy) + "</p></div></div>";
     return appLayout("customer", "My workspaces", "workspace",
       '<main class="page">' + pageHead("My workspaces", "Open, monitor, and request additional private automation workspaces.", '<div class="actions">' + addBtn + "</div>") +
       '<section class="card flush">' + listHtml + "</section>" + detail +
@@ -474,15 +480,27 @@ var ICONS = {
     var s = subscriptionState();
     var plans = state.plans;
     var sub = acc ? (acc.subscription_status || "none") : "none";
+    // Subscribed = account active AND nothing blocking the workspace. If the
+    // workspace is locked/expiring (even briefly before the sweep re-labels the
+    // account), the call-to-action must be Renew, never Already subscribed.
+    var subscribed = sub === "active" && s !== "expired" && s !== "pastdue" && s !== "cancelled";
+    var due = s === "pastdue" || s === "expired" || s === "cancelled" || sub === "locked" || sub === "past_due" || sub === "unpaid";
     var planCards = plans.map(function (p) {
       var activePlan = !!p.active;
       if (activePlan) {
-        var current = sub === "active";
+        var cta;
+        if (subscribed) {
+          cta = '<span class="plan-already">' + icon("check") + " Already subscribed</span>";
+        } else if (due) {
+          cta = '<button class="button warning" data-action="pay-now">Renew subscription</button>';
+        } else {
+          cta = '<button class="button" data-action="pay-now">Subscribe</button>';
+        }
         return '<article class="plan-card featured"><div class="eyebrow">Available now</div><h2>' + esc(p.name) + "</h2>" +
           '<div class="plan-price">' + esc(fmtMinor(p.amount_minor, p.currency)) + ' <span>per year</span></div>' +
           '<p class="muted">A private, managed n8n environment for your business automations.</p>' +
           '<ul class="feature-list">' + ["Your own private workspace", "Your own secure address", "Email support", "Automatic annual renewal"].map(function (f) { return "<li>" + icon("check") + "<span>" + esc(f) + "</span></li>"; }).join("") + "</ul>" +
-          '<button class="button" data-action="pay-now"' + (current ? " disabled" : "") + ">" + (current ? "Current plan" : "Subscribe") + "</button></article>";
+          cta + "</article>";
       }
       return '<article class="plan-card disabled"><span class="ribbon">Coming soon</span><div class="eyebrow">Future plan</div><h2>' + esc(p.name) + "</h2>" +
         '<div class="plan-price">' + esc(fmtMinor(p.amount_minor, p.currency)) + ' <span>per year</span></div>' +
@@ -663,7 +681,7 @@ var ICONS = {
             : a.subscription_status === "canceled" ? statusBadge("cancelled", "Cancelled")
             : statusBadge("pending", "No subscription");
           return "<tr data-account-row=\"" + a.id + "\">" +
-            '<td><div class="customer-cell"><span class="avatar">' + esc(initialsOf(a.username)) + "</span><span><strong>" + esc(a.display_name || cap(a.username)) + "</strong><span>" + esc(a.email) + "</span></span></div></td>" +
+            '<td><div class="customer-cell"><span class="avatar">' + esc(initialsOf(a.display_name || a.username)) + '</span><span class="cell-text"><strong>' + esc(a.display_name || cap(a.username)) + "</strong><span>" + esc(a.email) + "</span></span></div></td>" +
             "<td>" + esc(planName(a)) + "</td>" +
             "<td>" + badge + "</td>" +
             "<td>" + esc(fmtDate(a.paid_until)) + "</td>" +
@@ -1022,22 +1040,48 @@ var ICONS = {
 
   function markPaidModal(accountId) {
     var a = (state.adminAccounts || []).find(function (x) { return x.id === Number(accountId); });
+    var name = a ? (a.display_name || a.username) : "this customer";
+    var anchorUsed = false;
+    function d(v) {
+      return v.getFullYear() + "-" + String(v.getMonth() + 1).padStart(2, "0") + "-" + String(v.getDate()).padStart(2, "0");
+    }
+    // Defaults: keep the recorded paid dates when renewing, else today -> +1yr.
+    // When the account has no dates yet, try the NPM created_on anchor (the
+    // proxy host creation is the source of truth for when the service began):
+    // start = created_on, expiry = created_on + exactly one year.
     var now = new Date();
     var defFrom = a && a.paid_from ? new Date(Number(a.paid_from) * 1000) : now;
     var defUntil = a && a.paid_until ? new Date(Number(a.paid_until) * 1000)
       : new Date(now.getTime() + 365 * 86400000);
-    function d(v) {
-      return v.getFullYear() + "-" + String(v.getMonth() + 1).padStart(2, "0") + "-" + String(v.getDate()).padStart(2, "0");
+
+    function build() {
+      var note = anchorUsed
+        ? '<div class="banner" id="markpaid-anchor" style="margin:14px 0 0">' + icon("clock") + "<div><strong>Dates loaded from Nginx Proxy Manager</strong><br><span class=\"small\">The workspace proxy was created on the loaded start date, so expiry is exactly one year after it.</span></div></div>"
+        : "";
+      showModal(modalHeader("Mark " + esc(name) + " as paid") +
+        '<p class="muted">Record that this customer has paid, with the exact subscription dates. You can backdate the start when the customer already paid before being added here.</p>' +
+        '<div class="grid cols-2">' +
+        '<div class="field"><label>Subscription start</label><input id="paid-from" type="date" value="' + d(defFrom) + '"></div>' +
+        '<div class="field"><label>Expiry date</label><input id="paid-until" type="date" value="' + d(defUntil) + '"></div></div>' +
+        note +
+        '<div class="consequence safe" id="markpaid-note"><strong>What happens</strong><ul><li>Expiry in the future: account becomes active and a stopped workspace is switched on</li><li>Expiry already passed: recorded as unpaid and the workspace stays switched off</li></ul></div>' +
+        '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+        '<button class="button" data-confirm-mark-paid="' + accountId + '">' + icon("check") + " Mark as paid</button></div>");
     }
-    var name = a ? (a.display_name || a.username) : "this customer";
-    showModal(modalHeader("Mark " + esc(name) + " as paid") +
-      '<p class="muted">Record that this customer has paid, with the exact subscription dates. You can backdate the start when the customer already paid before being added here.</p>' +
-      '<div class="grid cols-2">' +
-      '<div class="field"><label>Subscription start</label><input id="paid-from" type="date" value="' + d(defFrom) + '"></div>' +
-      '<div class="field"><label>Expiry date</label><input id="paid-until" type="date" value="' + d(defUntil) + '"></div></div>' +
-      '<div class="consequence safe" id="markpaid-note"><strong>What happens</strong><ul><li>Expiry in the future: account becomes active and a stopped workspace is switched on</li><li>Expiry already passed: recorded as unpaid and the workspace stays switched off</li></ul></div>' +
-      '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
-      '<button class="button" data-confirm-mark-paid="' + accountId + '">' + icon("check") + " Mark as paid</button></div>");
+    // If the account has never been marked paid, look for the NPM anchor.
+    if (!(a && a.paid_until)) {
+      api("/admin/accounts/" + accountId + "/subscription-anchor").then(function (res) {
+        var anc = res && res.anchor;
+        if (anc && anc.start && anc.expiry) {
+          defFrom = new Date(anc.start + "T00:00:00");
+          defUntil = new Date(anc.expiry + "T23:59:59");
+          anchorUsed = true;
+        }
+        build();
+      }).catch(function () { build(); });
+    } else {
+      build();
+    }
   }
 
   function attachModal(accountId) {

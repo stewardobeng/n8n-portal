@@ -26,6 +26,7 @@
 
 import logging
 import time
+import datetime
 
 from .. import db
 from ..config import settings
@@ -244,6 +245,64 @@ def discover_unlinked_stacks(pc: PortainerClient | None = None,
     return found
 
 
+# ---------- NPM created_on subscription anchor (2026-09-02) ----------
+
+def npm_subscription_anchor(account_id: int) -> dict | None:
+    """Source-of-truth anchor for a pre-existing workspace: the NPM proxy
+    host's created_on is when the service actually began (Steward: "when you go
+    there you will see for each account when it was created there is a date...
+    the proxy itself"). Returns the start date and the expiry exactly one year
+    later, so mark-paid can preload real dates instead of guessing from today."""
+    inst = db.get_active_instance(account_id)
+    if not inst:
+        return None
+    npm_host_id = None
+    try:
+        npm_host_id = inst["npm_host_id"]
+    except (KeyError, IndexError):
+        npm_host_id = None
+    if not npm_host_id:
+        # fall back to matching by domain from the NPM list (id only)
+        try:
+            npm = NPMClient()
+            for h in npm.list_proxy_hosts():
+                names = h.get("domain_names") or []
+                domain = inst["domain"].rstrip("/")
+                if domain in [n.rstrip("/") for n in names]:
+                    npm_host_id = h.get("id")
+                    break
+        except Exception:
+            return None
+    if not npm_host_id:
+        return None
+    try:
+        host = NPMClient().get_proxy_host(int(npm_host_id))
+        created_on = host.get("created_on") or ""
+    except Exception as e:
+        log.warning("npm anchor: host %s lookup failed: %s", npm_host_id, e)
+        return None
+    if not created_on:
+        return None
+    # created_on format: 'YYYY-MM-DD HH:MM:SS' (NPM stores local server time)
+    try:
+        start = datetime.datetime.strptime(created_on[:10], "%Y-%m-%d")
+    except ValueError:
+        return None
+    # expiry = exactly one calendar year later; Feb 29 clamps to Feb 28 when
+    # the next year is not a leap year (same rule banks use for anniversaries)
+    try:
+        expiry = start.replace(year=start.year + 1)
+    except ValueError:
+        expiry = datetime.datetime(start.year + 1, 2, 28)
+    return {
+        "domain": inst["domain"],
+        "npm_host_id": int(npm_host_id),
+        "created_on": created_on,
+        "start": start.strftime("%Y-%m-%d"),
+        "expiry": expiry.strftime("%Y-%m-%d"),
+    }
+
+
 # ---------- attach ----------
 
 def attach_instance(account_id: int, environment_id: int, stack_name: str,
@@ -309,6 +368,21 @@ def attach_instance(account_id: int, environment_id: int, stack_name: str,
         log.info("attach: domain not found in NPM for %s:%s, assuming %s",
                  stack_name, actual_port, domain)
 
+    # Capture the NPM proxy-host id (if one exists for the domain) so later
+    # mark-paid can anchor the subscription start on the proxy host's created_on
+    # (Steward 2026-09-02: NPM proxy creation date = source of truth for when
+    # the service began; expiry = created_on + exactly one year).
+    npm_host_id: int | None = None
+    try:
+        npm = NPMClient()
+        for h in npm.list_proxy_hosts():
+            names = h.get("domain_names") or []
+            if domain in names or domain.rstrip("/") in [n.rstrip("/") for n in names]:
+                npm_host_id = h.get("id")
+                break
+    except Exception:
+        pass
+
     # environment display label: find the server number in the n8n pool
     env_label = f"env-{environment_id}"
     for i, srv in enumerate(_n8n_server_endpoints(pc), start=1):
@@ -331,6 +405,8 @@ def attach_instance(account_id: int, environment_id: int, stack_name: str,
         managed=0,
         status="healthy",
     )
+    if npm_host_id:
+        db.update_instance(instance_id, npm_host_id=npm_host_id)
     # Record the container's actual state: stopped stack -> locked=1 so the
     # unlock path (start) is the one that brings it back; running -> locked=0.
     running_now = bool(container and container.get("State") == "running")
@@ -364,6 +440,22 @@ def mark_paid(account_id: int, paid_until: int, paid_from: int | None = None,
     if not account:
         raise AdminOpsError("Account not found.")
     now = int(time.time())
+
+    # NPM created_on anchor (Steward 2026-09-02): when no dates are given AND
+    # the account has never been marked paid, the proxy-host creation date is
+    # the source of truth — start = created_on, expiry = + one calendar year.
+    if paid_from is None and paid_until <= 0:
+        anchor = npm_subscription_anchor(account_id)
+        if anchor and anchor["start"] and anchor["expiry"]:
+            paid_from = int(time.mktime(
+                datetime.datetime.strptime(anchor["start"], "%Y-%m-%d").timetuple()))
+            paid_until = int(time.mktime(
+                datetime.datetime.strptime(anchor["expiry"], "%Y-%m-%d").timetuple()))
+            log.info("mark-paid: anchored dates from NPM created_on %s -> %s",
+                     anchor["start"], anchor["expiry"])
+
+    if paid_until <= 0:
+        raise AdminOpsError("Expiry date is required.")
     if paid_until <= now:
         # backdating an already-expired subscription: record as expired/unpaid;
         # the sweep locks the instance on its next pass.

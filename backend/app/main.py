@@ -102,7 +102,7 @@ class AdminAttachIn(BaseModel):
 
 
 class AdminMarkPaidIn(BaseModel):
-    paid_until: int  # epoch seconds (expiry date)
+    paid_until: Optional[int] = None  # epoch seconds (expiry date); omit to auto-anchor on NPM created_on
     paid_from: Optional[int] = None  # epoch seconds (subscription start; backdating)
 
 
@@ -589,6 +589,23 @@ def admin_environments():
         raise HTTPException(502, f"Environment scan failed: {e}")
 
 
+@app.get("/api/v1/admin/accounts/{account_id}/subscription-anchor",
+         dependencies=[Depends(verify_admin)])
+def admin_subscription_anchor(account_id: int):
+    """NPM created_on anchor for an account's workspace: the proxy host's
+    creation date is the source of truth for when the service began, so
+    mark-paid can preload start = created_on and expiry = +1 year."""
+    if not db.get_account(account_id):
+        raise HTTPException(404, "Account not found.")
+    try:
+        anchor = admin_ops.npm_subscription_anchor(account_id)
+    except Exception as e:
+        raise HTTPException(502, f"Anchor lookup failed: {e}")
+    if not anchor:
+        return {"anchor": None}
+    return {"anchor": anchor}
+
+
 @app.post("/api/v1/admin/accounts", response_model=dict, status_code=201,
           dependencies=[Depends(verify_admin)])
 def admin_add_user(payload: AdminAddUserIn):
@@ -637,7 +654,7 @@ def admin_mark_paid(account_id: int, payload: AdminMarkPaidIn):
     Future expiry -> active + instance started if stopped; past expiry ->
     unpaid + instance stopped (backdated already-expired accounts)."""
     try:
-        result = admin_ops.mark_paid(account_id, payload.paid_until,
+        result = admin_ops.mark_paid(account_id, payload.paid_until or 0,
                                      payload.paid_from)
     except AdminOpsError as e:
         raise HTTPException(404, str(e))

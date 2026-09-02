@@ -42,6 +42,13 @@ class NPMClient:
     def list_proxy_hosts(self) -> list[dict]:
         return self._req("GET", "/nginx/proxy-hosts").json()
 
+    def get_proxy_host(self, host_id: int) -> dict:
+        """Single proxy host detail. IMPORTANT: only this endpoint returns the
+        host's creation timestamp (`created_on` 'YYYY-MM-DD HH:MM:SS'); the list
+        endpoint omits it (verified 2026-09-02). Used as the subscription start
+        anchor when admin marks a pre-existing workspace as paid."""
+        return self._req("GET", f"/nginx/proxy-hosts/{host_id}").json()
+
     def create_proxy_host(self, domain: str, forward_host: str, forward_port: int,
                           certificate_id: int | None = None) -> dict:
         payload = {
