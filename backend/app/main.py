@@ -21,7 +21,8 @@ from pydantic import BaseModel, EmailStr, Field
 
 from .config import settings
 from . import db
-from .services import provisioner, billing, access_gate
+from .services import provisioner, billing, access_gate, admin_ops
+from .services.admin_ops import AdminOpsError
 from .services.portainer_client import PortainerClient
 from .services.npm_client import NPMClient
 from .services.emailer import (send_welcome_credentials, send_reset_password,
@@ -82,8 +83,27 @@ class AccountOut(BaseModel):
     quota: int = 1
     subscription_status: str = "none"
     paid_until: Optional[int] = None
+    paid_from: Optional[int] = None
     created_at: int
     provisioned_at: Optional[int] = None
+
+
+class AdminAddUserIn(BaseModel):
+    email: EmailStr
+    first_name: str = Field(..., min_length=1, max_length=50)
+    last_name: str = Field(..., min_length=1, max_length=50)
+
+
+class AdminAttachIn(BaseModel):
+    environment_id: int
+    stack_name: str = Field(..., min_length=1, max_length=64)
+    port: int = Field(0, ge=0, le=65535)
+    domain: str = ""
+
+
+class AdminMarkPaidIn(BaseModel):
+    paid_until: int  # epoch seconds (expiry date)
+    paid_from: Optional[int] = None  # epoch seconds (subscription start; backdating)
 
 
 class ProvisionOut(BaseModel):
@@ -113,6 +133,7 @@ class InstanceStatusOut(BaseModel):
     domain: str
     status: str
     locked: int = 0
+    managed: int = 1
     error: Optional[str]
     created_at: int
 
@@ -194,6 +215,7 @@ def _account_to_out(a) -> AccountOut:
         quota=_row_get(a, "quota", 1),
         subscription_status=_row_get(a, "subscription_status", "none"),
         paid_until=_row_get(a, "paid_until"),
+        paid_from=_row_get(a, "paid_from"),
         created_at=a["created_at"], provisioned_at=a["provisioned_at"],
     )
 
@@ -204,6 +226,7 @@ def _instance_to_out(i) -> InstanceStatusOut:
         stack_id=i["stack_id"], environment_id=i["environment_id"],
         environment_name=i["environment_name"], port=i["port"], domain=i["domain"],
         status=i["status"], locked=_row_get(i, "locked", 0), error=i["error"],
+        managed=_row_get(i, "managed", 1),
         created_at=i["created_at"],
     )
 
@@ -549,6 +572,77 @@ def admin_sweep_expired():
         result = billing.sweep_expired()
     except Exception as e:
         raise HTTPException(502, str(e))
+    return result
+
+
+# ---------- admin-assisted operations (2026-09-02) ----------
+
+@app.get("/api/v1/admin/environments", dependencies=[Depends(verify_admin)])
+def admin_environments():
+    """Environment cards: display numbering (n8n Server 1..N), full server
+    names + IP, health, running stacks, linked accounts, storage."""
+    try:
+        return admin_ops.environment_overview()
+    except AdminOpsError as e:
+        raise HTTPException(422, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"Environment scan failed: {e}")
+
+
+@app.post("/api/v1/admin/accounts", response_model=dict, status_code=201,
+          dependencies=[Depends(verify_admin)])
+def admin_add_user(payload: AdminAddUserIn):
+    """Admin creates a portal user directly (no access gate): auto-generated
+    password, emailed. Account starts pending/unpaid; admin attaches an
+    instance + marks paid to complete onboarding."""
+    try:
+        result = admin_ops.admin_create_account(
+            str(payload.email), payload.first_name, payload.last_name)
+    except AdminOpsError as e:
+        raise HTTPException(409, str(e))
+    return result
+
+
+@app.get("/api/v1/admin/stacks/unlinked", dependencies=[Depends(verify_admin)])
+def admin_unlinked_stacks():
+    """n8n stacks (running or off) on the n8n servers not yet attached to any
+    portal account. Dropdown source for the attach action."""
+    try:
+        return admin_ops.discover_unlinked_stacks()
+    except Exception as e:
+        raise HTTPException(502, f"Stack discovery failed: {e}")
+
+
+@app.post("/api/v1/admin/accounts/{account_id}/attach", response_model=dict,
+          dependencies=[Depends(verify_admin)])
+def admin_attach(account_id: int, payload: AdminAttachIn):
+    """Bind an existing n8n stack to a portal account as its instance. The
+    stack must exist (running or stopped) on the given environment; the owner
+    password is untouched; nothing is started/stopped here."""
+    try:
+        result = admin_ops.attach_instance(
+            account_id, payload.environment_id, payload.stack_name,
+            payload.port, payload.domain)
+    except AdminOpsError as e:
+        raise HTTPException(409, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"Attach failed: {e}")
+    return result
+
+
+@app.post("/api/v1/admin/accounts/{account_id}/mark-paid", response_model=dict,
+          dependencies=[Depends(verify_admin)])
+def admin_mark_paid(account_id: int, payload: AdminMarkPaidIn):
+    """Admin records a subscription with custom dates (no payment gateway).
+    Future expiry -> active + instance started if stopped; past expiry ->
+    unpaid + instance stopped (backdated already-expired accounts)."""
+    try:
+        result = admin_ops.mark_paid(account_id, payload.paid_until,
+                                     payload.paid_from)
+    except AdminOpsError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"Mark-paid failed: {e}")
     return result
 
 

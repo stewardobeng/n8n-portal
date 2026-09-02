@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     subscription_id TEXT DEFAULT '',
     subscription_status TEXT DEFAULT 'none', -- none | active | past_due | unpaid | canceled | locked
     paid_until INTEGER,
+    paid_from INTEGER,               -- subscription start (admin mark-paid backdating)
     created_at INTEGER NOT NULL,
     provisioned_at INTEGER
 );
@@ -48,6 +49,8 @@ CREATE TABLE IF NOT EXISTS instances (
     status TEXT NOT NULL DEFAULT 'provisioning', -- provisioning | healthy | failed | deleted
     locked INTEGER NOT NULL DEFAULT 0,          -- 1 = access locked (unpaid)
     lock_secret TEXT DEFAULT '',                -- random owner pw while locked (for unlock)
+    container_id TEXT DEFAULT '',               -- fallback for admin-attached stacks w/o stack record
+    managed INTEGER NOT NULL DEFAULT 1,         -- 1 = portal-provisioned; 0 = admin-attached pre-existing
     error TEXT,
     created_at INTEGER NOT NULL,
     FOREIGN KEY (account_id) REFERENCES accounts(id)
@@ -111,6 +114,19 @@ def init_db(db_path: str | None = None) -> None:
         ):
             if c not in acols:
                 cur.execute(f"ALTER TABLE accounts ADD COLUMN {c} {ddl}")
+        # Migration: instances gained container_id + managed flag (admin-attached
+        # pre-existing stacks have no valid Portainer stack record / no managed
+        # basic-auth; lock/unlock falls back to container-level stop/start).
+        icols = [r[1] for r in cur.execute("PRAGMA table_info(instances)")]
+        if "container_id" not in icols:
+            cur.execute('ALTER TABLE instances ADD COLUMN container_id TEXT DEFAULT ""')
+        if "managed" not in icols:
+            cur.execute("ALTER TABLE instances ADD COLUMN managed INTEGER NOT NULL DEFAULT 1")
+        # Migration: accounts record the paid-from (subscription start) date for
+        # admin backdating (mark-paid with custom dates, 2026-09-02).
+        acols2 = [r[1] for r in cur.execute("PRAGMA table_info(accounts)")]
+        if "paid_from" not in acols2:
+            cur.execute("ALTER TABLE accounts ADD COLUMN paid_from INTEGER")
         conn.commit()
     finally:
         conn.close()
@@ -269,13 +285,14 @@ def set_subscription(account_id: int, stripe_customer_id: str = "",
 
 
 def update_subscription_status(account_id: int, status: str,
-                               paid_until: int | None = None) -> None:
+                               paid_until: int | None = None,
+                               paid_from: int | None = None) -> None:
     conn = get_conn()
     try:
         if paid_until is not None:
             conn.execute(
-                "UPDATE accounts SET subscription_status=?, paid_until=? WHERE id=?",
-                (status, paid_until, account_id),
+                "UPDATE accounts SET subscription_status=?, paid_until=?, paid_from=COALESCE(?, paid_from) WHERE id=?",
+                (status, paid_until, paid_from, account_id),
             )
         else:
             conn.execute(
@@ -299,15 +316,21 @@ def create_instance(
     basic_auth_user: str,
     basic_auth_password: str,
     n8n_encryption_key: str,
+    stack_id: int | None = None,
+    container_id: str = "",
+    managed: int = 1,
+    status: str = "provisioning",
 ) -> int:
     conn = get_conn()
     try:
         cur = conn.execute(
             "INSERT INTO instances (account_id, stack_name, environment_id, environment_name, "
-            "port, domain, basic_auth_user, basic_auth_password, n8n_encryption_key, status, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'provisioning', ?)",
+            "port, domain, basic_auth_user, basic_auth_password, n8n_encryption_key, "
+            "stack_id, container_id, managed, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (account_id, stack_name, environment_id, environment_name, port, domain,
-             basic_auth_user, basic_auth_password, n8n_encryption_key, now()),
+             basic_auth_user, basic_auth_password, n8n_encryption_key,
+             stack_id, container_id, managed, status, now()),
         )
         conn.commit()
         return cur.lastrowid

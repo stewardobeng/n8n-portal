@@ -174,17 +174,44 @@ def load_compose_template() -> str:
 
 # ---------- environment selection ----------
 
+def _count_n8n_running(client: PortainerClient, endpoint_id: int) -> int:
+    """Running n8n containers on an environment (load metric for placement)."""
+    try:
+        containers = client.list_containers(endpoint_id, all=True)
+    except Exception:
+        return 0
+    n = 0
+    for c in containers:
+        if c.get("State") == "running" and "n8n" in (c.get("Image") or ""):
+            n += 1
+    return n
+
+
 def resolve_landing_environment(client: PortainerClient) -> tuple[int, str]:
-    """Admin-configured landing env (comma-separated fallback order in DB setting
-    'landing_environments', e.g. '8,4,9'). Pick first healthy one."""
+    """Admin-configured landing env (comma-separated ids in DB setting
+    'landing_environments', e.g. '8,4,9'). Placement rule (Steward 2026-09-02):
+    * exactly one id -> that environment is the source of truth, always used;
+    * several ids -> the system auto-decides: least-loaded (fewest running n8n
+      containers) among the healthy ones; ties fall back to config order.
+    The UI presents the n8n servers (1..N) with checkboxes; single vs multi
+    selection maps directly onto these two behaviours."""
     raw = db.get_setting("landing_environments", default="8")  # default: n8n-cloud 2
     order = [int(x.strip()) for x in raw.split(",") if x.strip().isdigit()]
+    if not order:
+        raise ProvisionError("No landing environment configured.")
     endpoints = {e["Id"]: e for e in client.list_endpoints()}
-    for eid in order:
-        ep = endpoints.get(eid)
-        if ep and ep.get("Status") == 1:
-            return eid, ep.get("Name", f"env-{eid}")
-    raise ProvisionError("No landing environment is reachable.")
+    healthy = [(eid, endpoints[eid]) for eid in order
+               if eid in endpoints and endpoints[eid].get("Status") == 1]
+    if not healthy:
+        raise ProvisionError("No landing environment is reachable.")
+    if len(healthy) == 1:
+        eid, ep = healthy[0]
+        return eid, ep.get("Name", f"env-{eid}")
+    # auto-decide: least loaded
+    scored = [(eid, _count_n8n_running(client, eid)) for eid, _ in healthy]
+    scored.sort(key=lambda x: (x[1], order.index(x[0])))
+    eid = scored[0][0]
+    return eid, endpoints[eid].get("Name", f"env-{eid}")
 
 
 # ---------- rollback helpers ----------

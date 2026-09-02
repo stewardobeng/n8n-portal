@@ -19,6 +19,8 @@
     envOrder: [],         // ordered env ids from admin settings
     accountCache: {},     // admin: accountId -> {account, instances}
     requests: [],         // admin: access requests
+    adminEnvs: [],        // admin: n8n Server 1..N + health (GET /admin/environments)
+    unlinkedStacks: [],   // admin: attach candidates (GET /admin/stacks/unlinked)
     menuOpen: false,
     pollTimer: null,
     provisioningPw: null  // signup password held in-session for owner auto-create
@@ -591,6 +593,7 @@ var ICONS = {
         '<article class="card metric"><div class="metric-top"><span class="metric-icon" style="background:var(--slate-100);color:var(--slate-700)">' + icon("account") + "</span></div>" +
           '<div class="metric-value">' + total + '</div><p class="muted">Total customer accounts</p><a href="#/admin/accounts">View accounts ' + icon("arrow") + '</a></article>' +
       "</div>" +
+      envHealthCards() +
       '<div class="grid cols-3" style="margin-top:18px">' +
         '<section class="card flush span-2"><div class="card-head" style="padding:20px 20px 0"><h2>Access requests</h2><a class="button ghost small-btn" href="#/admin/requests">View all</a></div>' +
           '<div class="table-wrap"><table><thead><tr><th>Email</th><th>Status</th><th>Requested</th></tr></thead><tbody>' +
@@ -649,7 +652,8 @@ var ICONS = {
   function adminAccounts() {
     var accounts = state.adminAccounts || [];
     return appLayout("admin", "Accounts", "accounts",
-      '<main class="page">' + pageHead("Customer accounts", "Review subscriptions, quotas, and workspace availability.", '<a class="button" href="#/admin/requests">' + icon("plus") + " Review new requests</a>") +
+      '<main class="page">' + pageHead("Customer accounts", "Review subscriptions, quotas, and workspace availability.", '<div class="actions"><button class="button" data-action="admin-add-user">' + icon("plus") + " Add user</button>" +
+        '<a class="button secondary" href="#/admin/requests">' + icon("requests") + " New requests</a></div>") +
       '<section class="card flush"><div class="table-tools"><div class="search"><input id="account-search" type="search" placeholder="Search name, email, or username" aria-label="Search accounts"></div></div>' +
       '<div class="table-wrap"><table><thead><tr><th>Customer</th><th>Plan</th><th>Subscription</th><th>Period end</th><th>Quota</th><th></th></tr></thead><tbody>' +
         (accounts.length ? accounts.map(function (a) {
@@ -684,6 +688,8 @@ var ICONS = {
 
     return appLayout("admin", "Account details", "accounts",
       '<main class="page">' + pageHead(a.display_name || cap(a.username), esc(a.email) + " · " + esc(a.username), '<div class="actions">' +
+        '<button class="button secondary" data-action="admin-mark-paid" data-id="' + a.id + '">' + icon("check") + " Mark paid</button>" +
+        '<button class="button secondary" data-action="admin-attach" data-id="' + a.id + '">' + icon("workspace") + " Attach workspace</button>" +
         '<button class="button secondary" data-action="quota" data-id="' + a.id + '">Change quota</button>' +
         (sub === "locked" ? '<button class="button" data-action="admin-unlock" data-id="' + a.id + '">' + icon("check") + " Switch workspace on</button>"
                           : '<button class="button secondary" data-action="admin-lock" data-id="' + a.id + '">' + icon("warning") + " Switch workspace off</button>") +
@@ -696,6 +702,7 @@ var ICONS = {
         '<section class="card"><h2>Subscription</h2><dl class="info-list">' +
           '<div class="info-row"><dt>Plan</dt><dd>' + esc(planName(a)) + "</dd></div>" +
           '<div class="info-row"><dt>Status</dt><dd>' + esc(subLabel(sub)) + "</dd></div>" +
+          '<div class="info-row"><dt>Period start</dt><dd>' + esc(fmtDate(a.paid_from)) + "</dd></div>" +
           '<div class="info-row"><dt>Period end</dt><dd>' + esc(fmtDate(a.paid_until)) + "</dd></div>" +
           '<div class="info-row"><dt>Renewal</dt><dd>Automatic</dd></div></dl></section>' +
         '<section class="card"><div class="card-head"><h2>Quota</h2><strong>' + used + " / " + quota + "</strong></div>" +
@@ -711,14 +718,16 @@ var ICONS = {
             : i.status === "healthy" ? statusBadge("running", "Running")
             : i.status === "provisioning" ? statusBadge("provisioning", "Being set up")
             : i.status === "failed" ? statusBadge("failed", "Setup failed") : statusBadge("neutral", cap(i.status));
+          var attachedTag = i.managed === 0 ? ' <span class=\"status info\">Attached</span>' : "";
           return '<article class="workspace-item"><span class="workspace-logo">' + icon("workspace") + "</span>" +
-            "<div><h3>" + esc(titleCase(i.stack_name)) + " workspace</h3><p>" + esc(i.domain) + "<br>Env " + esc(i.environment_name || i.environment_id) + " · Port " + esc(i.port) + "</p></div>" +
+            "<div><h3>" + esc(titleCase(i.stack_name)) + " workspace" + attachedTag + "</h3><p>" + esc(i.domain) + "<br>Env " + esc(i.environment_name || i.environment_id) + " · Port " + esc(i.port) + (i.managed === 0 ? " · password unchanged" : "") + "</p></div>" +
             badge + '<button class="button secondary small-btn" data-action="workspace-actions" data-id="' + i.id + '" data-name="' + esc(i.stack_name) + '">Actions</button></article>';
         }).join("") : '<div class="empty-state" style="min-height:200px"><div><h3>No workspaces yet</h3><p class="muted">The customer has not provisioned a workspace.</p></div></div>') +
         "</div></section>" +
         '<section class="card"><h2>Subscription timeline</h2><div class="timeline">' +
           '<div class="timeline-item"><h3>Account created</h3><p>' + esc(fmtDate(a.created_at)) + "</p></div>" +
           (a.provisioned_at ? '<div class="timeline-item"><h3>Workspace provisioned</h3><p>' + esc(fmtDate(a.provisioned_at)) + "</p></div>" : "") +
+          (a.paid_from ? '<div class="timeline-item"><h3>Subscription started</h3><p>' + esc(fmtDate(a.paid_from)) + "</p></div>" : "") +
           '<div class="timeline-item"><h3>Period end</h3><p>' + esc(fmtDate(a.paid_until)) + "</p></div>" +
         "</div></section></div></main>");
   }
@@ -737,34 +746,72 @@ var ICONS = {
       "</div></main>");
   }
 
-  function settingsPage() {
-    var order = state.envOrder.length ? state.envOrder : [];
-    var rows = order.map(function (id, i) {
-      var ep = state.environmentList.find(function (e) { return String(e.id) === String(id); });
-      var name = ep ? ep.name : "Environment " + id;
-      var health = ep ? (ep.status === 1 ? "Healthy" : "Limited") : "Unknown";
-      var healthCls = ep && ep.status === 1 ? "success" : "warning";
-      return '<div class="server"><span class="drag">' + icon("drag") + '</span><strong>' + (i + 1) + "</strong>" +
-        "<div><strong>" + esc(name) + '</strong><div class="small muted">' + esc(id) + "</div></div>" +
-        '<div class="actions"><span class="status ' + healthCls + '">' + health + "</span>" +
-        '<span class="order-buttons">' +
-        '<button data-server-up="' + i + '" aria-label="Move up">' + icon("up") + '</button>' +
-        '<button data-server-down="' + i + '" aria-label="Move down">' + icon("down") + '</button></span></div></div>';
-    }).join("") || '<div class="empty-state" style="min-height:160px"><div><h3>No environments configured</h3><p class="muted">Add at least one environment id in the order list.</p></div></div>';
-    return appLayout("admin", "Settings", "settings",
-      '<main class="page">' + pageHead("Server environments", "Choose the order used when provisioning new customer workspaces.") +
-      '<div class="grid cols-3"><section class="card span-2"><div class="card-head"><div><h2>Environment priority</h2><p class="muted small" style="margin:4px 0 0">New workspaces use the first healthy environment in this list.</p></div>' +
-        '<button class="button" data-action="save-servers">Save preferences</button></div>' +
-        '<div class="server-list">' + rows + "</div></section>" +
-        '<aside class="card"><h2>Effective setting</h2><p class="muted">New workspaces currently use:</p>' +
-        (order[0] ? '<div class="banner success">' + icon("server") + "<div><strong>" + esc(envName(order[0])) + "</strong><br><span class=\"small\">First in the priority list</span></div></div>" : "") +
-        '<p class="small muted" style="margin-top:18px">Saved order: <strong>' + esc(order.join(", ")) + "</strong></p>" +
-        '<p class="small muted">Environment names come from Portainer. Status 1 = reachable.</p></aside></div></main>');
+
+  function envLabel(e) {
+    if (!e) return "Environment";
+    return String(e.display_name || ("n8n Server " + e.display_no) || e.name || e.endpoint_id);
+  }
+  function envServerLabel(e) {
+    if (!e) return "";
+    return envLabel(e) + " - " + (e.name || "") + (e.ip ? " (" + e.ip + ")" : "");
+  }
+  function fmtBytes(n) {
+    if (!n && n !== 0) return "-";
+    var b = Number(n);
+    if (b >= 1073741824) return (b / 1073741824).toFixed(1) + " GB";
+    if (b >= 1048576) return (b / 1048576).toFixed(0) + " MB";
+    if (b >= 1024) return (b / 1024).toFixed(0) + " KB";
+    return b + " B";
+  }
+  function envHealthCards() {
+    var envs = state.adminEnvs || [];
+    if (!envs.length) return "";
+    return '<section class="card flush" style="margin-top:18px"><div class="card-head" style="padding:20px 20px 0"><h2>Server environments</h2><a class="button ghost small-btn" href="#/admin/settings">Manage</a></div>' +
+      '<div class="grid cols-3" style="padding:14px 20px 20px">' +
+      envs.map(function (e) {
+        var dot = e.reachable ? statusBadge("healthy", "Reachable") : statusBadge("failed", "Unreachable");
+        return '<article class="env-card"><div class="env-card-head"><span class="env-badge">' + esc(e.display_no || "") + "</span>" +
+          "<div><strong>" + esc(e.name || "Server") + '</strong><div class="small muted">' + esc(e.ip || "") + "</div></div>" +
+          dot + "</div>" +
+          '<div class="env-stats">' +
+          statCell("Running", String(e.running_n8n)) +
+          statCell("Storage", fmtBytes(e.storage_bytes)) +
+          statCell("Linked", String(e.linked_accounts)) +
+          statCell("Unlinked", String(e.unlinked_stacks)) +
+          "</div></article>";
+      }).join("") +
+      "</div></section>";
+  }
+  function statCell(label, value) {
+    return '<div class="env-stat"><strong>' + esc(value) + '</strong><span class="small muted">' + esc(label) + "</span></div>";
   }
 
-  function envName(id) {
-    var ep = state.environmentList.find(function (e) { return String(e.id) === String(id); });
-    return ep ? ep.name : "Environment " + id;
+  function settingsPage() {
+    var envs = state.adminEnvs && state.adminEnvs.length ? state.adminEnvs : [];
+    var order = state.envOrder.length ? state.envOrder : [];
+    var single = order.length === 1;
+    var rows = envs.map(function (e) {
+      var id = String(e.endpoint_id);
+      var checked = order.indexOf(id) !== -1 ? " checked" : "";
+      var dot = e.reachable ? "Reachable" : "Unreachable";
+      var dotCls = e.reachable ? "success" : "warning";
+      return '<label class="env-check"><input type="checkbox" value="' + esc(id) + '" data-env-check' + checked + '>' +
+        '<span class="check-ui"></span><span class="env-badge">' + esc(e.display_no || "") + "</span>" +
+        "<span><strong>" + esc(e.name || "Server") + '</strong><span class="small muted">' + esc(e.ip || "") +
+        ' - <span class="status ' + dotCls + '">' + dot + "</span></span></span>" +
+        '<span class="small muted">' + e.running_n8n + " running, " + esc(fmtBytes(e.storage_bytes)) + "</span></label>";
+    }).join("") || '<div class="empty-state" style="min-height:160px"><div><h3>No environments found</h3><p class="muted">The n8n servers could not be listed right now.</p></div></div>';
+    return appLayout("admin", "Settings", "settings",
+      '<main class="page">' + pageHead("Server environments", "Choose where new customer workspaces are created.", '<button class="button" data-action="save-servers">' + icon("check") + " Save selection</button>") +
+      '<div class="grid cols-3"><section class="card span-2"><div class="card-head"><div><h2>Available servers</h2><p class="muted small" style="margin:4px 0 0">Only the n8n servers are listed here. The local control host is never used for customer workspaces.</p></div></div>' +
+      '<div class="server-list env-check-list">' + rows + "</div></section>" +
+      '<aside class="card"><h2>Placement rule</h2>' +
+      '<div class="banner" style="margin-bottom:14px">' + icon("server") +
+      '<div><strong>One server selected</strong><br><span class="small">Every new workspace goes to that server. It is the source of truth.</span></div></div>' +
+      '<div class="banner">' + icon("spark") +
+      '<div><strong>Several servers selected</strong><br><span class="small">The system auto-selects the least loaded healthy server for each new workspace.</span></div></div>' +
+      '<p class="small muted" style="margin-top:18px">Saved ids: <strong>' + esc(order.join(", ") || "(none)") + "</strong></p>" +
+      '<p class="small muted">Running counts and storage refresh each time this page loads.</p></aside></div></main>');
   }
 
   /* ================= router ================= */
@@ -821,7 +868,7 @@ var ICONS = {
     function after() {
       if (done) return;
       done = true;
-      if (!routeChanged(route) && dataSig() !== sigBefore) render();
+      if (!routeChanged(route) && dataSig() !== sigBefore && !modalRoot.children.length) render();
     }
     if (parts[0] === "customer") { refreshSession().then(after); }
     else if (parts[0] === "admin" && route !== "/admin/signin") { refreshAdminData().then(after); }
@@ -853,10 +900,12 @@ var ICONS = {
     var r = state.requests ? JSON.stringify(state.requests) : "";
     var e = state.envOrder.join(",");
     var p = state.plans ? JSON.stringify(state.plans) : "";
+    var ev = state.adminEnvs ? JSON.stringify(state.adminEnvs) : "";
+    var ul = state.unlinkedStacks ? JSON.stringify(state.unlinkedStacks) : "";
     var route = (location.hash || "").slice(1);
     var m = route.match(/^\/admin\/account\/(\d+)$/);
     var d = m && state.accountCache[m[1]] ? JSON.stringify(state.accountCache[m[1]]) : "";
-    return c + "|" + a + "|" + r + "|" + e + "|" + p + "|" + d;
+    return c + "|" + a + "|" + r + "|" + e + "|" + p + "|" + d + "|" + ev + "|" + ul;
   }
 
   async function refreshSession() {
@@ -900,6 +949,7 @@ var ICONS = {
       if (!state.environmentList.length) {
         try { state.environmentList = await api("/environments"); } catch (e) { state.environmentList = []; }
       }
+      try { state.adminEnvs = await api("/admin/environments"); } catch (e) { state.adminEnvs = []; }
     } catch (e) {
       if (e.status === 401) { localStorage.removeItem("admin_token"); state.adminAuthed = false; showToast("Admin session ended", "Please sign in again."); navigate("/admin/signin"); }
     }
@@ -958,6 +1008,66 @@ var ICONS = {
       '<button class="button" style="margin-top:22px" data-action="close-modal">Done</button></div>');
   }
 
+  function adminAddUserModal() {
+    showModal(modalHeader("Add a user") +
+      '<p class="muted">Create a portal account directly. A temporary password is generated and emailed to the person. They skip the access-request steps entirely.</p>' +
+      '<form data-form="admin-add-user"><div class="grid cols-2">' +
+      '<div class="field"><label>First name</label><input name="first_name" required maxlength="50"></div>' +
+      '<div class="field"><label>Last name</label><input name="last_name" required maxlength="50"></div></div>' +
+      '<div class="field"><label>Email</label><input name="email" type="email" required></div>' +
+      '<div class="consequence safe"><strong>What happens</strong><ul><li>An account is created as unpaid / pending</li><li>A temporary portal password is generated and emailed</li><li>You then attach a workspace and mark the account paid</li></ul></div>' +
+      '<div class="actions end"><button type="button" class="button secondary" data-action="close-modal">Cancel</button>' +
+      '<button class="button" type="submit">Create user</button></div></form>');
+  }
+
+  function markPaidModal(accountId) {
+    var a = (state.adminAccounts || []).find(function (x) { return x.id === Number(accountId); });
+    var now = new Date();
+    var defFrom = a && a.paid_from ? new Date(Number(a.paid_from) * 1000) : now;
+    var defUntil = a && a.paid_until ? new Date(Number(a.paid_until) * 1000)
+      : new Date(now.getTime() + 365 * 86400000);
+    function d(v) {
+      return v.getFullYear() + "-" + String(v.getMonth() + 1).padStart(2, "0") + "-" + String(v.getDate()).padStart(2, "0");
+    }
+    var name = a ? (a.display_name || a.username) : "this customer";
+    showModal(modalHeader("Mark " + esc(name) + " as paid") +
+      '<p class="muted">Record that this customer has paid, with the exact subscription dates. You can backdate the start when the customer already paid before being added here.</p>' +
+      '<div class="grid cols-2">' +
+      '<div class="field"><label>Subscription start</label><input id="paid-from" type="date" value="' + d(defFrom) + '"></div>' +
+      '<div class="field"><label>Expiry date</label><input id="paid-until" type="date" value="' + d(defUntil) + '"></div></div>' +
+      '<div class="consequence safe" id="markpaid-note"><strong>What happens</strong><ul><li>Expiry in the future: account becomes active and a stopped workspace is switched on</li><li>Expiry already passed: recorded as unpaid and the workspace stays switched off</li></ul></div>' +
+      '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+      '<button class="button" data-confirm-mark-paid="' + accountId + '">' + icon("check") + " Mark as paid</button></div>");
+  }
+
+  function attachModal(accountId) {
+    var a = (state.adminAccounts || []).find(function (x) { return x.id === Number(accountId); });
+    var name = a ? (a.display_name || a.username) : "this customer";
+    var stacks = (state.unlinkedStacks || []);
+    var byEnv = {};
+    stacks.forEach(function (st) {
+      (byEnv[st.environment_id] = byEnv[st.environment_id] || []).push(st);
+    });
+    var envNames = {};
+    (state.adminEnvs || []).forEach(function (e) { envNames[e.endpoint_id] = e; });
+    var options = stacks.map(function (st) {
+      var env = envNames[st.environment_id];
+      var label = (env ? envLabel(env) : "env-" + st.environment_id) + " - " + st.stack_name +
+        (st.domain ? " (" + st.domain + ")" : "") + (st.running ? "" : " [off]");
+      return '<option value="' + esc(st.stack_name) + '" data-env="' + st.environment_id + '" data-port="' + (st.port || 0) + '" data-domain="' + esc(st.domain || "") + '">' + esc(label) + "</option>";
+    }).join("");
+    showModal(modalHeader("Attach a workspace to " + esc(name)) +
+      '<p class="muted">Link an existing n8n workspace that is not yet attached to any portal account. The workspace password stays exactly as it is.</p>' +
+      (stacks.length
+        ? '<div class="field"><label>Existing workspace</label><select id="attach-stack">' + options + "</select>" +
+          '<span class="hint">Workspaces that are off are included. Workspaces already attached to an account are hidden.</span></div>' +
+          '<div class="consequence safe"><strong>What happens</strong><ul><li>The workspace is bound to this account (running or off)</li><li>Nothing is started or stopped and the password is untouched</li><li>Mark the account paid afterwards to activate the subscription</li></ul></div>' +
+          '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+          '<button class="button" data-confirm-attach="' + accountId + '">Attach workspace</button></div>'
+        : '<div class="empty-state" style="min-height:160px"><div><h3>No unattached workspaces</h3><p class="muted">Every known n8n workspace is already linked to an account.</p></div></div>' +
+          '<div class="actions end"><button class="button secondary" data-action="close-modal">Close</button></div>'));
+  }
+
   function workspaceActionsModal(inst) {
     var name = inst ? titleCase(inst.stack_name) : "Workspace";
     var domain = inst ? inst.domain : "";
@@ -967,7 +1077,10 @@ var ICONS = {
       (inst && inst.locked
         ? '<button class="button secondary" data-action="unlock-workspace" data-id="' + inst.id + '">' + icon("check") + " Switch workspace on</button>"
         : '<button class="button secondary" data-action="lock-workspace" data-id="' + inst.id + '">' + icon("warning") + " Switch workspace off</button>") +
-      '<button class="button secondary" data-action="reset-password" data-id="' + inst.id + '">' + icon("lock") + " Reset workspace password</button></div>");
+      (inst && inst.managed === 0
+        ? '<button class="button secondary" data-action="workspace-detail" data-id="' + inst.id + '">' + icon("server") + " View details</button>"
+        : '<button class="button secondary" data-action="reset-password" data-id="' + inst.id + '">' + icon("lock") + " Reset workspace password</button>") +
+      "</div>");
   }
 
   function confirmLock(instanceId) {
@@ -1113,7 +1226,8 @@ var ICONS = {
       var action = act && act.dataset.action;
 
       if (action === "menu") { state.menuOpen = !state.menuOpen; render(); }
-      else if (action === "close-modal") closeModal();
+      else if (action === "close-modal" &&
+               (event.target === act || !act.classList.contains("modal-backdrop"))) closeModal();
       else if (action === "signout") { localStorage.removeItem("portal_token"); state.session = null; state.provisioningPw = null; stopPolling(); showToast("Signed out", "You have been signed out of the portal."); navigate("/entry"); }
       else if (action === "signout-route") {
         if (currentKind() === "admin") {
@@ -1155,6 +1269,25 @@ var ICONS = {
         showModal(modalHeader("Switch workspace on?") + "<p>Restore the customer workspace and automations.</p>" +
           '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
           '<button class="button" data-confirm-account-unlock="' + act.dataset.id + '">Confirm switch on</button></div>');
+      }
+      else if (action === "admin-add-user") { adminAddUserModal(); }
+      else if (action === "admin-mark-paid") { markPaidModal(act.dataset.id); }
+      else if (action === "admin-attach") {
+        var attId = act.dataset.id;
+        (async function () {
+          try {
+            state.unlinkedStacks = await api("/admin/stacks/unlinked");
+          } catch (e) { state.unlinkedStacks = []; }
+          attachModal(attId);
+        })();
+      }
+      else if (action === "after-add-attach") {
+        closeModal();
+        var aaId = act.dataset.id;
+        (async function () {
+          try { state.unlinkedStacks = await api("/admin/stacks/unlinked"); } catch (e) { state.unlinkedStacks = []; }
+          attachModal(aaId);
+        })();
       }
       else if (action === "workspace-actions") {
         var accId = null;
@@ -1198,8 +1331,15 @@ var ICONS = {
       else if (action === "save-servers") {
         (async function () {
           try {
-            await api("/admin/settings", { method: "PUT", body: { landing_environments: state.envOrder.join(",") } });
-            showToast("Preferences saved", "Environment priority updated.");
+            var checks = Array.prototype.slice.call(document.querySelectorAll("[data-env-check]"));
+            var picked = checks.filter(function (c) { return c.checked; }).map(function (c) { return c.value; });
+            if (!picked.length) { showToast("Select a server", "Pick at least one n8n server for new workspaces."); return; }
+            state.envOrder = picked;
+            await api("/admin/settings", { method: "PUT", body: { landing_environments: picked.join(",") } });
+            showToast("Selection saved", picked.length === 1
+              ? "Every new workspace will be created on the selected server."
+              : "New workspaces are auto-placed on the least loaded selected server.");
+            render();
           } catch (err) { showToast("Save failed", err.message); }
         })();
       }
@@ -1275,6 +1415,42 @@ var ICONS = {
           } catch (err) { showToast("Quota update failed", err.message); }
         })();
       }
+      var cMarkPaid = event.target.closest("[data-confirm-mark-paid]");
+      if (cMarkPaid) {
+        var mpId = cMarkPaid.dataset.confirmMarkPaid;
+        var paidFrom = (document.getElementById("paid-from") || {}).value;
+        var paidUntil = (document.getElementById("paid-until") || {}).value;
+        function toEpoch(dateStr) { var d = new Date(dateStr + "T23:59:59"); return Math.floor(d.getTime() / 1000); }
+        if (!paidFrom || !paidUntil) { showToast("Dates required", "Pick both the start and expiry dates."); return; }
+        var until = toEpoch(paidUntil);
+        var from = toEpoch(paidFrom);
+        closeModal();
+        (async function () {
+          try {
+            var data = await api("/admin/accounts/" + mpId + "/mark-paid", { method: "POST", body: { paid_until: until, paid_from: from } });
+            showToast(data.subscription_status === "active" ? "Marked as paid" : "Recorded as expired",
+              data.subscription_status === "active" ? "Subscription active until " + fmtDate(until) + "." : "Expiry was in the past; the workspace stays off.");
+            refreshAdminData();
+          } catch (err) { showToast("Mark-paid failed", err.message); }
+        })();
+      }
+      var cAttach = event.target.closest("[data-confirm-attach]");
+      if (cAttach) {
+        var atId = cAttach.dataset.confirmAttach;
+        var sel = document.getElementById("attach-stack");
+        var opt = sel ? sel.options[sel.selectedIndex] : null;
+        if (!opt) return;
+        var payload = { environment_id: Number(opt.dataset.env), stack_name: opt.value, port: Number(opt.dataset.port || 0), domain: opt.dataset.domain || "" };
+        closeModal();
+        (async function () {
+          try {
+            var data = await api("/admin/accounts/" + atId + "/attach", { method: "POST", body: payload });
+            showToast("Workspace attached", data.stack_name + " is now linked to this account (" + (data.running ? "running" : "off") + ").");
+            state.unlinkedStacks = [];
+            refreshAdminData();
+          } catch (err) { showToast("Attach failed", err.message); }
+        })();
+      }
       var cAccountLock = event.target.closest("[data-confirm-account-lock]");
       if (cAccountLock) {
         closeModal();
@@ -1301,11 +1477,7 @@ var ICONS = {
       var filter = event.target.closest("[data-filter]");
       if (filter) { state.accessFilter = filter.dataset.filter; render(); }
 
-      /* server reorder */
-      var up = event.target.closest("[data-server-up]");
-      if (up) { moveEnv(Number(up.dataset.serverUp), -1); }
-      var down = event.target.closest("[data-server-down]");
-      if (down) { moveEnv(Number(down.dataset.serverDown), 1); }
+      /* (server reorder removed - placement is now checkbox selection) */
     });
 
     document.addEventListener("input", function (event) {
@@ -1335,7 +1507,29 @@ var ICONS = {
       event.preventDefault();
       var type = form.dataset.form;
 
-      if (type === "entry") {
+      if (type === "admin-add-user") {
+        var fd = new FormData(form);
+        var fname = String(fd.get("first_name") || "").trim();
+        var lname = String(fd.get("last_name") || "").trim();
+        var email = String(fd.get("email") || "").trim().toLowerCase();
+        if (!fname || !lname || !email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { showToast("Check the details", "First name, last name and a valid email are required."); return; }
+        (async function () {
+          try {
+            var data = await api("/admin/accounts", { method: "POST", body: { email: email, first_name: fname, last_name: lname } });
+            closeModal();
+            showModal('<div class="center-state"><div class="state-orb success">' + icon("check") + '</div><h2 id="modal-title">User created</h2>' +
+              '<p class="muted">' + esc(email) + " now has a portal account (unpaid / pending).</p>" +
+              '<div class="card" style="margin:22px 0"><div class="eyebrow">Temporary password</div>' +
+              '<div class="mono" style="font-size:1.4rem;letter-spacing:.12em;font-weight:800;margin:8px 0">' + esc(data.password_once || "") + "</div>" +
+              '<button class="button secondary small-btn" data-action="copy-code" data-code="' + esc(data.password_once || "") + '">' + icon("copy") + " Copy password</button></div>" +
+              '<div class="banner success" style="text-align:left">' + icon("check") + "<div><strong>Password emailed</strong><br><span class=\"small\">The same password was sent to the new user's inbox.</span></div></div>" +
+              '<div class="actions" style="margin-top:20px"><button class="button secondary" data-action="after-add-attach" data-id="' + data.account_id + '">Attach workspace</button>' +
+              '<button class="button" data-action="close-modal">Done</button></div></div>');
+            refreshAdminData();
+          } catch (err) { showToast("Could not create user", err.message); }
+        })();
+      }
+      else if (type === "entry") {
         var email = String(new FormData(form).get("email") || "").trim().toLowerCase();
         if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { showToast("Check your email", "Enter a valid email address."); return; }
         state.gateEmail = email;
@@ -1408,13 +1602,6 @@ var ICONS = {
         });
       }
     });
-  }
-
-  function moveEnv(i, delta) {
-    var j = i + delta;
-    if (j < 0 || j >= state.envOrder.length) return;
-    var tmp = state.envOrder[i]; state.envOrder[i] = state.envOrder[j]; state.envOrder[j] = tmp;
-    render();
   }
 
   function findInstanceById(id) {

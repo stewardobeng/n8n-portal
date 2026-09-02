@@ -184,7 +184,9 @@ def sweep_expired() -> dict:
 
 def lock_instance(account_id: int) -> bool:
     """STOP the tenant's stack so nothing is reachable (no login, no
-    forgot-password, no API). Absolute lock, per Steward 2026-09-01."""
+    forgot-password, no API). Absolute lock, per Steward 2026-09-01.
+    Admin-attached stacks (managed=0, no Portainer stack record) are stopped at
+    the container level via their recorded container_id (2026-09-02)."""
     from .portainer_client import PortainerClient
 
     inst = db.get_active_instance(account_id)
@@ -193,9 +195,12 @@ def lock_instance(account_id: int) -> bool:
         return False
     if inst["locked"]:
         return True  # already locked
+    pc = PortainerClient()
     try:
-        pc = PortainerClient()
-        pc.stop_stack(inst["stack_id"], inst["environment_id"])
+        if inst["managed"] == 0 and inst["container_id"]:
+            pc.stop_container(inst["environment_id"], inst["container_id"])
+        else:
+            pc.stop_stack(inst["stack_id"], inst["environment_id"])
     except Exception as e:
         log.error("lock: stop failed for %s: %s", inst["stack_name"], e)
         return False
@@ -214,9 +219,12 @@ def unlock_instance(account_id: int) -> bool:
         return False
     if not inst["locked"]:
         return True  # already unlocked
+    pc = PortainerClient()
     try:
-        pc = PortainerClient()
-        pc.start_stack(inst["stack_id"], inst["environment_id"])
+        if inst["managed"] == 0 and inst["container_id"]:
+            pc.start_container(inst["environment_id"], inst["container_id"])
+        else:
+            pc.start_stack(inst["stack_id"], inst["environment_id"])
     except Exception as e:
         log.error("unlock: start failed for %s: %s", inst["stack_name"], e)
         return False
