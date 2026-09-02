@@ -84,8 +84,14 @@ class AccountOut(BaseModel):
     subscription_status: str = "none"
     paid_until: Optional[int] = None
     paid_from: Optional[int] = None
+    account_state: str = "active"  # active | suspended | archived
     created_at: int
     provisioned_at: Optional[int] = None
+
+
+class AdminSetAccountStateIn(BaseModel):
+    # action: suspend | unsuspend | archive | restore
+    action: str = Field(..., pattern="^(suspend|unsuspend|archive|restore)$")
 
 
 class AdminAddUserIn(BaseModel):
@@ -216,6 +222,7 @@ def _account_to_out(a) -> AccountOut:
         subscription_status=_row_get(a, "subscription_status", "none"),
         paid_until=_row_get(a, "paid_until"),
         paid_from=_row_get(a, "paid_from"),
+        account_state=_row_get(a, "account_state", "active"),
         created_at=a["created_at"], provisioned_at=a["provisioned_at"],
     )
 
@@ -260,13 +267,20 @@ def access_check(payload: AccessCheckIn):
 
 @app.post("/api/v1/auth/login", response_model=LoginOut)
 def client_login(payload: LoginIn):
-    """Returning-user login: email + password -> portal session token."""
+    """Returning-user login: email + password -> portal session token.
+    Suspended/archived accounts are blocked (admin lifecycle, 2026-09-02)."""
     email = str(payload.email).lower()
     account = db.get_account_by_email(email)
     if not account:
         raise HTTPException(404, "No account for this email.")
     if not verify_password(payload.password, account["password_hash"] or ""):
         raise HTTPException(401, "Invalid email or password.")
+    if _row_get(account, "account_state", "active") != "active":
+        raise HTTPException(
+            403,
+            "This account is " + _row_get(account, "account_state", "active") +
+            ". Contact support for help.",
+        )
     return LoginOut(
         token=create_client_token(account["id"]),
         account=_account_to_out(account),
@@ -281,12 +295,19 @@ def verify_access_token(payload: TokenVerifyIn):
     return AccessCheckOut(action="verified", email=str(payload.email).lower())
 
 
-@app.get("/api/v1/me", dependencies=[Depends(verify_client)], response_model=dict)
+@app.get("/api/v1/me", dependencies=[Depends(verify_client)])
 def me(account_id: int = Depends(verify_client)):
-    """Current signed-in account + instances (portal dashboard)."""
+    """Current signed-in account + instances (portal dashboard).
+    Suspended/archived accounts are cut off even with a valid session token."""
     account = db.get_account(account_id)
     if not account:
         raise HTTPException(404, "Account not found.")
+    if _row_get(account, "account_state", "active") != "active":
+        raise HTTPException(
+            403,
+            "This account is " + _row_get(account, "account_state", "active") +
+            ". Contact support for help.",
+        )
     instances = db.list_instances(account_id)
     return {
         "account": _account_to_out(account).model_dump(),
@@ -482,8 +503,16 @@ def put_admin_settings(payload: AdminSettingsIn):
 
 
 @app.get("/api/v1/admin/accounts", dependencies=[Depends(verify_admin)])
-def admin_accounts():
-    return [_account_to_out(a).model_dump() for a in db.list_accounts()]
+def admin_accounts(include_archived: int = 0):
+    """All accounts. Archived are excluded by default; pass include_archived=1
+    to list them too (the admin Archive page uses this for restore)."""
+    out = []
+    for a in db.list_accounts():
+        state = _row_get(a, "account_state", "active")
+        if state == "archived" and not include_archived:
+            continue
+        out.append(_account_to_out(a).model_dump())
+    return out
 
 
 @app.get("/api/v1/admin/access-requests", dependencies=[Depends(verify_admin)])
@@ -660,6 +689,27 @@ def admin_mark_paid(account_id: int, payload: AdminMarkPaidIn):
         raise HTTPException(404, str(e))
     except Exception as e:
         raise HTTPException(502, f"Mark-paid failed: {e}")
+    return result
+
+
+@app.post("/api/v1/admin/accounts/{account_id}/state", response_model=dict,
+          dependencies=[Depends(verify_admin)])
+def admin_set_account_state(account_id: int, payload: AdminSetAccountStateIn):
+    """Admin lifecycle: suspend | unsuspend | archive | restore (2026-09-02).
+    suspend/archive STOP the attached workspace immediately and block portal
+    login. Nothing is ever permanently deleted; restore lands in suspended."""
+    actions = {
+        "suspend": admin_ops.suspend_account,
+        "unsuspend": admin_ops.unsuspend_account,
+        "archive": admin_ops.archive_account,
+        "restore": admin_ops.restore_account,
+    }
+    try:
+        result = actions[payload.action](account_id)
+    except AdminOpsError as e:
+        raise HTTPException(409, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"State change failed: {e}")
     return result
 
 

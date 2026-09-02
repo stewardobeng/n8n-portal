@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     subscription_status TEXT DEFAULT 'none', -- none | active | past_due | unpaid | canceled | locked
     paid_until INTEGER,
     paid_from INTEGER,               -- subscription start (admin mark-paid backdating)
+    account_state TEXT NOT NULL DEFAULT 'active', -- active | suspended | archived (admin lifecycle)
     created_at INTEGER NOT NULL,
     provisioned_at INTEGER
 );
@@ -127,6 +128,14 @@ def init_db(db_path: str | None = None) -> None:
         acols2 = [r[1] for r in cur.execute("PRAGMA table_info(accounts)")]
         if "paid_from" not in acols2:
             cur.execute("ALTER TABLE accounts ADD COLUMN paid_from INTEGER")
+        # Migration: account lifecycle state for admin suspend/archive (2026-09-02).
+        # Separate from provisioning `status` (pending/provisioned/failed):
+        #   active     -> normal operation
+        #   suspended  -> admin hold; workspace stopped immediately, login blocked
+        #   archived   -> soft-delete; hidden from the portal, workspace stays off
+        acols3 = [r[1] for r in cur.execute("PRAGMA table_info(accounts)")]
+        if "account_state" not in acols3:
+            cur.execute('ALTER TABLE accounts ADD COLUMN account_state TEXT NOT NULL DEFAULT "active"')
         conn.commit()
     finally:
         conn.close()
@@ -247,6 +256,24 @@ def set_account_quota(account_id: int, quota: int) -> None:
         conn.execute(
             "UPDATE accounts SET quota = ? WHERE id = ?",
             (max(1, quota), account_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_account_state(account_id: int, state: str) -> None:
+    """Admin lifecycle state: active | suspended | archived (2026-09-02).
+    Suspension/archival stops the workspace and blocks portal access;
+    restore returns the state to active (workspace stays stopped until
+    explicitly unlocked or renewed)."""
+    if state not in ("active", "suspended", "archived"):
+        raise ValueError(f"Invalid account state: {state}")
+    conn = get_conn()
+    try:
+        conn.execute(
+            "UPDATE accounts SET account_state = ? WHERE id = ?",
+            (state, account_id),
         )
         conn.commit()
     finally:

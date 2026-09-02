@@ -169,6 +169,13 @@ def _on_charge_success(data: dict) -> dict:
     account = _account_from_data(data)
     if not account:
         raise PaystackError("charge.success for unknown account.")
+    if billing._row_get(account, "account_state", "active") != "active":
+        # Admin suspension/archive outranks payment: acknowledge the money but
+        # do NOT reactivate or restart the workspace.
+        log.warning(
+            "Paystack charge.success for %s account %s; NOT reactivating (admin state)",
+            billing._row_get(account, "account_state", "active"), account["id"])
+        return {"status": "ignored_suspended", "account_id": account["id"]}
     # annual: paid_until = now + 1 year (Paystack renews yearly on the plan)
     paid_until = int(time.time()) + 365 * 24 * 3600
     customer = data.get("customer") or {}

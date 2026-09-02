@@ -33,6 +33,14 @@ from ..config import settings
 log = logging.getLogger("n8n-portal")
 
 
+def _row_get(row, key, default=None):
+    """sqlite3.Row helper: default when the column is missing (older DBs)."""
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return default
+
+
 class BillingError(Exception):
     pass
 
@@ -121,6 +129,13 @@ def mock_handle_event(event: dict) -> dict:
         account = account_from(data)
         if not account:
             raise BillingError("charge.success for unknown account.")
+        if _row_get(account, "account_state", "active") != "active":
+            # Admin suspension/archive outranks payment: money arrives but the
+            # workspace stays off and the subscription is not re-activated.
+            log.warning(
+                "charge.success for %s account %s; NOT reactivating (admin state)",
+                _row_get(account, "account_state", "active"), account["id"])
+            return {"status": "ignored_suspended", "account_id": account["id"]}
         paid_until = int(time.time()) + 365 * 24 * 3600
         db.set_subscription(account["id"], "mock_cus", "mock_sub",
                             "active", paid_until)
@@ -167,9 +182,13 @@ def sweep_expired() -> dict:
     exactly like the admin lock. Renewal (charge.success) restarts it.
 
     Runs periodically in the background (see main.lifespan). No grace here:
-    the annual period is prepaid, so when it ends, access ends."""
+    the annual period is prepaid, so when it ends, access ends.
+    Suspended/archived accounts are ADMIN-managed, not billing-managed: the
+    sweep leaves them (and their subscription data) untouched (2026-09-02)."""
     locked_now = []
     for account in db.list_accounts():
+        if _row_get(account, "account_state", "active") != "active":
+            continue  # suspended/archived: admin lifecycle owns this account
         status = account["subscription_status"]
         if status in ("active", "past_due", "unpaid"):
             paid_until = account["paid_until"] or 0
