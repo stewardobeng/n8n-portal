@@ -342,8 +342,8 @@ def test_retry_clears_stale_instance_rows():
          mpatch("app.services.provisioner.next_free_port", return_value=32791), \
          mpatch("app.services.provisioner.load_compose_template",
                 return_value="services: {}"):
-        pc.return_value.get_endpoint.return_value = {"PublicURL": "129.146.2.18",
-                                                     "URL": "tcp://129.146.2.18:2375"}
+        pc.return_value.get_endpoint.return_value = {"PublicURL": "10.0.0.8",
+                                                     "URL": "tcp://10.0.0.8:2375"}
         pc.return_value.create_standalone_stack_string.return_value = {"Id": 999}
         pc.return_value.list_containers.return_value = [{
             "Names": ["/retry-n8n-1"], "State": "running"}]
