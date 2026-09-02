@@ -3,7 +3,7 @@
 
 services:
   n8n-portal-backend:
-    image: n8n-portal-backend:0.1.26
+    image: n8n-portal-backend:0.1.27
     restart: unless-stopped
     ports:
       - "8788:8000"          # host port for NPM proxy (portal UI later); loopback-safe
@@ -23,7 +23,7 @@ services:
       - SMTP_USER=admin@steprotech.com
       - SMTP_PASS=${SMTP_PASS}
       - N8N_SMTP_PASS=${SMTP_PASS}
-      - SMTP_SENDER="n8n Portal <no-reply@steprotech.com>"
+      - SMTP_SENDER=n8n Portal <no-reply@steprotech.com>
       - SMTP_STARTTLS=true
       - DB_PATH=/data/portal.db
       - PAYMENT_GATEWAY=${PAYMENT_GATEWAY}

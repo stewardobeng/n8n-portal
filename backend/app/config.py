@@ -31,7 +31,11 @@ class Settings:
     smtp_port: int = int(os.getenv("SMTP_PORT", "587"))
     smtp_user: str = os.getenv("SMTP_USER", "admin@steprotech.com")
     smtp_pass: str = os.getenv("SMTP_PASS", "")
-    smtp_sender: str = os.getenv("SMTP_SENDER", "n8n Portal <no-reply@steprotech.com>")
+    # Sender may arrive as 'Name <addr>' or '"Name <addr>"' (stray wrapping
+    # quotes from compose plain scalars). Normalize so the From header is always
+    # a valid RFC 5322 address (Gmail rejects quoted-only display names — 550
+    # 5.7.1 "missing a valid address in From", hit live 2026-09-02).
+    smtp_sender: str = os.getenv("SMTP_SENDER", "n8n Portal <no-reply@steprotech.com>").strip('"').strip()
     smtp_ssl: bool = os.getenv("SMTP_SSL", "false").lower() == "true"
     smtp_starttls: bool = os.getenv("SMTP_STARTTLS", "true").lower() == "true"
 
