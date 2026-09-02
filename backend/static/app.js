@@ -20,6 +20,7 @@
     accountCache: {},     // admin: accountId -> {account, instances}
     requests: [],         // admin: access requests
     adminEnvs: [],        // admin: n8n Server 1..N + health (GET /admin/environments)
+    adminArchived: [],    // admin: archived accounts (GET /admin/accounts?include_archived=1)
     unlinkedStacks: [],   // admin: attach candidates (GET /admin/stacks/unlinked)
     menuOpen: false,
     pollTimer: null,
@@ -81,6 +82,9 @@ var ICONS = {
   account: '<circle cx="12" cy="12" r="10" /> <circle cx="12" cy="10" r="3" /> <path d="M7 20.662V19a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v1.662" />',
   accounts: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /> <circle cx="9" cy="7" r="4" /> <path d="M22 21v-2a4 4 0 0 0-3-3.87" /> <path d="M16 3.13a4 4 0 0 1 0 7.75" />',
   arrow: '<path d="M5 12h14" /> <path d="m12 5 7 7-7 7" />',
+  "arrow-left": '<path d="m12 19-7-7 7-7" /> <path d="M19 12H5" />',
+  archive: '<rect width="20" height="5" x="2" y="3" rx="1" /> <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" /> <path d="M10 12h4" />',
+  pause: '<rect x="14" y="4" width="4" height="16" rx="1" /> <rect x="6" y="4" width="4" height="16" rx="1" />',
   bell: '<path d="M10.268 21a2 2 0 0 0 3.464 0" /> <path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326" />',
   billing: '<rect width="20" height="14" x="2" y="5" rx="2" /> <line x1="2" x2="22" y1="10" y2="10" />',
   check: '<path d="M20 6 9 17l-5-5" />',
@@ -123,6 +127,7 @@ var ICONS = {
     var map = { active: "success", running: "success", approved: "success", awaiting: "warning",
       pastdue: "warning", provisioning: "info", registered: "info", failed: "danger",
       expired: "danger", off: "neutral", cancelled: "neutral", locked: "danger",
+      suspended: "warning", archived: "neutral",
       healthy: "success", pending: "info", requested: "warning", token_sent: "info", past_due: "warning" };
     return '<span class="status ' + (map[type] || "neutral") + '">' + esc(label || type) + "</span>";
   }
@@ -663,14 +668,32 @@ var ICONS = {
       "</tbody></table></div></section></main>");
   }
 
+  function archivedAccounts() {
+    var accounts = state.adminArchived || [];
+    return appLayout("admin", "Archived accounts", "accounts",
+      '<main class="page">' + pageHead("Archived accounts", "Archived accounts are hidden from the portal. Nothing is deleted; restore brings an account back (suspended, workspace off) for review.",
+        '<div class="actions"><a class="button secondary" href="#/admin/accounts">' + icon("arrow-left") + " All accounts</a></div>") +
+      '<section class="card flush"><div class="table-wrap"><table><thead><tr><th>Customer</th><th>Email</th><th>Archived state</th><th></th></tr></thead><tbody>' +
+      (accounts.length ? accounts.map(function (a) {
+        return "<tr>" +
+          '<td><div class="customer-cell"><span class="avatar">' + esc(initialsOf(a.display_name || a.username)) + '</span><span class="cell-text"><strong>' + esc(a.display_name || cap(a.username)) + "</strong></span></div></td>" +
+          "<td>" + esc(a.email) + "</td>" +
+          "<td>" + statusBadge("archived", "Archived") + "</td>" +
+          '<td><button class="button small-btn" data-action="admin-restore" data-id="' + a.id + '">Restore</button></td></tr>';
+      }).join("") : '<tr><td colspan="4"><div class="empty-state" style="min-height:220px"><div><h3>No archived accounts</h3><p class="muted">Archived accounts move here instead of being deleted.</p></div></div></td></tr>') +
+      "</tbody></table></div></section></main>");
+  }
+
   function subLabel(sub) {
     return titleCase(String(sub || "none").replace("_", " "));
   }
 
   function adminAccounts() {
     var accounts = state.adminAccounts || [];
+    var archivedCount = accounts.filter(function (a) { return a.account_state === "archived"; }).length;
     return appLayout("admin", "Accounts", "accounts",
       '<main class="page">' + pageHead("Customer accounts", "Review subscriptions, quotas, and workspace availability.", '<div class="actions"><button class="button" data-action="admin-add-user">' + icon("plus") + " Add user</button>" +
+        (archivedCount ? '<a class="button secondary" href="#/admin/archived">' + icon("archive") + " Archived (" + archivedCount + ")</a>" : "") +
         '<a class="button secondary" href="#/admin/requests">' + icon("requests") + " New requests</a></div>") +
       '<section class="card flush"><div class="table-tools"><div class="search"><input id="account-search" type="search" placeholder="Search name, email, or username" aria-label="Search accounts"></div></div>' +
       '<div class="table-wrap"><table><thead><tr><th>Customer</th><th>Plan</th><th>Subscription</th><th>Period end</th><th>Quota</th><th></th></tr></thead><tbody>' +
@@ -680,10 +703,12 @@ var ICONS = {
             : a.subscription_status === "locked" ? statusBadge("locked", "Locked")
             : a.subscription_status === "canceled" ? statusBadge("cancelled", "Cancelled")
             : statusBadge("pending", "No subscription");
+          var stateBadge = a.account_state === "suspended" ? statusBadge("suspended", "Suspended")
+            : a.account_state === "archived" ? statusBadge("archived", "Archived") : "";
           return "<tr data-account-row=\"" + a.id + "\">" +
             '<td><div class="customer-cell"><span class="avatar">' + esc(initialsOf(a.display_name || a.username)) + '</span><span class="cell-text"><strong>' + esc(a.display_name || cap(a.username)) + "</strong><span>" + esc(a.email) + "</span></span></div></td>" +
             "<td>" + esc(planName(a)) + "</td>" +
-            "<td>" + badge + "</td>" +
+            "<td>" + badge + (stateBadge ? " " + stateBadge : "") + "</td>" +
             "<td>" + esc(fmtDate(a.paid_until)) + "</td>" +
             "<td>" + (a.quota || 1) + "</td>" +
             '<td><button class="button secondary small-btn" data-route="/admin/account/' + a.id + '">View account</button></td></tr>';
@@ -701,19 +726,37 @@ var ICONS = {
       : sub === "past_due" ? statusBadge("pastdue", "Past due")
       : sub === "locked" ? statusBadge("locked", "Locked")
       : sub === "canceled" ? statusBadge("cancelled", "Cancelled") : statusBadge("pending", "No subscription");
+    var acctState = a.account_state || "active";
+    var stateBadge = acctState === "suspended" ? statusBadge("suspended", "Suspended")
+      : acctState === "archived" ? statusBadge("archived", "Archived") : "";
+    // Suspended/archived admins see a restore path, not workspace toggles.
+    var lifecycleButtons = "";
+    if (acctState === "active") {
+      lifecycleButtons =
+        '<button class="button secondary" data-action="admin-suspend" data-id="' + a.id + '">' + icon("pause") + " Suspend account</button>" +
+        '<button class="button secondary" data-action="admin-archive" data-id="' + a.id + '">' + icon("archive") + " Archive</button>";
+    } else if (acctState === "suspended") {
+      lifecycleButtons =
+        '<button class="button" data-action="admin-unsuspend" data-id="' + a.id + '">' + icon("check") + " Unsuspend</button>" +
+        '<button class="button secondary" data-action="admin-archive" data-id="' + a.id + '">' + icon("archive") + " Archive</button>";
+    } else {
+      lifecycleButtons =
+        '<button class="button" data-action="admin-restore" data-id="' + a.id + '">' + icon("check") + " Restore from archive</button>";
+    }
     var used = instances.filter(function (i) { return i.status !== "deleted"; }).length;
     var quota = a.quota || 1;
 
     return appLayout("admin", "Account details", "accounts",
       '<main class="page">' + pageHead(a.display_name || cap(a.username), esc(a.email) + " · " + esc(a.username), '<div class="actions">' +
-        '<button class="button secondary" data-action="admin-mark-paid" data-id="' + a.id + '">' + icon("check") + " Mark paid</button>" +
+        lifecycleButtons +
+        (acctState === "active" ? '<button class="button secondary" data-action="admin-mark-paid" data-id="' + a.id + '">' + icon("check") + " Mark paid</button>" +
         '<button class="button secondary" data-action="admin-attach" data-id="' + a.id + '">' + icon("workspace") + " Attach workspace</button>" +
         '<button class="button secondary" data-action="quota" data-id="' + a.id + '">Change quota</button>' +
         (sub === "locked" ? '<button class="button" data-action="admin-unlock" data-id="' + a.id + '">' + icon("check") + " Switch workspace on</button>"
-                          : '<button class="button secondary" data-action="admin-lock" data-id="' + a.id + '">' + icon("warning") + " Switch workspace off</button>") +
+                          : '<button class="button secondary" data-action="admin-lock" data-id="' + a.id + '">' + icon("warning") + " Switch workspace off</button>") : "") +
         "</div>") +
       '<div class="grid cols-3">' +
-        '<section class="card"><div class="card-head"><h2>Customer profile</h2>' + subBadge + "</div>" +
+        '<section class="card"><div class="card-head"><h2>Customer profile</h2><span class="badge-stack">' + subBadge + stateBadge + "</span></div>" +
           '<dl class="info-list"><div class="info-row"><dt>Username</dt><dd>' + esc(a.username) + "</dd></div>" +
           '<div class="info-row"><dt>Email</dt><dd>' + esc(a.email) + "</dd></div>" +
           '<div class="info-row"><dt>Signed up</dt><dd>' + esc(fmtDate(a.created_at)) + "</dd></div></dl></section>" +
@@ -858,6 +901,7 @@ var ICONS = {
     else if (route === "/admin/overview") html = requireAdmin(function () { return adminOverview(); });
     else if (route === "/admin/requests") html = requireAdmin(function () { return adminRequests(); });
     else if (route === "/admin/accounts") html = requireAdmin(function () { return adminAccounts(); });
+    else if (route === "/admin/archived") html = requireAdmin(function () { return archivedAccounts(); });
     else if (parts[0] === "admin" && parts[1] === "account") html = requireAdmin(function () { return adminAccountPage(parts[2]); });
     else if (route === "/admin/maintenance") html = requireAdmin(function () { return maintenancePage(); });
     else if (route === "/admin/settings") html = requireAdmin(function () { return settingsPage(); });
@@ -890,6 +934,7 @@ var ICONS = {
     }
     if (parts[0] === "customer") { refreshSession().then(after); }
     else if (parts[0] === "admin" && route !== "/admin/signin") { refreshAdminData().then(after); }
+    // note: archivedAccounts() is dispatched in render() via route mapping below
     // username preview on register
     if (route === "/register") {
       var uInput = $("input[name=username]");
@@ -915,6 +960,7 @@ var ICONS = {
     var s = state.session;
     var c = s ? JSON.stringify([s.account, s.instances]) : "";
     var a = state.adminAccounts ? JSON.stringify(state.adminAccounts) : "";
+    var ar = state.adminArchived ? JSON.stringify(state.adminArchived) : "";
     var r = state.requests ? JSON.stringify(state.requests) : "";
     var e = state.envOrder.join(",");
     var p = state.plans ? JSON.stringify(state.plans) : "";
@@ -923,7 +969,7 @@ var ICONS = {
     var route = (location.hash || "").slice(1);
     var m = route.match(/^\/admin\/account\/(\d+)$/);
     var d = m && state.accountCache[m[1]] ? JSON.stringify(state.accountCache[m[1]]) : "";
-    return c + "|" + a + "|" + r + "|" + e + "|" + p + "|" + d + "|" + ev + "|" + ul;
+    return c + "|" + a + "|" + ar + "|" + r + "|" + e + "|" + p + "|" + d + "|" + ev + "|" + ul;
   }
 
   async function refreshSession() {
@@ -950,6 +996,8 @@ var ICONS = {
     try {
       var accts = await api("/admin/accounts");
       state.adminAccounts = accts || [];
+      var arch = await api("/admin/accounts?include_archived=1");
+      state.adminArchived = (arch || []).filter(function (a) { return a.account_state === "archived"; });
       var reqs = await api("/admin/access-requests");
       state.requests = reqs || [];
       // account details for the account page currently open (always fresh)
@@ -1276,7 +1324,7 @@ var ICONS = {
       else if (action === "signout-route") {
         if (currentKind() === "admin") {
           localStorage.removeItem("admin_token"); state.adminAuthed = false;
-          state.adminAccounts = []; state.requests = []; state.accountCache = {};
+          state.adminAccounts = []; state.adminArchived = []; state.requests = []; state.accountCache = {};
           showToast("Signed out", "Admin session ended."); navigate("/admin/signin");
         } else {
           if (window.confirm("Sign out of the portal?")) { localStorage.removeItem("portal_token"); state.session = null; state.provisioningPw = null; stopPolling(); navigate("/entry"); }
@@ -1313,6 +1361,41 @@ var ICONS = {
         showModal(modalHeader("Switch workspace on?") + "<p>Restore the customer workspace and automations.</p>" +
           '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
           '<button class="button" data-confirm-account-unlock="' + act.dataset.id + '">Confirm switch on</button></div>');
+      }
+      else if (action === "admin-suspend") {
+        showModal(modalHeader("Suspend this account?") +
+          '<div class="consequence warn"><strong>What happens now</strong><ul>' +
+          "<li>The workspace is switched off immediately (everything stops)</li>" +
+          "<li>The customer cannot sign in to the portal</li>" +
+          "<li>Subscription dates are kept; nothing is deleted</li>" +
+          "<li>Unsuspend later: access stays off until you switch the workspace on or mark it paid</li></ul></div>" +
+          '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+          '<button class="button danger" data-confirm-account-state="suspend" data-id="' + act.dataset.id + '">' + icon("pause") + " Suspend account</button></div>");
+      }
+      else if (action === "admin-unsuspend") {
+        showModal(modalHeader("Unsuspend this account?") +
+          '<div class="consequence safe"><strong>What happens</strong><ul>' +
+          "<li>The customer can sign in again</li>" +
+          "<li>The workspace stays switched off until you switch it on or mark it paid</li></ul></div>" +
+          '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+          '<button class="button" data-confirm-account-state="unsuspend" data-id="' + act.dataset.id + '">' + icon("check") + " Unsuspend</button></div>");
+      }
+      else if (action === "admin-archive") {
+        showModal(modalHeader("Archive this account?") +
+          '<div class="consequence warn"><strong>What happens now</strong><ul>' +
+          "<li>The workspace is switched off immediately</li>" +
+          "<li>The account is hidden from the accounts list; nothing is deleted</li>" +
+          "<li>Restore later moves it back (suspended, workspace off) for review</li></ul></div>" +
+          '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+          '<button class="button danger" data-confirm-account-state="archive" data-id="' + act.dataset.id + '">' + icon("archive") + " Archive account</button></div>");
+      }
+      else if (action === "admin-restore") {
+        showModal(modalHeader("Restore this archived account?") +
+          '<div class="consequence safe"><strong>What happens</strong><ul>' +
+          "<li>The account returns as suspended (workspace stays off)</li>" +
+          "<li>Review it, then unsuspend and switch the workspace on when ready</li></ul></div>" +
+          '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+          '<button class="button" data-confirm-account-state="restore" data-id="' + act.dataset.id + '">' + icon("check") + " Restore account</button></div>");
       }
       else if (action === "admin-add-user") { adminAddUserModal(); }
       else if (action === "admin-mark-paid") { markPaidModal(act.dataset.id); }
@@ -1419,6 +1502,29 @@ var ICONS = {
             approvalSuccess(data);
             refreshAdminData();
           } catch (err) { showToast("Could not approve", err.message); }
+        })();
+      }
+
+      var cState = event.target.closest("[data-confirm-account-state]");
+      if (cState) {
+        var stId = cState.dataset.id;
+        var stAction = cState.dataset.confirmAccountState;
+        closeModal();
+        var stMsg = {
+          suspend:   ["Account suspended", "The workspace is off and the customer cannot sign in."],
+          unsuspend: ["Account unsuspended", "The customer can sign in; switch the workspace on when ready."],
+          archive:   ["Account archived", "Hidden from the accounts list. Find it under Archived to restore."],
+          restore:   ["Account restored", "Back as suspended; review, then unsuspend when ready."]
+        }[stAction];
+        (async function () {
+          try {
+            await api("/admin/accounts/" + stId + "/state", { method: "POST", body: { action: stAction } });
+            showToast(stMsg[0], stMsg[1]);
+            refreshAdminData().then(function () {
+              if (stAction === "archive") { navigate("/admin/archived"); }
+              else if (stAction === "restore") { navigate("/admin/accounts"); }
+            });
+          } catch (err) { showToast("Action failed", err.message); }
         })();
       }
 

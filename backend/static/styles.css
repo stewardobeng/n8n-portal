@@ -388,3 +388,6 @@ tbody tr:hover { background: #fbfdfd; }
 .plan-already { display: inline-flex; align-items: center; gap: 7px; padding: 9px 14px; border-radius: 9px; color: var(--green-700); background: var(--green-100); font-weight: 700; font-size: .86rem; }
 .plan-already .icon-svg { width: 16px; height: 16px; }
 .plan-card .button { width: 100%; justify-content: center; }
+
+/* account lifecycle (suspend/archive) 2026-09-02 */
+.badge-stack { display: inline-flex; gap: 8px; align-items: center; flex-wrap: wrap; }

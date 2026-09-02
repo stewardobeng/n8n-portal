@@ -31,6 +31,7 @@ import datetime
 from .. import db
 from ..config import settings
 from . import provisioner
+from . import billing
 from .portainer_client import PortainerClient
 from .npm_client import NPMClient
 from .emailer import send_admin_welcome_credentials, EmailError
@@ -38,6 +39,14 @@ from .emailer import send_admin_welcome_credentials, EmailError
 log = logging.getLogger("n8n-portal")
 
 N8N_IMAGE_HINTS = ("n8nio/n8n", "n8n/n8n", "n8nio/n8n:")
+
+
+def _row_get(row, key, default=None):
+    """sqlite3.Row helper: default when the column is missing (older DBs)."""
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return default
 
 
 class AdminOpsError(Exception):
@@ -303,6 +312,78 @@ def npm_subscription_anchor(account_id: int) -> dict | None:
     }
 
 
+# ---------- admin suspend / archive (2026-09-02) ----------
+
+def suspend_account(account_id: int) -> dict:
+    """Admin suspension (soft, reversible): account_state='suspended', the
+    attached workspace is STOPPED immediately (billing.lock_instance — absolute
+    lock semantics, nothing reachable), portal login blocked while suspended.
+    Subscription/paid dates are preserved; unsuspend does not auto-start the
+    workspace (admin unlocks/renews explicitly)."""
+    account = db.get_account(account_id)
+    if not account:
+        raise AdminOpsError("Account not found.")
+    if account["account_state"] == "archived":
+        raise AdminOpsError("Account is archived. Restore it first.")
+    stopped = billing.lock_instance(account_id)
+    db.set_account_state(account_id, "suspended")
+    log.info("account %s suspended (workspace stopped: %s)", account_id, stopped)
+    return {
+        "account_id": account_id,
+        "account_state": "suspended",
+        "workspace_stopped": bool(stopped),
+    }
+
+
+def unsuspend_account(account_id: int) -> dict:
+    """Restore a suspended account to active. The workspace is NOT auto-started:
+    access resumes only when the admin unlocks it or a renewal/marked-paid
+    restarts it (deliberate: suspension may be for non-payment, so restarting
+    on unsuspend alone would bypass the payment gate)."""
+    account = db.get_account(account_id)
+    if not account:
+        raise AdminOpsError("Account not found.")
+    if account["account_state"] != "suspended":
+        raise AdminOpsError("Account is not suspended.")
+    db.set_account_state(account_id, "active")
+    log.info("account %s unsuspended (workspace left as-is)", account_id)
+    return {"account_id": account_id, "account_state": "active"}
+
+
+def archive_account(account_id: int) -> dict:
+    """Soft-delete: account_state='archived'. Workspace stopped immediately and
+    stays off. The row is kept (nothing permanently deleted) and hidden from
+    admin lists; restore brings it back as suspended (safe: stopped workspace,
+    admin reviews before unlocking)."""
+    account = db.get_account(account_id)
+    if not account:
+        raise AdminOpsError("Account not found.")
+    if account["account_state"] == "archived":
+        raise AdminOpsError("Account is already archived.")
+    stopped = billing.lock_instance(account_id)
+    db.set_account_state(account_id, "archived")
+    log.info("account %s archived (workspace stopped: %s)", account_id, stopped)
+    return {
+        "account_id": account_id,
+        "account_state": "archived",
+        "workspace_stopped": bool(stopped),
+    }
+
+
+def restore_account(account_id: int) -> dict:
+    """Bring an archived account back, landing it in suspended (never straight
+    to active: the workspace stays stopped until the admin explicitly unlocks
+    or renews it)."""
+    account = db.get_account(account_id)
+    if not account:
+        raise AdminOpsError("Account not found.")
+    if account["account_state"] != "archived":
+        raise AdminOpsError("Account is not archived.")
+    db.set_account_state(account_id, "suspended")
+    log.info("account %s restored from archive (suspended)", account_id)
+    return {"account_id": account_id, "account_state": "suspended"}
+
+
 # ---------- attach ----------
 
 def attach_instance(account_id: int, environment_id: int, stack_name: str,
@@ -472,8 +553,13 @@ def mark_paid(account_id: int, paid_until: int, paid_from: int | None = None,
 
     db.update_subscription_status(account_id, "active", paid_until, paid_from)
     db.set_account_status(account_id, "provisioned")
-    if start_if_running:
+    # Admin lifecycle outranks billing: a suspended/archived account keeps its
+    # workspace off even when marked paid (money recorded, access NOT granted).
+    if start_if_running and _row_get(account, "account_state", "active") == "active":
         _ensure_started(account_id)
+    elif start_if_running:
+        log.info("mark-paid: account %s is %s; workspace left stopped",
+                 account_id, _row_get(account, "account_state", "active"))
     return {
         "account_id": account_id,
         "subscription_status": "active",
