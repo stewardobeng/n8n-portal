@@ -56,7 +56,31 @@ def check_email(email: str) -> dict:
         return {"action": "requested", "email": email}
     if req["status"] == "token_sent":
         return {"action": "token", "email": email}
+    if req["status"] == "denied":
+        return {"action": "denied", "email": email}
     return {"action": "waiting", "email": email}
+
+
+def deny_request(request_id: int) -> None:
+    """Admin action: permanently decline a request. Clears any issued token and
+    sets a terminal 'denied' state so the person can neither request again nor
+    register. To let them try again, the admin deletes the request instead."""
+    req = None
+    for r in db.list_access_requests():
+        if r["id"] == request_id:
+            req = r
+            break
+    if not req:
+        raise AccessGateError("Access request not found.")
+    if req["status"] == "registered":
+        raise AccessGateError("This email has already registered.")
+    db.update_access_request(
+        request_id,
+        status="denied",
+        token_hash="",
+        token_sent_at=None,
+        token_expires_at=None,
+    )
 
 
 def issue_token(request_id: int) -> str:
