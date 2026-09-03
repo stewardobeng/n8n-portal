@@ -38,6 +38,12 @@ def _headers() -> dict:
         "Authorization": f"Bearer {settings.paystack_secret_key}",
         "Content-Type": "application/json",
         "Accept": "application/json",
+        # Cloudflare on api.paystack.co Error-1010-blocks the default
+        # Python-urllib User-Agent (bot signature). Send a browser UA so the
+        # server-side client is not rejected. (2026-09-03, verified live.)
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/120.0 Safari/537.36"),
     }
 
 
