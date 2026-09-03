@@ -93,7 +93,11 @@ def initialize_checkout(account_id: int, email: str) -> dict:
         "amount": settings.plan_amount_minor,
         "currency": settings.plan_currency,
         "plan": plan_code,
-        "metadata": {"account_id": str(account_id), "gateway": "paystack"},
+        # `app` tags this transaction so the shared Paystack webhook router can
+        # route it to the correct website (Steward 2026-09-03: one account, many
+        # sites -> a single router fans events out by this tag).
+        "metadata": {"account_id": str(account_id), "gateway": "paystack",
+                     "app": "n8n-portal"},
         "callback_url": settings.paystack_callback_url,
     }
     resp = _req("POST", "/transaction/initialize", payload)
@@ -122,11 +126,22 @@ def verify_webhook_signature(payload: bytes, signature: str | None) -> bool:
 
 def handle_event(event: dict) -> dict:
     """Route a verified Paystack webhook event to the shared billing actions.
-    Returns a status dict for the caller."""
+    Returns a status dict for the caller.
+
+    ROUTER GUARD (2026-09-03, Steward): the portal shares one Paystack account
+    with other websites via a webhook router. Events are tagged with `metadata.app`.
+    Ignore any event not tagged for this portal so a misrouted event can never
+    touch portal billing state."""
     from . import billing
 
     event_type = event.get("event", "")
     data = event.get("data", {}) or {}
+    # If a router tagged it, only handle events meant for the n8n portal.
+    app_tag = (data.get("metadata") or {}).get("app")
+    if app_tag and app_tag != "n8n-portal":
+        log.info("Ignoring Paystack event %s tagged app=%s (not this portal)",
+                 event_type, app_tag)
+        return {"status": "ignored", "event": event_type}
 
     if event_type == "charge.success":
         return _on_charge_success(data)
