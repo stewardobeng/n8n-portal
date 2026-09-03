@@ -32,7 +32,9 @@
     adminInstancesLoaded: false,
     impersonation: null,     // admin login-as: {id, label} while viewing a customer
     impTtlMinutes: 60,       // lifetime of the impersonation session (server-set)
-    n8nLatestTag: ""         // latest n8n release tag seen (admin update watch)
+    n8nLatestTag: "",        // latest n8n release tag seen (admin update watch)
+    instUpdating: {},        // instanceId -> target tag while an n8n update runs
+    busyModal: false         // true while a long-running action modal is open (render must not wipe it)
   };
 
   var $ = function (sel, root) { return (root || document).querySelector(sel); };
@@ -969,7 +971,7 @@ var ICONS = {
       var name = titleCase(i.stack_name);
       var who = i.account_display || (acctMap[i.account_id] ? (acctMap[i.account_id].display_name || acctMap[i.account_id].username) : "customer #" + i.account_id);
       return '<div class="workspace-item"><span class="workspace-logo">' + icon("workspace") + "</span>" +
-        "<div><h3>" + esc(name) + " workspace" + updateChip(i) + "</h3><p>" + esc(who) + " &middot; " + esc(i.domain || ("env " + i.environment_name)) + (i.locked ? " &middot; switched off" : "") + "</p></div>" +
+        "<div><h3>" + esc(name) + " workspace" + updBadge(i) + updateChip(i) + "</h3><p>" + esc(who) + " &middot; " + esc(i.domain || ("env " + i.environment_name)) + (i.locked ? " &middot; switched off" : "") + "</p></div>" +
         '<div class="actions end" style="margin-left:auto;flex-wrap:wrap">' +
         '<button class="button small-btn" data-action="admin-backup-run" data-id="' + i.id + '" data-kind="full"' + (disabled ? " disabled" : "") + '>' + icon("archive") + " Full backup</button>" +
         '<button class="button secondary small-btn" data-action="admin-backup-run" data-id="' + i.id + '" data-kind="workflows"' + (disabled ? " disabled" : "") + '>Export workflows</button>' +
@@ -1085,10 +1087,10 @@ var ICONS = {
             : i.status === "failed" ? statusBadge("failed", "Setup failed") : statusBadge("neutral", cap(i.status));
           var attachedTag = i.managed === 0 ? ' <span class=\"status info\">Attached</span>' : "";
           return '<article class="workspace-item"><span class="workspace-logo">' + icon("workspace") + "</span>" +
-            "<div><h3>" + esc(titleCase(i.stack_name)) + " workspace" + attachedTag + updateChip(i) + "</h3><p>" + esc(i.domain) + "<br>Env " + esc(i.environment_name || i.environment_id) + " · Port " + esc(i.port) + (i.managed === 0 ? " · password unchanged" : "") + "</p></div>" +
+            "<div><h3>" + esc(titleCase(i.stack_name)) + " workspace" + attachedTag + updBadge(i) + updateChip(i) + "</h3><p>" + esc(i.domain) + "<br>Env " + esc(i.environment_name || i.environment_id) + " · Port " + esc(i.port) + (i.managed === 0 ? " · password unchanged" : "") + "</p></div>" +
             badge + '<button class="button secondary small-btn" data-action="workspace-actions" data-id="' + i.id + '" data-name="' + esc(i.stack_name) + '">Actions</button>' +
               '<button class="button secondary small-btn" data-action="admin-backup" data-id="' + i.id + '">' + icon("archive") + " Back up</button>" +
-              (i.managed !== 0 ? '<button class="button secondary small-btn" data-action="admin-update-image" data-id="' + i.id + '">' + icon("refresh") + " Update n8n</button>" : "") + '</article>';
+              (i.managed !== 0 ? '<button class="button secondary small-btn" data-action="admin-update-image" data-id="' + i.id + '"' + updDisabled(i) + '>' + icon("refresh") + (state.instUpdating[i.id] ? " Updating..." : " Update n8n") + "</button>" : "") + '</article>';
         }).join("") : '<div class="empty-state" style="min-height:200px"><div><h3>No workspaces yet</h3><p class="muted">The customer has not provisioned a workspace.</p></div></div>') +
         "</div></section>" +
         '<section class="card"><h2>Subscription timeline</h2><div class="timeline">' +
@@ -1183,7 +1185,7 @@ var ICONS = {
 
   /* ================= router ================= */
   function render() {
-    modalRoot.innerHTML = "";
+    if (!state.busyModal) modalRoot.innerHTML = "";
     var route = (location.hash || "#/entry").slice(1).split("?")[0];
     var parts = route.split("/").filter(Boolean);
     var html = null;
@@ -1546,7 +1548,7 @@ var ICONS = {
         ? '<button class="button secondary" data-action="workspace-detail" data-id="' + inst.id + '">' + icon("server") + " View details</button>"
         : '<button class="button secondary" data-action="reset-password" data-id="' + inst.id + '">' + icon("lock") + " Reset workspace password</button>") +
       '<button class="button secondary" data-action="admin-backup" data-id="' + inst.id + '">' + icon("archive") + " Back up</button>" +
-      (inst && inst.managed !== 0 ? '<button class="button secondary" data-action="admin-update-image" data-id="' + inst.id + '">' + icon("refresh") + " Update n8n</button>" : "") +
+      (inst && inst.managed !== 0 ? '<button class="button secondary" data-action="admin-update-image" data-id="' + inst.id + '"' + updDisabled(inst) + '>' + icon("refresh") + (state.instUpdating[inst.id] ? " Updating..." : " Update n8n") + "</button>" : "") +
       "</div>");
   }
 
@@ -1785,6 +1787,13 @@ var ICONS = {
     }
     return "";
   }
+  function updBadge(inst) {
+    var t = (inst && state.instUpdating[inst.id]) ? state.instUpdating[inst.id] : "";
+    return t ? ' <span class="status info">Updating to ' + esc(t) + "...</span>" : "";
+  }
+  function updDisabled(inst) {
+    return (inst && state.instUpdating[inst.id]) ? " disabled" : "";
+  }
   function updateImageModal(uInst) {
     var wname = titleCase(uInst.stack_name);
     showModal(modalHeader("Update n8n for " + wname) + '<div class="spinner"></div><p class="muted">Checking the current version and the latest n8n release...</p>');
@@ -1826,17 +1835,26 @@ var ICONS = {
     });
   }
   function runImageUpdate(instanceId, tag) {
+    // Paint an immediate "Updating to X..." state on the workspace rows and keep
+    // the progress modal alive (render() skips wiping it while busyModal is set).
+    state.instUpdating[instanceId] = tag;
+    state.busyModal = true;
+    render();
     showModal(modalHeader("Updating n8n workspace") + '<div class="spinner"></div>' +
       '<p class="muted">Pulling n8nio/n8n:' + esc(tag) + " and recreating the workspace. This can take a few minutes; the window updates when it finishes.</p>");
     api("/admin/instances/" + instanceId + "/update-image", { method: "POST", body: { image: tag } }).then(function (d) {
+      state.busyModal = false;
+      delete state.instUpdating[instanceId];
       closeModal();
       showToast("n8n updated", "The workspace is now on " + d.image + ". It may take a minute to come back online.");
       state.n8nLatestTag = "";
-      refreshAdminData();
+      refreshAdminData().then(function () { render(); });
     }).catch(function (err) {
+      state.busyModal = false;
+      delete state.instUpdating[instanceId];
       closeModal();
       showToast("Update failed", err.message);
-      refreshAdminData();
+      refreshAdminData().then(function () { render(); });
     });
   }
 
