@@ -1034,11 +1034,16 @@ var ICONS = {
     }
     if (parts[0] === "customer") { refreshSession().then(after); }
     else if (parts[0] === "admin" && route !== "/admin/signin") { refreshAdminData().then(after); }
-    // security (2FA) setup state: /me/security or /admin/security
+    // security (2FA) setup state: /me/security or /admin/security. Set the state
+    // and let dataSig detect the change to re-render ONCE (calling render() here
+    // directly caused an infinite render<->fetch loop that prevented the modal
+    // from opening on the live site — 2026-09-02).
     if (route === "/customer/security" || route === "/admin/security") {
       var secPath = route.indexOf("admin") === 1 ? "/admin/security" : "/me/security";
-      api(secPath).then(function (d) { state.security2fa = d; render(); })
-        .catch(function () { state.security2fa = null; });
+      api(secPath).then(function (d) {
+        state.security2fa = d;
+        if (!modalRoot.children.length && dataSig() !== sigBefore) render();
+      }).catch(function () { state.security2fa = null; });
     }
     // note: archivedAccounts() is dispatched in render() via route mapping below
     // username preview on register
@@ -1072,10 +1077,11 @@ var ICONS = {
     var p = state.plans ? JSON.stringify(state.plans) : "";
     var ev = state.adminEnvs ? JSON.stringify(state.adminEnvs) : "";
     var ul = state.unlinkedStacks ? JSON.stringify(state.unlinkedStacks) : "";
+    var sec = state.security2fa ? JSON.stringify(state.security2fa) : "";
     var route = (location.hash || "").slice(1);
     var m = route.match(/^\/admin\/account\/(\d+)$/);
     var d = m && state.accountCache[m[1]] ? JSON.stringify(state.accountCache[m[1]]) : "";
-    return c + "|" + a + "|" + ar + "|" + r + "|" + e + "|" + p + "|" + d + "|" + ev + "|" + ul;
+    return c + "|" + a + "|" + ar + "|" + r + "|" + e + "|" + p + "|" + d + "|" + ev + "|" + ul + "|" + sec;
   }
 
   async function refreshSession() {
@@ -1454,6 +1460,50 @@ var ICONS = {
       else if (action === "payment-continue") { doPayment(); }
       else if (action === "pay-now") paymentModal();
       else if (action === "provision-now") { autoProvision(); }
+      else if (action === "sec-totp-setup") {
+        showModal(modalHeader("Set up authenticator 2FA") + '<div class="spinner"></div>');
+        api(act.dataset.kind === "admin" ? "/admin/security/totp/setup" : "/me/security/totp/setup", { method: "POST" }).then(function (d) {
+          var qr = (d && d.qr) ? d.qr : "";
+          showModal(modalHeader("Scan with your authenticator app") +
+            '<div class="sec-qr">' + (qr ? '<img src="' + esc(qr) + '" alt="QR code" width="220" height="220">' : "") + "</div>" +
+            '<p class="muted" style="text-align:center">Open your authenticator app and scan the QR, or type this key:</p>' +
+            '<p class="sec-secret" style="text-align:center;font-family:monospace">' + esc(d.secret) + "</p>" +
+            '<form data-form="sec-totp-enable"><div class="field"><label>Enter the 6-digit code</label>' +
+            '<input name="code" type="text" inputmode="numeric" required maxlength="6" placeholder="123456" style="text-align:center;letter-spacing:2px"></div>' +
+            '<button class="button primary-wide" type="submit">Confirm &amp; enable</button></form>' +
+            '<p class="small muted" style="text-align:center;margin-top:14px">The code changes every 30 seconds.</p>');
+        }).catch(function (err) { showToast("Setup failed", err.message); closeModal(); });
+      }
+      else if (action === "sec-totp-disable") {
+        var dk = act.dataset.kind === "admin" ? "/admin/security/totp/disable" : "/me/security/totp/disable";
+        showModal(modalHeader("Turn off authenticator 2FA?") + "<p>You will no longer be asked for an authenticator code at sign-in.</p>" +
+          '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+          '<button class="button danger" data-confirm-sec-totp-disable="' + dk + '">Turn off</button></div>');
+      }
+      else if (action === "sec-email-setup") {
+        var ek = act.dataset.kind === "admin" ? "/admin/security/email/send" : "/me/security/email/send";
+        showModal(modalHeader("Set up email 2FA") + '<div class="spinner"></div>');
+        api(ek, { method: "POST" }).then(function () {
+          showModal(modalHeader("Enter the email code") +
+            '<p class="muted">We emailed a 6-digit code to your account. Enter it below to confirm email 2FA.</p>' +
+            '<form data-form="sec-email-enable"><div class="field"><label>Verification code</label>' +
+            '<input name="code" type="text" inputmode="numeric" required maxlength="6" placeholder="123456" style="text-align:center;letter-spacing:2px"></div>' +
+            '<button class="button primary-wide" type="submit">Confirm &amp; enable</button></form>' +
+            '<p class="small muted" style="text-align:center;margin-top:14px">Did not arrive? <a href="#" data-action="sec-email-send"' + (act.dataset.kind === "admin" ? ' data-kind="admin"' : "") + '>Resend</a></p>');
+        }).catch(function (err) { showToast("Could not send", err.message); closeModal(); });
+      }
+      else if (action === "sec-email-send") {
+        event.preventDefault();
+        var es = act.dataset.kind === "admin" ? "/admin/security/email/send" : "/me/security/email/send";
+        api(es, { method: "POST" }).then(function () { showToast("Code sent", "A new code has been emailed to you."); })
+          .catch(function (err) { showToast("Could not send", err.message); });
+      }
+      else if (action === "sec-email-disable") {
+        var ed = act.dataset.kind === "admin" ? "/admin/security/email/disable" : "/me/security/email/disable";
+        showModal(modalHeader("Turn off email 2FA?") + "<p>You will no longer be sent a sign-in code by email.</p>" +
+          '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+          '<button class="button danger" data-confirm-sec-email-disable="' + ed + '">Turn off</button></div>');
+      }
       else if (action === "provision-confirm") {
         var pv = String((document.getElementById("provision-pw") || {}).value || "");
         closeModal();
@@ -1897,8 +1947,8 @@ var ICONS = {
         });
       }
       else if (type === "sec-totp-enable") {
-        var kind = (state.security2fa && currentKind() === "admin") ? "admin" : "user";
-        var tsPath = kind === "admin" ? "/admin/security/totp/enable" : "/me/security/totp/enable";
+        var isAdm = (location.hash || "").indexOf("/admin/security") === 1;
+        var tsPath = isAdm ? "/admin/security/totp/enable" : "/me/security/totp/enable";
         var tc = String(new FormData(form).get("code") || "").trim();
         api(tsPath, { method: "POST", body: { code: tc } }).then(function () {
           closeModal();
@@ -1907,8 +1957,8 @@ var ICONS = {
         }).catch(function (err) { showToast("Code not accepted", err.message); });
       }
       else if (type === "sec-email-enable") {
-        var k2 = (state.security2fa && currentKind() === "admin") ? "admin" : "user";
-        var esPath = k2 === "admin" ? "/admin/security/email/enable" : "/me/security/email/enable";
+        var isAdm2 = (location.hash || "").indexOf("/admin/security") === 1;
+        var esPath = isAdm2 ? "/admin/security/email/enable" : "/me/security/email/enable";
         var ec = String(new FormData(form).get("code") || "").trim();
         api(esPath, { method: "POST", body: { code: ec } }).then(function () {
           closeModal();
@@ -1935,10 +1985,14 @@ var ICONS = {
   }
 
   function refreshSecurity() {
+    // Re-fetch the 2FA state after enable/disable and re-render only if the
+    // security data actually changed (guard avoids the render<->fetch loop).
     var route = (location.hash || "").slice(1);
     var secPath = route.indexOf("admin") === 1 ? "/admin/security" : "/me/security";
-    api(secPath).then(function (d) { state.security2fa = d; render(); })
-      .catch(function () { state.security2fa = null; render(); });
+    api(secPath).then(function (d) {
+      state.security2fa = d;
+      if (!modalRoot.children.length) render();
+    }).catch(function () { state.security2fa = null; if (!modalRoot.children.length) render(); });
   }
 
   function qrDataUrl(uri) {
