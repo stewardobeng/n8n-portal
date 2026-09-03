@@ -122,8 +122,11 @@ def verify_token(email: str, token: str) -> bool:
 
 
 def consume(email: str) -> None:
-    """Mark the request registered after a successful account creation."""
+    """After successful account creation the person is now a member, so the
+    access request is no longer needed. Delete it entirely instead of merely
+    marking it 'registered' — a member's request must not reappear in the
+    admin access-requests list; their record is now managed under the account.
+    Steward 2026-09-03."""
     req = db.get_access_request(email)
     if req:
-        db.update_access_request(req["id"], status="registered",
-                                 registered_at=int(time.time()))
+        db.delete_access_request(req["id"])

@@ -602,8 +602,10 @@ def test_access_gate_full_flow():
     })
     assert r.status_code == 201, r.text
     assert r.json()["token"]
+    # The access request is DELETED once the person becomes a member (Steward
+    # 2026-09-03): their record now lives under the account, not the request list.
     req = db_mod.get_access_request("gated@steprotech.com")
-    assert req["status"] == "registered"  # token consumed
+    assert req is None  # consumed -> removed entirely
 
     # 7. token is now single-use: a second registration attempt fails
     r = client.post("/api/v1/accounts", json={

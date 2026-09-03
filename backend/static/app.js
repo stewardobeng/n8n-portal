@@ -800,21 +800,19 @@ var ICONS = {
       all: requests.length,
       awaiting: requests.filter(function (r) { return r.status === "requested"; }).length,
       approved: requests.filter(function (r) { return r.status === "token_sent"; }).length,
-      denied: requests.filter(function (r) { return r.status === "denied"; }).length,
-      registered: requests.filter(function (r) { return r.status === "registered"; }).length
+      denied: requests.filter(function (r) { return r.status === "denied"; }).length
     };
     var filter = state.accessFilter || "all";
     var rows = requests.filter(function (r) {
       if (filter === "all") return true;
       if (filter === "awaiting") return r.status === "requested";
       if (filter === "approved") return r.status === "token_sent";
-      if (filter === "denied") return r.status === "denied";
-      return r.status === "registered";
+      return r.status === "denied";
     });
     return appLayout("admin", "Access requests", "requests",
-      '<main class="page">' + pageHead("Access requests", "Approve new customers, decline unwanted requests, or remove test/spam entries.") +
+      '<main class="page">' + pageHead("Access requests", "Approve new customers, decline unwanted requests, or remove test/spam entries. Approved members move to the Accounts list once they register.") +
       '<section class="card flush"><div class="tabs">' +
-        [["all", "All"], ["awaiting", "Awaiting approval"], ["approved", "Code sent"], ["denied", "Disapproved"], ["registered", "Already registered"]].map(function (t) {
+        [["all", "All"], ["awaiting", "Awaiting approval"], ["approved", "Code sent"], ["denied", "Disapproved"]].map(function (t) {
           return '<button class="tab' + (filter === t[0] ? " active" : "") + '" data-filter="' + t[0] + '">' + t[1] + " (" + counts[t[0]] + ")</button>";
         }).join("") +
       "</div>" +
