@@ -3,10 +3,13 @@
 
 services:
   n8n-portal-backend:
-    image: n8n-portal-backend:0.1.35
+    image: n8n-portal-backend:0.1.36
     restart: unless-stopped
     ports:
-      - "8788:8000"          # host port for NPM proxy (portal UI later); loopback-safe
+      - "127.0.0.1:8788:8000"   # loopback-only binding (2026-09-03): NPM reaches us over my-main-net; no public exposure
+    networks:
+      - default
+      - my-main-net          # join NPM's network so NPM can reach us by name (2026-09-03)
     environment:
       - PORTAINER_URL=http://host.docker.internal:9000
       - NPM_URL=http://host.docker.internal:81
@@ -50,3 +53,8 @@ services:
 
 volumes:
   portal_data:
+
+networks:
+  default:
+  my-main-net:
+    external: true

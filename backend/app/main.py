@@ -23,7 +23,7 @@ from pydantic import BaseModel, EmailStr, Field
 from .config import settings
 from . import db
 from .services import provisioner, billing, access_gate, admin_ops, backup_ops
-from .services import account_security
+from .services import account_security, passkeys
 from .services import security_controls as sc
 from .services.admin_ops import AdminOpsError
 from .services.portainer_client import PortainerClient
@@ -258,6 +258,12 @@ class TOTPSetupIn(BaseModel):
 
 class OTPEnableIn(BaseModel):
     code: str = Field(..., min_length=6, max_length=10)
+
+
+class PasskeyVerifyIn(BaseModel):
+    # The full WebAuthn credential JSON (registration or authentication response)
+    # as produced by navigator.credentials.create()/get() and JSON-serialized.
+    credential: dict = Field(...)
 
 
 class AdminMFAVerifyIn(BaseModel):
@@ -598,6 +604,8 @@ def my_security(account_id: int = Depends(verify_client)):
         "totp_enabled": bool(_row_get(account, "totp_enabled", 0)),
         "email_2fa": bool(_row_get(account, "email_2fa", 0)),
         "has_totp_secret": bool(db._get_totp_secret(account_id)),
+        "passkeys": passkeys.list_passkeys_for("account", account_id),
+        "passkey_enabled": bool(passkeys.list_passkeys_for("account", account_id)),
     }
 
 
@@ -641,6 +649,92 @@ def my_email_enable(payload: OTPEnableIn, account_id: int = Depends(verify_clien
 def my_email_disable(account_id: int = Depends(verify_client)):
     db.set_account_email_2fa(account_id, False)
     return {"ok": True}
+
+
+# ---------- client passkeys (WebAuthn, Steward 2026-09-03) ----------
+
+@app.post("/api/v1/me/security/passkey/register", dependencies=[Depends(verify_client)])
+def my_passkey_register_start(account_id: int = Depends(verify_client)):
+    """PublicKey create options for a new passkey. The challenge is stored; the
+    browser runs navigator.credentials.create() then POSTs the response to /verify."""
+    account = db.get_account(account_id)
+    if not account:
+        raise HTTPException(404, "Account not found.")
+    try:
+        return passkeys.registration_options("account", account_id, account["email"])
+    except Exception as e:
+        raise HTTPException(400, f"Could not start passkey setup: {e}")
+
+
+@app.post("/api/v1/me/security/passkey/verify", dependencies=[Depends(verify_client)])
+def my_passkey_register_verify(payload: PasskeyVerifyIn, account_id: int = Depends(verify_client)):
+    """Verify the navigator.credentials.create() response and store the credential."""
+    try:
+        return passkeys.verify_registration("account", account_id, payload.credential)
+    except passkeys.PasskeyError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/v1/me/security/passkeys", dependencies=[Depends(verify_client)])
+def my_passkey_list(account_id: int = Depends(verify_client)):
+    return {"passkeys": passkeys.list_passkeys_for("account", account_id)}
+
+
+@app.delete("/api/v1/me/security/passkeys/{credential_id}", dependencies=[Depends(verify_client)])
+def my_passkey_delete(credential_id: str, account_id: int = Depends(verify_client)):
+    if not passkeys.delete_passkey_for("account", account_id, credential_id):
+        raise HTTPException(404, "Passkey not found.")
+    return {"ok": True}
+
+
+# ---------- passkey sign-in (WebAuthn, first-factor) ----------
+
+@app.post("/api/v1/auth/passkey/login/start")
+def client_passkey_login_start(payload: AccessCheckIn, request: Request):
+    """PublicKey get options for passwordless sign-in. Returns the credential-
+    allowlist options so the browser can run navigator.credentials.get()."""
+    ip = sc.client_ip(request)
+    if sc.is_banned(ip) or sc.check_rate(ip, "login"):
+        raise HTTPException(429, "Too many sign-in attempts. Try again in a minute.")
+    account = db.get_account_by_email(str(payload.email).lower())
+    if not account:
+        # Do not reveal whether the account exists; ask them to use the email flow.
+        raise HTTPException(401, "No passkey available for that email.")
+    if db._row_get(account, "account_state", "active") != "active":
+        raise HTTPException(403, "This account is not active. Contact support.")
+    try:
+        return passkeys.authentication_options("account", account["id"])
+    except passkeys.PasskeyError:
+        raise HTTPException(401, "No passkey registered for that email.")
+
+
+@app.post("/api/v1/auth/passkey/login/verify")
+def client_passkey_login_verify(payload: PasskeyVerifyIn, request: Request):
+    """Verify the navigator.credentials.get() assertion and issue a session token."""
+    ip = sc.client_ip(request)
+    if sc.is_banned(ip):
+        raise HTTPException(403, "Access temporarily blocked. Contact support.")
+    try:
+        res = passkeys.verify_authentication("account", None, payload.credential)
+    except passkeys.PasskeyError as e:
+        sc.record_failed(ip, "login_fail", None, f"passkey verify: {e}")
+        raise HTTPException(401, str(e))
+    account_id = res.get("account_id")
+    account = db.get_account(account_id) if account_id else None
+    if not account:
+        raise HTTPException(401, "Account not found.")
+    if db._row_get(account, "account_state", "active") != "active":
+        raise HTTPException(403, "This account is not active. Contact support.")
+    # Passkey is the primary factor here; if the account also has 2FA enabled, the
+    # standard MFA gate still applies (passkey alone does not issue the token).
+    meth = account_security.enabled_methods(account_id)
+    if meth:
+        challenge = create_mfa_token(account_id, [m["method"] for m in meth])
+        sc.record_ok(ip, "login_ok", account_id)
+        return LoginOut(token="__mfa__", account=_account_to_out(account),
+                        mfa={"challenge": challenge, "methods": meth})
+    sc.record_ok(ip, "login_ok", account_id)
+    return LoginOut(token=create_client_token(account_id), account=_account_to_out(account))
 
 
 # ---------- client backups (Steward 2026-09-03) ----------
@@ -946,7 +1040,10 @@ def admin_mfa_verify(payload: AdminMFAVerifyIn, request: Request):
 
 @app.get("/api/v1/admin/security", dependencies=[Depends(verify_admin)])
 def admin_security_state():
-    return account_security.admin_2fa_state()
+    state = account_security.admin_2fa_state()
+    state["passkeys"] = passkeys.list_passkeys_for("admin")
+    state["passkey_enabled"] = bool(passkeys.list_passkeys_for("admin"))
+    return state
 
 
 @app.post("/api/v1/admin/security/totp/setup", dependencies=[Depends(verify_admin)])
@@ -985,6 +1082,73 @@ def admin_email_disable():
     cur = db.get_setting("admin_2fa", "") or ""
     db.set_setting("admin_2fa", ",".join(x for x in cur.split(",") if x != "email"))
     return {"ok": True}
+
+
+# ---------- admin passkeys (WebAuthn, Steward 2026-09-03) ----------
+
+@app.post("/api/v1/admin/security/passkey/register", dependencies=[Depends(verify_admin)])
+def admin_passkey_register_start():
+    """Admin passkey registration start (single shared admin, scope='admin')."""
+    try:
+        return passkeys.registration_options("admin", None, "admin@steprotech.com")
+    except Exception as e:
+        raise HTTPException(400, f"Could not start passkey setup: {e}")
+
+
+@app.post("/api/v1/admin/security/passkey/verify", dependencies=[Depends(verify_admin)])
+def admin_passkey_register_verify(payload: PasskeyVerifyIn):
+    try:
+        return passkeys.verify_registration("admin", None, payload.credential)
+    except passkeys.PasskeyError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/v1/admin/security/passkeys", dependencies=[Depends(verify_admin)])
+def admin_passkey_list():
+    return {"passkeys": passkeys.list_passkeys_for("admin")}
+
+
+@app.delete("/api/v1/admin/security/passkeys/{credential_id}", dependencies=[Depends(verify_admin)])
+def admin_passkey_delete(credential_id: str):
+    if not passkeys.delete_passkey_for("admin", None, credential_id):
+        raise HTTPException(404, "Passkey not found.")
+    return {"ok": True}
+
+
+# Admin passkey sign-in (first-factor, no password). Only usable if admin has a
+# passkey registered. If admin 2FA is enabled, the MFA gate still applies.
+@app.post("/api/v1/admin/passkey/login/start")
+def admin_passkey_login_start(request: Request):
+    ip = sc.client_ip(request)
+    if sc.is_banned(ip) or sc.check_rate(ip, "login"):
+        raise HTTPException(429, "Too many sign-in attempts. Try again in a minute.")
+    try:
+        return passkeys.authentication_options("admin", None)
+    except passkeys.PasskeyError:
+        raise HTTPException(401, "No admin passkey registered.")
+
+
+@app.post("/api/v1/admin/passkey/login/verify", response_model=AdminLoginOut)
+def admin_passkey_login_verify(payload: PasskeyVerifyIn, request: Request):
+    ip = sc.client_ip(request)
+    if sc.is_banned(ip):
+        raise HTTPException(403, "Access temporarily blocked. Contact support.")
+    try:
+        passkeys.verify_authentication("admin", None, payload.credential)
+    except passkeys.PasskeyError as e:
+        sc.record_failed(ip, "login_fail", None, f"admin passkey verify: {e}")
+        raise HTTPException(401, str(e))
+    sc.record_ok(ip, "login_ok", None)
+    methods = account_security.admin_2fa_state()["methods"]
+    if methods:
+        return AdminLoginOut(
+            token="__mfa__",
+            expires_hours=settings.jwt_expiry_hours,
+            mfa={"challenge": create_mfa_token(0, [m["method"] for m in methods]),
+                 "methods": methods},
+        )
+    return AdminLoginOut(token=create_access_token("admin"),
+                         expires_hours=settings.jwt_expiry_hours)
 
 
 @app.get("/api/v1/admin/settings", dependencies=[Depends(verify_admin)])

@@ -20,6 +20,9 @@ class Settings:
     base_domain: str = os.getenv("BASE_DOMAIN", "steprotech.com")
     port_range_start: int = int(os.getenv("PORT_RANGE_START", "32768"))
     port_range_end: int = int(os.getenv("PORT_RANGE_END", "60999"))
+    # WebAuthn relying-party id for passkeys (2026-09-03). Must be a registrable
+    # domain (or subdomain) the portal is really served on, minus scheme.
+    rp_id: str = os.getenv("RP_ID", "portal.steprotech.com")
 
     # --- Admin portal auth ---
     admin_password_hash: str = os.getenv("ADMIN_PASSWORD_HASH", "")  # bcrypt hash
