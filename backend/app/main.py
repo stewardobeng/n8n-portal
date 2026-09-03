@@ -22,6 +22,7 @@ from pydantic import BaseModel, EmailStr, Field
 from .config import settings
 from . import db
 from .services import provisioner, billing, access_gate, admin_ops
+from .services import account_security
 from .services.admin_ops import AdminOpsError
 from .services.portainer_client import PortainerClient
 from .services.npm_client import NPMClient
@@ -29,7 +30,8 @@ from .services.emailer import (send_welcome_credentials, send_reset_password,
                                send_access_token, EmailError)
 from .security import (create_access_token, verify_admin,
                        verify_admin_password, verify_password, hash_password,
-                       create_client_token, verify_client)
+                       create_client_token, verify_client, create_mfa_token,
+                       verify_mfa_token)
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("n8n-portal")
@@ -155,6 +157,7 @@ class AdminLoginIn(BaseModel):
 class AdminLoginOut(BaseModel):
     token: str
     expires_hours: int
+    mfa: Optional[dict] = None  # present when admin 2FA is required
 
 
 class AccessCheckIn(BaseModel):
@@ -174,11 +177,45 @@ class LoginIn(BaseModel):
 class LoginOut(BaseModel):
     token: str
     account: AccountOut
+    mfa: Optional[dict] = None  # present when 2FA is required: {challenge, methods}
 
 
 class TokenVerifyIn(BaseModel):
     email: EmailStr
     token: str = Field(..., min_length=1, max_length=16)
+
+
+class ForgotPasswordIn(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordIn(BaseModel):
+    token: str = Field(..., min_length=10, max_length=128)
+    password: str = Field(..., min_length=8, max_length=128)
+
+
+class Login2FAIn(BaseModel):
+    email: EmailStr
+    password: str = Field(..., min_length=1, max_length=128)
+
+
+class MFAVerifyIn(BaseModel):
+    email: EmailStr
+    code: str = Field(..., min_length=6, max_length=10)
+
+
+class TOTPSetupIn(BaseModel):
+    # code to verify (validating the secret against the authenticator)
+    code: str = Field(..., min_length=6, max_length=10)
+
+
+class OTPEnableIn(BaseModel):
+    code: str = Field(..., min_length=6, max_length=10)
+
+
+class AdminMFAVerifyIn(BaseModel):
+    challenge: str = Field(..., min_length=10, max_length=512)
+    code: str = Field(..., min_length=6, max_length=10)
 
 
 class AccessRequestOut(BaseModel):
@@ -268,7 +305,9 @@ def access_check(payload: AccessCheckIn):
 @app.post("/api/v1/auth/login", response_model=LoginOut)
 def client_login(payload: LoginIn):
     """Returning-user login: email + password -> portal session token.
-    Suspended/archived accounts are blocked (admin lifecycle, 2026-09-02)."""
+    Suspended/archived accounts are blocked (admin lifecycle, 2026-09-02).
+    If the account has 2FA enabled, password is checked and an MFA challenge is
+    returned (no token yet) — the client must pass the second factor (2026-09-02)."""
     email = str(payload.email).lower()
     account = db.get_account_by_email(email)
     if not account:
@@ -281,10 +320,92 @@ def client_login(payload: LoginIn):
             "This account is " + _row_get(account, "account_state", "active") +
             ". Contact support for help.",
         )
+    # 2FA gate: authenticator TOTP +/or email OTP
+    meth = account_security.enabled_methods(account["id"])
+    if meth:
+        # mint a short-lived MFA challenge token (sub acc:<id> mfa) holding which
+        # methods are allowed; the final token is issued after the code passes.
+        challenge = create_mfa_token(account["id"], [m["method"] for m in meth])
+        return LoginOut(
+            token="__mfa__",
+            account=_account_to_out(account),
+            mfa={"challenge": challenge, "methods": meth},
+        )
     return LoginOut(
         token=create_client_token(account["id"]),
         account=_account_to_out(account),
     )
+
+
+@app.post("/api/v1/auth/mfa-verify", response_model=LoginOut)
+def client_mfa_verify(payload: MFAVerifyIn):
+    """Second factor for a 2FA account: TOTP code from the authenticator app OR
+    the emailed one-time code. Returns the real portal session token."""
+    email = str(payload.email).lower()
+    account = db.get_account_by_email(email)
+    if not account:
+        raise HTTPException(404, "No account for this email.")
+    if _row_get(account, "account_state", "active") != "active":
+        raise HTTPException(403, "This account is " +
+                            _row_get(account, "account_state", "active") +
+                            ". Contact support for help.")
+    code = payload.code.strip()
+    methods = account_security.enabled_methods(account["id"])
+    if not methods:
+        raise HTTPException(409, "This account does not require a second factor.")
+    ok = False
+    if any(m["method"] == "totp" for m in methods):
+        ok = account_security.totp_verify_code(account["id"], code)
+    if not ok and any(m["method"] == "email" for m in methods):
+        ok = account_security.email_otp_verify(account["id"], code)
+    if not ok:
+        raise HTTPException(401, "That code is invalid or has expired.")
+    return LoginOut(
+        token=create_client_token(account["id"]),
+        account=_account_to_out(account),
+    )
+
+
+@app.post("/api/v1/auth/mfa-send-otp", response_model=dict)
+def client_mfa_send_otp(payload: AccessCheckIn):
+    """Resend the emailed one-time code for a 2FA account (after login)."""
+    account = db.get_account_by_email(str(payload.email).lower())
+    if not account:
+        raise HTTPException(404, "No account for this email.")
+    if _row_get(account, "account_state", "active") != "active":
+        raise HTTPException(403, "This account is " +
+                            _row_get(account, "account_state", "active") +
+                            ". Contact support for help.")
+    if not _row_get(account, "email_2fa", 0):
+        raise HTTPException(409, "Email 2FA is not enabled for this account.")
+    return account_security.email_otp_send(account["id"])
+
+
+@app.post("/api/v1/auth/forgot-password", response_model=dict)
+def forgot_password(payload: ForgotPasswordIn):
+    """Email a single-use reset link. Always returns 200 so attackers cannot
+    enumerate which emails have accounts. Mail failures are logged, not surfaced
+    (the response must not reveal whether an account or SMTP problem occurred)."""
+    try:
+        token = account_security.request_password_reset(str(payload.email))
+    except EmailError as e:
+        log.error("password reset mail failed for %s: %s", str(payload.email), e)
+        token = None
+    if token:
+        log.info("password reset issued for %s", str(payload.email))
+    else:
+        log.info("password reset requested for unknown/non-active %s", str(payload.email))
+    return {"sent": True}
+
+
+@app.post("/api/v1/auth/reset-password", response_model=dict)
+def reset_password(payload: ResetPasswordIn):
+    """Consume a reset token and set a new portal password."""
+    try:
+        account_security.reset_password(payload.token, payload.password)
+    except account_security.SecurityError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
 
 
 @app.post("/api/v1/auth/verify-token", response_model=AccessCheckOut)
@@ -313,6 +434,62 @@ def me(account_id: int = Depends(verify_client)):
         "account": _account_to_out(account).model_dump(),
         "instances": [_instance_to_out(i).model_dump() for i in instances],
     }
+
+
+@app.get("/api/v1/me/security", dependencies=[Depends(verify_client)])
+def my_security(account_id: int = Depends(verify_client)):
+    """Current 2FA setup state for the signed-in account (customer / admin)."""
+    account = db.get_account(account_id)
+    if not account:
+        raise HTTPException(404, "Account not found.")
+    return {
+        "methods": account_security.enabled_methods(account_id),
+        "totp_enabled": bool(_row_get(account, "totp_enabled", 0)),
+        "email_2fa": bool(_row_get(account, "email_2fa", 0)),
+        "has_totp_secret": bool(db._get_totp_secret(account_id)),
+    }
+
+
+@app.post("/api/v1/me/security/totp/setup", dependencies=[Depends(verify_client)])
+def my_totp_setup(account_id: int = Depends(verify_client)):
+    """Start authenticator-app 2FA: returns the otpauth URI + secret for a QR."""
+    return account_security.totp_setup(account_id)
+
+
+@app.post("/api/v1/me/security/totp/enable", dependencies=[Depends(verify_client)])
+def my_totp_enable(payload: TOTPSetupIn, account_id: int = Depends(verify_client)):
+    """Verify the code from the authenticator app to enable TOTP 2FA."""
+    if not account_security.totp_verify_and_enable(account_id, payload.code.strip()):
+        raise HTTPException(400, "That authenticator code is invalid. Try again.")
+    return {"ok": True}
+
+
+@app.post("/api/v1/me/security/totp/disable", dependencies=[Depends(verify_client)])
+def my_totp_disable(account_id: int = Depends(verify_client)):
+    db.set_account_totp_enabled(account_id, False)
+    db.set_account_totp_secret(account_id, "")
+    return {"ok": True}
+
+
+@app.post("/api/v1/me/security/email/send", dependencies=[Depends(verify_client)])
+def my_email_otp_send(account_id: int = Depends(verify_client)):
+    """Send a 6-digit code to the account email to confirm email 2FA setup."""
+    return account_security.email_otp_send(account_id)
+
+
+@app.post("/api/v1/me/security/email/enable", dependencies=[Depends(verify_client)])
+def my_email_enable(payload: OTPEnableIn, account_id: int = Depends(verify_client)):
+    """Verify the emailed code to enable email 2FA."""
+    if not account_security.email_otp_verify(account_id, payload.code.strip()):
+        raise HTTPException(400, "That code is invalid or has expired.")
+    db.set_account_email_2fa(account_id, True)
+    return {"ok": True}
+
+
+@app.post("/api/v1/me/security/email/disable", dependencies=[Depends(verify_client)])
+def my_email_disable(account_id: int = Depends(verify_client)):
+    db.set_account_email_2fa(account_id, False)
+    return {"ok": True}
 
 
 # ---------- client endpoints ----------
@@ -482,10 +659,85 @@ def environments():
 def admin_login(payload: AdminLoginIn):
     if not verify_admin_password(payload.password):
         raise HTTPException(401, "Invalid admin password.")
+    # Admin 2FA gate
+    methods = account_security.admin_2fa_state()["methods"]
+    if methods:
+        return AdminLoginOut(
+            token="__mfa__",
+            expires_hours=settings.jwt_expiry_hours,
+            mfa={"challenge": create_mfa_token(0, [m["method"] for m in methods]),
+                 "methods": methods},
+        )
     return AdminLoginOut(
         token=create_access_token("admin"),
         expires_hours=settings.jwt_expiry_hours,
     )
+
+
+@app.post("/api/v1/admin/mfa-verify", response_model=AdminLoginOut)
+def admin_mfa_verify(payload: AdminMFAVerifyIn):
+    """Admin second factor after the password. Verifies the MFA challenge token
+    (proves the password was correct) + the code, then issues the admin JWT."""
+    account_id, methods = verify_mfa_token(payload.challenge)
+    if account_id != 0:
+        raise HTTPException(401, "Invalid admin MFA challenge.")
+    enabled = account_security.admin_2fa_state()["methods"]
+    if not enabled:
+        raise HTTPException(409, "Admin 2FA is not enabled.")
+    ok = False
+    if any(m["method"] == "totp" for m in enabled):
+        ok = account_security.admin_totp_verify_code(payload.code)
+    if not ok and any(m["method"] == "email" for m in enabled):
+        ok = account_security.admin_email_otp_verify(payload.code)
+    if not ok:
+        raise HTTPException(401, "That code is invalid or has expired.")
+    return AdminLoginOut(
+        token=create_access_token("admin"),
+        expires_hours=settings.jwt_expiry_hours,
+    )
+
+
+@app.get("/api/v1/admin/security", dependencies=[Depends(verify_admin)])
+def admin_security_state():
+    return account_security.admin_2fa_state()
+
+
+@app.post("/api/v1/admin/security/totp/setup", dependencies=[Depends(verify_admin)])
+def admin_totp_setup():
+    return account_security.admin_totp_setup()
+
+
+@app.post("/api/v1/admin/security/totp/enable", dependencies=[Depends(verify_admin)])
+def admin_totp_enable(payload: TOTPSetupIn):
+    if not account_security.admin_totp_verify_enable(payload.code.strip()):
+        raise HTTPException(400, "That authenticator code is invalid. Try again.")
+    return {"ok": True}
+
+
+@app.post("/api/v1/admin/security/totp/disable", dependencies=[Depends(verify_admin)])
+def admin_totp_disable():
+    account_security.admin_totp_disable()
+    return {"ok": True}
+
+
+@app.post("/api/v1/admin/security/email/send", dependencies=[Depends(verify_admin)])
+def admin_email_otp_send():
+    return account_security.admin_email_send_otp()
+
+
+@app.post("/api/v1/admin/security/email/enable", dependencies=[Depends(verify_admin)])
+def admin_email_enable(payload: OTPEnableIn):
+    if not account_security.admin_email_otp_verify(payload.code.strip()):
+        raise HTTPException(400, "That code is invalid or has expired.")
+    account_security.admin_email_enable()
+    return {"ok": True}
+
+
+@app.post("/api/v1/admin/security/email/disable", dependencies=[Depends(verify_admin)])
+def admin_email_disable():
+    cur = db.get_setting("admin_2fa", "") or ""
+    db.set_setting("admin_2fa", ",".join(x for x in cur.split(",") if x != "email"))
+    return {"ok": True}
 
 
 @app.get("/api/v1/admin/settings", dependencies=[Depends(verify_admin)])

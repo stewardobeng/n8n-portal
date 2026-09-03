@@ -24,7 +24,9 @@
     unlinkedStacks: [],   // admin: attach candidates (GET /admin/stacks/unlinked)
     menuOpen: false,
     pollTimer: null,
-    provisioningPw: null  // signup password held in-session for owner auto-create
+    provisioningPw: null, // signup password held in-session for owner auto-create
+    mfa: null,             // 2FA challenge in-flight (email, challenge, methods)
+    security2fa: null       // 2FA setup state (GET /me/security or /admin/security)
   };
 
   var $ = function (sel, root) { return (root || document).querySelector(sel); };
@@ -160,14 +162,16 @@ var ICONS = {
     ["workspace", "My workspaces", "/customer/workspaces"],
     ["billing", "Plans & billing", "/customer/billing"],
     ["support", "Support", "/customer/support"],
-    ["account", "Account", "/customer/account"]
+    ["account", "Account", "/customer/account"],
+    ["security", "Security", "/customer/security"]
   ];
   var adminNav = [
     ["overview", "Overview", "/admin/overview"],
     ["requests", "Access requests", "/admin/requests"],
     ["accounts", "Accounts", "/admin/accounts"],
     ["maintenance", "Billing maintenance", "/admin/maintenance"],
-    ["settings", "Settings", "/admin/settings"]
+    ["settings", "Settings", "/admin/settings"],
+    ["security", "Security", "/admin/security"]
   ];
 
   function profileChip() {
@@ -284,6 +288,55 @@ var ICONS = {
     );
   }
 
+  function forgotPage() {
+    return authLayout(
+      '<div class="eyebrow">Password help</div><h1>Reset your password</h1>' +
+      '<p class="muted">Enter your account email and we will send a link to set a new portal password.</p>' +
+      '<form data-form="forgot"><div class="field"><label>Email address</label>' +
+      '<input name="email" type="email" required placeholder="you@example.com"></div>' +
+      '<button class="button primary-wide" type="submit">Send reset link</button></form>' +
+      '<div class="banner success" id="forgot-done" style="display:none;margin-top:24px">' + icon("check") + "<div><strong>Check your email</strong><br><span class=\"small\">If an account exists for that address, a reset link is on its way. The link works for 1 hour.</span></div></div>" +
+      '<p class="small muted" style="text-align:center;margin-top:18px"><a href="#/entry">Back to sign in</a></p>'
+    );
+  }
+
+  function resetPage() {
+    var params = new URLSearchParams(location.hash.split("?")[1] || "");
+    var tok = params.get("token") || "";
+    if (!tok) {
+      return authLayout(
+        '<div class="eyebrow">Password help</div><h1>Set a new password</h1>' +
+        '<p class="muted">This reset link is missing its token. Request a fresh one below.</p>' +
+        '<div class="actions"><a class="button secondary" href="#/forgot">Request a new link</a></div>'
+      );
+    }
+    return authLayout(
+      '<div class="eyebrow">Password help</div><h1>Set a new password</h1>' +
+      '<p class="muted">Choose a strong new password for your portal account. It must be at least 8 characters.</p>' +
+      '<form data-form="reset"><div class="field"><label>New password</label><div class="input-row">' +
+      '<input id="reset-password" name="password" type="password" required minlength="8">' +
+      '<button type="button" class="input-action" data-action="toggle-password" data-target="reset-password">' + icon("eye") + '</button></div></div>' +
+      '<button class="button primary-wide" type="submit">Set new password</button></form>' +
+      '<p class="small muted" style="text-align:center;margin-top:18px"><a href="#/entry">Back to sign in</a></p>'
+    );
+  }
+
+  function mfaPage() {
+    var m = state.mfa;
+    if (!m) { navigate("/entry"); return ""; }
+    var emailMethod = m.methods.some(function (x) { return x.method === "email"; });
+    return authLayout(
+      '<div class="eyebrow">Two-factor authentication</div><h1>Enter your code</h1>' +
+      '<p class="muted">Sign in as ' + esc(m.email) + '. Enter the code from your ' +
+      (m.methods.length === 1 ? (m.methods[0].method === "totp" ? "authenticator app" : "email") : "authenticator app or email") + '.</p>' +
+      '<form data-form="mfa"><div class="field"><label>Verification code</label>' +
+      '<input id="mfa-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" required placeholder="123456" maxlength="10"></div>' +
+      '<button class="button primary-wide" type="submit">Verify &amp; sign in</button></form>' +
+      (emailMethod ? '<p class="small muted" style="text-align:center;margin-top:14px"><a href="#" data-action="mfa-resend">Resend email code</a></p>' : "") +
+      '<p class="small muted" style="text-align:center;margin-top:12px"><a href="#/entry">Use a different email</a></p>'
+    );
+  }
+
   function signinPage() {
     var gateEmail = state.gateEmail || "";
     // Pre-fill the email from the entry screen and lock it: the customer walks
@@ -300,7 +353,7 @@ var ICONS = {
       '<input id="signin-password" name="password" type="password" required>' +
       '<button type="button" class="input-action" data-action="toggle-password" data-target="signin-password">' + icon("eye") + '</button></div></div>' +
       '<button class="button primary-wide" type="submit">Sign in</button></form>' +
-      '<div class="banner" style="margin-top:24px">' + icon("support") + "<div><strong>Forgot your portal password?</strong><br><span class=\"small\">Contact support@steprotech.com for help. Password recovery inside n8n is separate.</span></div></div>" +
+      '<p class="small muted" style="text-align:center;margin-top:14px"><a href="#/forgot">Forgot your portal password?</a></p>' +
       '<p class="small muted" style="text-align:center;margin-top:18px">No account yet? <a href="#/entry">Request access</a></p>'
     );
   }
@@ -691,6 +744,41 @@ var ICONS = {
       "</tbody></table></div></section></main>");
   }
 
+  function securityPage(isAdmin) {
+    var path = isAdmin ? "/admin/security" : "/me/security";
+    var st = state.security2fa;
+    var toggles = "";
+    var methods = (st && st.methods) || [];
+    function has(m) { return methods.some(function (x) { return x.method === m; }); }
+    // TOTP card
+    var totpEnabled = st && st.totp_enabled;
+    var totpCard =
+      '<section class="card"><div class="card-head"><h2>Authenticator app</h2>' +
+      (totpEnabled ? statusBadge("active", "On") : statusBadge("pending", "Off")) + "</div>" +
+      '<p class="muted">Use an authenticator app (Google Authenticator, Authy, 1Password) to generate a 6-digit code at sign-in.</p>' +
+      (totpEnabled
+        ? '<button class="button secondary" data-action="sec-totp-disable" data-kind="' + (isAdmin ? "admin" : "user") + '">Turn off authenticator 2FA</button>'
+        : '<button class="button" data-action="sec-totp-setup" data-kind="' + (isAdmin ? "admin" : "user") + '">' + icon("shield") + " Set up authenticator</button>") +
+      "</section>";
+    // Email card
+    var emailEnabled = st && st.email_2fa;
+    var emailCard =
+      '<section class="card"><div class="card-head"><h2>Email code</h2>' +
+      (emailEnabled ? statusBadge("active", "On") : statusBadge("pending", "Off")) + "</div>" +
+      '<p class="muted">We send a 6-digit code to your email at sign-in.</p>' +
+      (emailEnabled
+        ? '<button class="button secondary" data-action="sec-email-disable" data-kind="' + (isAdmin ? "admin" : "user") + '">Turn off email 2FA</button>'
+        : '<button class="button" data-action="sec-email-setup" data-kind="' + (isAdmin ? "admin" : "user") + '">' + icon("mail") + " Set up email 2FA</button>") +
+      "</section>";
+    var heading = isAdmin ? "Admin security" : "Account security";
+    return appLayout(isAdmin ? "admin" : "customer", "Security", "security",
+      '<main class="page">' + pageHead(heading, "Add a second factor to your sign-in. You can use any combination; a code from one of them is required at login.") +
+      '<div class="grid cols-2" style="margin-top:10px">' + totpCard + emailCard + "</div>" +
+      '<div class="banner" style="margin-top:18px">' + icon("shield") +
+      "<div><strong>How it works</strong><br><span class=\"small\">After entering your password, you will be asked for a code. Add at least one method so you cannot be locked out if you lose a device. You can add both and use either.</span></div></div>" +
+      "</main>");
+  }
+
   function subLabel(sub) {
     return titleCase(String(sub || "none").replace("_", " "));
   }
@@ -885,7 +973,7 @@ var ICONS = {
   /* ================= router ================= */
   function render() {
     modalRoot.innerHTML = "";
-    var route = (location.hash || "#/entry").slice(1);
+    var route = (location.hash || "#/entry").slice(1).split("?")[0];
     var parts = route.split("/").filter(Boolean);
     var html = null;
 
@@ -895,6 +983,9 @@ var ICONS = {
     else if (route === "/code") html = codePage();
     else if (route === "/register") html = registerPage();
     else if (route === "/signin") html = signinPage();
+    else if (route === "/forgot") html = forgotPage();
+    else if (route === "/reset") html = resetPage();
+    else if (route === "/mfa") html = mfaPage();
 
     /* ---- customer app ---- */
     else if (route === "/customer/dashboard") html = requireCustomer(function () { return customerDashboard(); });
@@ -902,6 +993,7 @@ var ICONS = {
     else if (route === "/customer/billing") html = requireCustomer(function () { return customerBilling(); });
     else if (route === "/customer/support") html = requireCustomer(function () { return supportPage(); });
     else if (route === "/customer/account") html = requireCustomer(function () { return accountPage(); });
+    else if (route === "/customer/security") html = requireCustomer(function () { return securityPage(); });
 
     /* ---- admin app ---- */
     else if (route === "/admin/signin") html = state.adminAuthed ? appLayout("admin", "Overview", "overview", '<main class="page"><p class="muted">Signed in.</p></main>') : adminSignin();
@@ -912,6 +1004,7 @@ var ICONS = {
     else if (parts[0] === "admin" && parts[1] === "account") html = requireAdmin(function () { return adminAccountPage(parts[2]); });
     else if (route === "/admin/maintenance") html = requireAdmin(function () { return maintenancePage(); });
     else if (route === "/admin/settings") html = requireAdmin(function () { return settingsPage(); });
+    else if (route === "/admin/security") html = requireAdmin(function () { return securityPage(true); });
     else html = entryPage();
 
     appEl.innerHTML = html;
@@ -941,6 +1034,12 @@ var ICONS = {
     }
     if (parts[0] === "customer") { refreshSession().then(after); }
     else if (parts[0] === "admin" && route !== "/admin/signin") { refreshAdminData().then(after); }
+    // security (2FA) setup state: /me/security or /admin/security
+    if (route === "/customer/security" || route === "/admin/security") {
+      var secPath = route.indexOf("admin") === 1 ? "/admin/security" : "/me/security";
+      api(secPath).then(function (d) { state.security2fa = d; render(); })
+        .catch(function () { state.security2fa = null; });
+    }
     // note: archivedAccounts() is dispatched in render() via route mapping below
     // username preview on register
     if (route === "/register") {
@@ -1344,6 +1443,14 @@ var ICONS = {
           act.innerHTML = icon(inp.type === "password" ? "eye" : "eyeoff");
         }
       }
+      else if (action === "mfa-resend") {
+        event.preventDefault();
+        var ms = state.mfa;
+        if (!ms) return;
+        api("/auth/mfa-send-otp", { method: "POST", body: { email: ms.email } }).then(function () {
+          showToast("Code sent", "A new code has been emailed to you.");
+        }).catch(function (err) { showToast("Could not send", err.message); });
+      }
       else if (action === "payment-continue") { doPayment(); }
       else if (action === "pay-now") paymentModal();
       else if (action === "provision-now") { autoProvision(); }
@@ -1736,12 +1843,78 @@ var ICONS = {
       }
       else if (type === "signin") {
         var f2 = new FormData(form);
-        api("/auth/login", { method: "POST", body: { email: String(f2.get("email") || "").trim().toLowerCase(), password: String(f2.get("password") || "") } }).then(function (r) {
+        var em = String(f2.get("email") || "").trim().toLowerCase();
+        api("/auth/login", { method: "POST", body: { email: em, password: String(f2.get("password") || "") } }).then(function (r) {
+          if (r.mfa) {
+            // 2FA required: stash the challenge + methods, show the second-factor step
+            state.mfa = { email: em, challenge: r.mfa.challenge, methods: r.mfa.methods || [], codeSent: false };
+            navigate("/mfa");
+            return;
+          }
           localStorage.setItem("portal_token", r.token);
           state.session = { token: r.token, account: r.account, instances: [] };
           loadPlans();
           navigate("/customer/dashboard");
         }).catch(function (err) { showToast("Sign in failed", err.message); });
+      }
+      else if (type === "forgot") {
+        var fe = String(new FormData(form).get("email") || "").trim().toLowerCase();
+        api("/auth/forgot-password", { method: "POST", body: { email: fe } }).then(function () {
+          var done = document.getElementById("forgot-done");
+          if (done) done.style.display = "flex";
+          showToast("Reset link sent", "Check your email if an account exists for that address.");
+        }).catch(function (err) { showToast("Could not send", err.message); });
+      }
+      else if (type === "reset") {
+        var params = new URLSearchParams(location.hash.split("?")[1] || "");
+        var tok = params.get("token") || "";
+        var np = String(new FormData(form).get("password") || "");
+        var btn = form.querySelector("button[type=submit]");
+        if (btn) btn.disabled = true;
+        api("/auth/reset-password", { method: "POST", body: { token: tok, password: np } }).then(function () {
+          showToast("Password updated", "You can now sign in with your new password.");
+          navigate("/entry");
+        }).catch(function (err) {
+          showToast("Reset failed", err.message);
+          if (btn) btn.disabled = false;
+        });
+      }
+      else if (type === "mfa") {
+        var ms = state.mfa;
+        if (!ms) { navigate("/entry"); return; }
+        var code = String(new FormData(form).get("code") || "").trim();
+        var btnm = form.querySelector("button[type=submit]");
+        if (btnm) btnm.disabled = true;
+        api("/auth/mfa-verify", { method: "POST", body: { email: ms.email, code: code } }).then(function (r) {
+          localStorage.setItem("portal_token", r.token);
+          state.session = { token: r.token, account: r.account, instances: [] };
+          state.mfa = null;
+          loadPlans();
+          navigate("/customer/dashboard");
+        }).catch(function (err) {
+          showToast("Code not accepted", err.message);
+          if (btnm) btnm.disabled = false;
+        });
+      }
+      else if (type === "sec-totp-enable") {
+        var kind = (state.security2fa && currentKind() === "admin") ? "admin" : "user";
+        var tsPath = kind === "admin" ? "/admin/security/totp/enable" : "/me/security/totp/enable";
+        var tc = String(new FormData(form).get("code") || "").trim();
+        api(tsPath, { method: "POST", body: { code: tc } }).then(function () {
+          closeModal();
+          showToast("Authenticator 2FA on", "A code from your app is now required at sign-in.");
+          refreshSecurity();
+        }).catch(function (err) { showToast("Code not accepted", err.message); });
+      }
+      else if (type === "sec-email-enable") {
+        var k2 = (state.security2fa && currentKind() === "admin") ? "admin" : "user";
+        var esPath = k2 === "admin" ? "/admin/security/email/enable" : "/me/security/email/enable";
+        var ec = String(new FormData(form).get("code") || "").trim();
+        api(esPath, { method: "POST", body: { code: ec } }).then(function () {
+          closeModal();
+          showToast("Email 2FA on", "A code is now emailed to you at sign-in.");
+          refreshSecurity();
+        }).catch(function (err) { showToast("Code not accepted", err.message); });
       }
       else if (type === "admin-signin") {
         var pwA = String(new FormData(form).get("password") || "");
@@ -1759,6 +1932,19 @@ var ICONS = {
         });
       }
     });
+  }
+
+  function refreshSecurity() {
+    var route = (location.hash || "").slice(1);
+    var secPath = route.indexOf("admin") === 1 ? "/admin/security" : "/me/security";
+    api(secPath).then(function (d) { state.security2fa = d; render(); })
+      .catch(function () { state.security2fa = null; render(); });
+  }
+
+  function qrDataUrl(uri) {
+    // The backend returns the QR as a data URI in the setup response (d.qr);
+    // this is a passthrough when a caller passes the URI directly.
+    return (uri && uri.indexOf("data:") === 0) ? uri : "";
   }
 
   function findInstanceById(id) {

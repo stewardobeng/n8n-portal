@@ -397,3 +397,8 @@ tbody tr:hover { background: #fbfdfd; }
 .field-note a { color:var(--teal, #25b4b8); font-weight:600; }
 .field-note a:hover { text-decoration:underline; }
 input[readonly] { background:var(--bg-muted, #eef2f4); cursor:not-allowed; }
+
+/* security / 2FA settings (2026-09-02) */
+.sec-qr { display:flex; justify-content:center; margin:8px 0 12px; padding:12px; background:#fff; border:1px solid var(--line, #e7ecef); border-radius:12px; }
+.sec-qr img { image-rendering:pixelated; }
+.sec-secret { font-weight:600; letter-spacing:1px; background:var(--bg-muted, #eef2f4); padding:10px; border-radius:8px; margin:6px 0 16px; }

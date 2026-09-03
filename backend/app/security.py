@@ -43,6 +43,34 @@ def create_client_token(account_id: int) -> str:
     return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
 
 
+def create_mfa_token(account_id: int, methods: list[str]) -> str:
+    """Short-lived challenge JWT for the second factor (2FA). Not a session:
+    it only proves the password was correct; the real token is minted after the
+    code is verified. Holds the account id + allowed methods."""
+    payload = {
+        "sub": f"acc:{account_id}",
+        "mfa": methods,
+        "exp": int(time.time()) + 10 * 60,  # 10 minutes to complete the code
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
+
+
+def verify_mfa_token(token: str) -> tuple[int, list[str]]:
+    """Return (account_id, methods) for a valid MFA challenge, else 401."""
+    try:
+        payload = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+    except jwt.PyJWTError as e:
+        raise HTTPException(401, f"Invalid MFA challenge: {e}")
+    sub = payload.get("sub", "")
+    if not sub.startswith("acc:"):
+        raise HTTPException(401, "Not a client MFA challenge.")
+    try:
+        account_id = int(sub.split(":", 1)[1])
+    except ValueError:
+        raise HTTPException(401, "Invalid MFA challenge subject.")
+    return account_id, payload.get("mfa", [])
+
+
 def verify_client(authorization: Optional[str] = Header(default=None, alias="Authorization")):
     """FastAPI dependency for client (portal user) routes: requires a valid
     Bearer JWT whose sub is acc:<id>."""

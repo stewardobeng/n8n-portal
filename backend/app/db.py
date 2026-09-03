@@ -11,6 +11,7 @@ import time
 import uuid
 
 from .config import settings
+from .security import hash_password
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS accounts (
@@ -30,8 +31,28 @@ CREATE TABLE IF NOT EXISTS accounts (
     paid_until INTEGER,
     paid_from INTEGER,               -- subscription start (admin mark-paid backdating)
     account_state TEXT NOT NULL DEFAULT 'active', -- active | suspended | archived (admin lifecycle)
+    totp_secret TEXT DEFAULT '',     -- authenticator-app secret (2FA)
+    totp_enabled INTEGER DEFAULT 0,  -- authenticator 2FA active
+    email_2fa INTEGER DEFAULT 0,     -- email one-time-code 2FA active
     created_at INTEGER NOT NULL,
     provisioned_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS password_resets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    token_hash TEXT NOT NULL,        -- PBKDF2 hash of the reset token (never plaintext)
+    used INTEGER NOT NULL DEFAULT 0, -- single-use
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    FOREIGN KEY (account_id) REFERENCES accounts(id)
+);
+CREATE TABLE IF NOT EXISTS email_otps (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL UNIQUE,
+    otp_hash TEXT NOT NULL,          -- PBKDF2 hash of the 6-digit code
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    FOREIGN KEY (account_id) REFERENCES accounts(id)
 );
 CREATE TABLE IF NOT EXISTS instances (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -136,6 +157,32 @@ def init_db(db_path: str | None = None) -> None:
         acols3 = [r[1] for r in cur.execute("PRAGMA table_info(accounts)")]
         if "account_state" not in acols3:
             cur.execute('ALTER TABLE accounts ADD COLUMN account_state TEXT NOT NULL DEFAULT "active"')
+        # Migration: 2FA columns (authenticator TOTP + email OTP) + reset/otp tables
+        acols4 = [r[1] for r in cur.execute("PRAGMA table_info(accounts)")]
+        for c, ddl in (
+            ("totp_secret", 'TEXT DEFAULT ""'),
+            ("totp_enabled", "INTEGER NOT NULL DEFAULT 0"),
+            ("email_2fa", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if c not in acols4:
+                cur.execute(f"ALTER TABLE accounts ADD COLUMN {c} {ddl}")
+        cur.executescript("""
+        CREATE TABLE IF NOT EXISTS password_resets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL,
+            token_hash TEXT NOT NULL,
+            used INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS email_otps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL UNIQUE,
+            otp_hash TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL
+        );
+        """)
         conn.commit()
     finally:
         conn.close()
@@ -260,6 +307,14 @@ def set_account_quota(account_id: int, quota: int) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def _row_get(row, key, default=None):
+    """sqlite3.Row helper: default when the column is missing (older DBs)."""
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return default
 
 
 def set_account_state(account_id: int, state: str) -> None:
@@ -515,6 +570,128 @@ def update_access_request(request_id: int, **fields) -> None:
             f"UPDATE access_requests SET {cols} WHERE id = ?",
             (*fields.values(), request_id),
         )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ---- account security: password reset + 2FA (2026-09-02) ----
+
+def set_account_password(account_id: int, password_hash: str) -> None:
+    conn = get_conn()
+    try:
+        conn.execute("UPDATE accounts SET password_hash = ? WHERE id = ?",
+                     (password_hash, account_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_password_reset(account_id: int, token: str, ttl_seconds: int) -> int:
+    """Store a reset token (hashed) for an account. Prior tokens are invalidated
+    (single active reset at a time). Returns the row id."""
+    token_hash = hash_password(token)
+    conn = get_conn()
+    try:
+        conn.execute("DELETE FROM password_resets WHERE account_id = ?", (account_id,))
+        cur = conn.execute(
+            "INSERT INTO password_resets (account_id, token_hash, created_at, expires_at) "
+            "VALUES (?, ?, ?, ?)",
+            (account_id, token_hash, now(), int(now()) + ttl_seconds),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def get_password_reset_by_token(token: str) -> sqlite3.Row | None:
+    token_hash = hash_password(token)
+    conn = get_conn()
+    try:
+        return conn.execute(
+            "SELECT * FROM password_resets WHERE token_hash = ? ORDER BY id DESC LIMIT 1",
+            (token_hash,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+
+def consume_password_reset(reset_id: int) -> None:
+    conn = get_conn()
+    try:
+        conn.execute("UPDATE password_resets SET used = 1 WHERE id = ?", (reset_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _get_totp_secret(account_id: int) -> str:
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT totp_secret FROM accounts WHERE id = ?", (account_id,)).fetchone()
+        return row["totp_secret"] if row else ""
+    finally:
+        conn.close()
+
+
+def set_account_totp_secret(account_id: int, secret: str) -> None:
+    conn = get_conn()
+    try:
+        conn.execute("UPDATE accounts SET totp_secret = ? WHERE id = ?", (secret, account_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_account_totp_enabled(account_id: int, enabled: bool) -> None:
+    conn = get_conn()
+    try:
+        conn.execute("UPDATE accounts SET totp_enabled = ? WHERE id = ?",
+                     (1 if enabled else 0, account_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_account_email_2fa(account_id: int, enabled: bool) -> None:
+    conn = get_conn()
+    try:
+        conn.execute("UPDATE accounts SET email_2fa = ? WHERE id = ?",
+                     (1 if enabled else 0, account_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_account_email_otp(account_id: int, otp_hash: str, ttl_seconds: int) -> None:
+    conn = get_conn()
+    try:
+        conn.execute("DELETE FROM email_otps WHERE account_id = ?", (account_id,))
+        conn.execute(
+            "INSERT INTO email_otps (account_id, otp_hash, created_at, expires_at) "
+            "VALUES (?, ?, ?, ?)",
+            (account_id, otp_hash, now(), int(now()) + ttl_seconds),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_email_otp(account_id: int) -> sqlite3.Row | None:
+    conn = get_conn()
+    try:
+        return conn.execute(
+            "SELECT * FROM email_otps WHERE account_id = ?", (account_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+
+
+def clear_email_otp(account_id: int) -> None:
+    conn = get_conn()
+    try:
+        conn.execute("DELETE FROM email_otps WHERE account_id = ?", (account_id,))
         conn.commit()
     finally:
         conn.close()

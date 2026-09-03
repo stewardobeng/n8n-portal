@@ -6,3 +6,5 @@ pydantic[email]==2.10.4
 PyJWT==2.10.1
 python-multipart==0.0.20
 stripe==11.4.1
+pyotp==2.9.0
+qrcode==8.0
