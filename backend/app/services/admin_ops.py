@@ -471,6 +471,21 @@ def attach_instance(account_id: int, environment_id: int, stack_name: str,
             env_label = _display_number(i)
             break
 
+    # Record the Portainer stack id when this compose project is Portainer-
+    # managed, so attached workspaces get the same stack-based operations as
+    # portal-provisioned ones (image update with pull, stop/start, sweep).
+    # (Steward 2026-09-03: attached workspaces had no update button / path.)
+    stack_id = None
+    try:
+        for s in pc.list_stacks():
+            if (int(s.get("EndpointId", 0)) == environment_id
+                    and s.get("Name") == stack_name):
+                stack_id = s.get("Id")
+                break
+    except Exception as e:
+        log.warning("attach: Portainer stack lookup for %s failed: %s",
+                    stack_name, e)
+
     instance_id = db.create_instance(
         account_id=account_id,
         stack_name=stack_name,
@@ -481,7 +496,7 @@ def attach_instance(account_id: int, environment_id: int, stack_name: str,
         basic_auth_user="",          # untouched: admin-attached stacks keep their
         basic_auth_password="",      # existing owner password (Steward 2026-09-02)
         n8n_encryption_key="",
-        stack_id=None,               # may not be a Portainer-managed stack
+        stack_id=stack_id,           # None when the project is not Portainer-managed
         container_id=container.get("Id", ""),
         managed=0,
         status="healthy",
