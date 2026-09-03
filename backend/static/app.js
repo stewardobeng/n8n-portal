@@ -31,7 +31,8 @@
     adminInstances: [],    // admin: all instances (GET /admin/instances) for backup/update triggers
     adminInstancesLoaded: false,
     impersonation: null,     // admin login-as: {id, label} while viewing a customer
-    impTtlMinutes: 60        // lifetime of the impersonation session (server-set)
+    impTtlMinutes: 60,       // lifetime of the impersonation session (server-set)
+    n8nLatestTag: ""         // latest n8n release tag seen (admin update watch)
   };
 
   var $ = function (sel, root) { return (root || document).querySelector(sel); };
@@ -968,7 +969,7 @@ var ICONS = {
       var name = titleCase(i.stack_name);
       var who = i.account_display || (acctMap[i.account_id] ? (acctMap[i.account_id].display_name || acctMap[i.account_id].username) : "customer #" + i.account_id);
       return '<div class="workspace-item"><span class="workspace-logo">' + icon("workspace") + "</span>" +
-        "<div><h3>" + esc(name) + " workspace</h3><p>" + esc(who) + " &middot; " + esc(i.domain || ("env " + i.environment_name)) + (i.locked ? " &middot; switched off" : "") + "</p></div>" +
+        "<div><h3>" + esc(name) + " workspace" + updateChip(i) + "</h3><p>" + esc(who) + " &middot; " + esc(i.domain || ("env " + i.environment_name)) + (i.locked ? " &middot; switched off" : "") + "</p></div>" +
         '<div class="actions end" style="margin-left:auto;flex-wrap:wrap">' +
         '<button class="button small-btn" data-action="admin-backup-run" data-id="' + i.id + '" data-kind="full"' + (disabled ? " disabled" : "") + '>' + icon("archive") + " Full backup</button>" +
         '<button class="button secondary small-btn" data-action="admin-backup-run" data-id="' + i.id + '" data-kind="workflows"' + (disabled ? " disabled" : "") + '>Export workflows</button>' +
@@ -1084,7 +1085,7 @@ var ICONS = {
             : i.status === "failed" ? statusBadge("failed", "Setup failed") : statusBadge("neutral", cap(i.status));
           var attachedTag = i.managed === 0 ? ' <span class=\"status info\">Attached</span>' : "";
           return '<article class="workspace-item"><span class="workspace-logo">' + icon("workspace") + "</span>" +
-            "<div><h3>" + esc(titleCase(i.stack_name)) + " workspace" + attachedTag + "</h3><p>" + esc(i.domain) + "<br>Env " + esc(i.environment_name || i.environment_id) + " · Port " + esc(i.port) + (i.managed === 0 ? " · password unchanged" : "") + "</p></div>" +
+            "<div><h3>" + esc(titleCase(i.stack_name)) + " workspace" + attachedTag + updateChip(i) + "</h3><p>" + esc(i.domain) + "<br>Env " + esc(i.environment_name || i.environment_id) + " · Port " + esc(i.port) + (i.managed === 0 ? " · password unchanged" : "") + "</p></div>" +
             badge + '<button class="button secondary small-btn" data-action="workspace-actions" data-id="' + i.id + '" data-name="' + esc(i.stack_name) + '">Actions</button>' +
               '<button class="button secondary small-btn" data-action="admin-backup" data-id="' + i.id + '">' + icon("archive") + " Back up</button>" +
               (i.managed !== 0 ? '<button class="button secondary small-btn" data-action="admin-update-image" data-id="' + i.id + '">' + icon("refresh") + " Update n8n</button>" : "") + '</article>';
@@ -1745,6 +1746,100 @@ var ICONS = {
     navigate("/admin/accounts");
   }
 
+  /* ---- n8n image updates (0.1.50): always pull + latest-release aware ---- */
+  var n8nReleasesCache = null;
+  function fetchN8nReleases(force) {
+    var now = Date.now();
+    if (!force && n8nReleasesCache && now - n8nReleasesCache.at < 15 * 60 * 1000) {
+      return Promise.resolve(n8nReleasesCache.data);
+    }
+    return api("/admin/n8n-releases").then(function (d) {
+      n8nReleasesCache = { at: now, data: d };
+      return d;
+    }).catch(function () { return null; });
+  }
+  function imageTagOf(img) {
+    var s = String(img || "");
+    var i = s.lastIndexOf(":");
+    return i >= 0 ? s.slice(i + 1) : s;
+  }
+  function semverTuple(t) {
+    var m = String(t || "").trim().match(/^(\d+)\.(\d+)\.(\d+)/);
+    return m ? [parseInt(m[1], 10), parseInt(m[2], 10), parseInt(m[3], 10)] : null;
+  }
+  function isVersionBehind(current, latest) {
+    var a = semverTuple(imageTagOf(current));
+    var b = semverTuple(imageTagOf(latest));
+    if (!a || !b) return false;
+    return a[0] < b[0] || (a[0] === b[0] && (a[1] < b[1] || (a[1] === b[1] && a[2] < b[2])));
+  }
+  function releaseDateLabel(iso) {
+    if (!iso) return "";
+    var d = new Date(iso);
+    return isNaN(d.getTime()) ? "" : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  }
+  function updateChip(inst) {
+    if (!inst || inst.managed === 0 || !state.n8nLatestTag || !inst.image) return "";
+    if (isVersionBehind(inst.image, state.n8nLatestTag)) {
+      return ' <span class="status warning">n8n ' + esc(state.n8nLatestTag) + " available</span>";
+    }
+    return "";
+  }
+  function updateImageModal(uInst) {
+    var wname = titleCase(uInst.stack_name);
+    showModal(modalHeader("Update n8n for " + wname) + '<div class="spinner"></div><p class="muted">Checking the current version and the latest n8n release...</p>');
+    var curP = api("/admin/instances/" + uInst.id + "/image").then(function (d) {
+      return d && d.image ? d.image : "";
+    }).catch(function () { return ""; });
+    var relP = fetchN8nReleases();
+    Promise.all([curP, relP]).then(function (res) {
+      var current = res[0] || "";
+      var rel = res[1];
+      var latestTag = (rel && rel.latest && rel.latest.tag) || "";
+      var latestIso = (rel && rel.latest && rel.latest.published_at) || "";
+      var behind = !!(latestTag && current && isVersionBehind(current, latestTag));
+      var onLatest = !!(latestTag && current && !isVersionBehind(current, latestTag));
+      var showCurrent = current && imageTagOf(current) !== "latest";
+      var latestBanner = rel && rel.latest
+        ? '<div class="banner' + (behind ? " success" : "") + '" style="margin-bottom:14px">' + icon("spark") +
+          "<div><strong>Latest n8n release: " + esc(latestTag) + "</strong><br><span class=\"small\">" +
+          (latestIso ? "Published " + esc(releaseDateLabel(latestIso)) + ". " : "") +
+          (behind ? "This workspace is on " + esc(imageTagOf(current)) + " and can be updated."
+                  : onLatest ? "This workspace is already on the latest release."
+                             : (current ? "Current: " + esc(imageTagOf(current)) : "Current version unknown.")) +
+          "</span></div>" +
+          (behind ? '<button class="button" data-action="update-image-now" data-id="' + uInst.id + '" data-tag="' + esc(latestTag) + '" style="margin-left:auto">' + icon("refresh") + " Update to " + esc(latestTag) + "</button>" : "") +
+          "</div>"
+        : '<div class="banner warning" style="margin-bottom:14px">' + icon("warning") +
+          "<div><strong>Could not check for new releases</strong><br><span class=\"small\">The release list is unreachable right now. You can still update to a specific version below.</span></div></div>";
+      showModal(modalHeader("Update n8n for " + wname) +
+        latestBanner +
+        (showCurrent ? '<div class="field"><label>Current version</label><input class="mono" value="' + esc(current) + '" readonly></div>' : "") +
+        '<div class="field"><label>Update to a specific version</label><div class="input-row">' +
+        '<span class="input-suffix">n8nio/n8n:</span>' +
+        '<input id="img-tag" type="text" placeholder="e.g. ' + esc(latestTag || "2.31.6") + '" autocomplete="off" spellcheck="false">' +
+        '</div><span class="hint">Type the exact version tag to update to (for example ' + esc(latestTag || "2.31.6") + '). Every update pulls the image from Docker Hub first, so a brand-new version works right away. Workflows and credentials are preserved.</span></div>' +
+        '<div class="actions end" style="justify-content:flex-start;flex-wrap:wrap">' +
+        '<button class="button" data-action="update-to-version" data-id="' + uInst.id + '">' + icon("refresh") + " Update n8n</button>" +
+        (showCurrent && !behind ? '<button class="button secondary" data-action="repull-version" data-id="' + uInst.id + '" data-tag="' + esc(imageTagOf(current)) + '">Re-pull ' + esc(imageTagOf(current)) + "</button>" : "") +
+        '<button class="button secondary" data-action="close-modal">Cancel</button></div>');
+    });
+  }
+  function runImageUpdate(instanceId, tag) {
+    showModal(modalHeader("Updating n8n workspace") + '<div class="spinner"></div>' +
+      '<p class="muted">Pulling n8nio/n8n:' + esc(tag) + " and recreating the workspace. This can take a few minutes; the window updates when it finishes.</p>");
+    api("/admin/instances/" + instanceId + "/update-image", { method: "POST", body: { image: tag } }).then(function (d) {
+      closeModal();
+      showToast("n8n updated", "The workspace is now on " + d.image + ". It may take a minute to come back online.");
+      state.n8nLatestTag = "";
+      refreshAdminData();
+    }).catch(function (err) {
+      closeModal();
+      showToast("Update failed", err.message);
+      refreshAdminData();
+    });
+  }
+
   function eventHandlers() {
     document.addEventListener("click", function (event) {
       var route = event.target.closest("[data-route]");
@@ -2118,15 +2213,23 @@ var ICONS = {
         event.preventDefault();
         var uInst = findInstanceById(act.dataset.id);
         if (!uInst) { showToast("Update n8n", "Workspace not found."); return; }
-        showModal(modalHeader("Update n8n for " + titleCase(uInst.stack_name)) +
-          "<p class=\"muted\">Update the n8n image for this workspace. The container is recreated against the same data volume, so your customer's workflows and credentials are preserved.</p>" +
-          '<div class="field"><label>n8n version tag</label><div class="input-row">' +
-          '<input id="img-tag" type="text" placeholder="e.g. 2.31.6" value="2.31.6">' +
-          '<span class="input-suffix">n8nio/n8n:</span></div>' +
-          '<span class="hint">Enter a version tag that exists on Docker Hub (community edition). Leave at 2.31.6 to stay on the current version.</span></div>' +
-          '<div class="consequence"><strong>This action will:</strong><ul><li>Pull the new image and recreate the container</li><li>Keep the data volume and all credentials</li><li>Briefly make the workspace unreachable while it restarts</li></ul></div>' +
-          '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
-          '<button class="button" data-confirm-admin-update-image="' + uInst.id + '">Update workspace n8n</button></div>');
+        updateImageModal(uInst);
+      }
+      else if (action === "update-to-version") {
+        event.preventDefault();
+        var tv = (($("#img-tag") || {}).value || "").trim();
+        if (!tv) { showToast("Enter a version", "Type the n8n version tag to update to."); return; }
+        runImageUpdate(act.dataset.id, tv);
+      }
+      else if (action === "repull-version") {
+        event.preventDefault();
+        if (!act.dataset.tag) { showToast("Current version unknown", "Re-open the update dialog and try again."); return; }
+        runImageUpdate(act.dataset.id, act.dataset.tag);
+      }
+      else if (action === "update-image-now") {
+        event.preventDefault();
+        if (!act.dataset.tag) { showToast("Update n8n", "No target version."); return; }
+        runImageUpdate(act.dataset.id, act.dataset.tag);
       }
       else if (action === "lock-workspace") confirmLock(act.dataset.id);
       else if (action === "unlock-workspace") confirmUnlock(act.dataset.id);
@@ -2304,16 +2407,7 @@ var ICONS = {
         closeModal();
         adminAction("/instances/" + cReset.dataset.confirmReset + "/reset-password", "Password reset started", "The new n8n password will be emailed to the customer.").then(refreshAdminData);
       }
-      var cUi = event.target.closest("[data-confirm-admin-update-image]");
-      if (cUi) {
-        var tag = (($("#img-tag") || {}).value || "").trim();
-        if (!tag) { showToast("Invalid version", "Enter an n8n version tag."); return; }
-        closeModal();
-        api("/admin/instances/" + cUi.dataset.confirmAdminUpdateImage + "/update-image", { method: "POST", body: { image: tag } }).then(function (d) {
-          showToast("n8n updated", "The workspace was recreated on " + d.image + ". It may take a minute to come back online.");
-          refreshAdminData();
-        }).catch(function (err) { showToast("Update failed", err.message); });
-      }
+      // (n8n image updates moved to the updateImageModal flow + actions, 0.1.50)
       var cQuota = event.target.closest("[data-confirm-quota]");
       if (cQuota) {
         var quotaVal = parseInt(($("#quota-input") || {}).value || "1", 10);
@@ -2740,6 +2834,10 @@ var ICONS = {
     if (!state.impersonation) {
       localStorage.removeItem("impersonation");
       localStorage.removeItem("admin_token_backup");
+    }
+    // Seed the latest n8n release tag for admin "update available" chips.
+    if (state.adminAuthed) {
+      fetchN8nReleases().then(function (d) { if (d && d.latest) state.n8nLatestTag = d.latest.tag; });
     }
     // handle payment return: ?status=success after Paystack redirect
     var params = new URLSearchParams(location.search);

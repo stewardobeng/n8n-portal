@@ -90,11 +90,17 @@ class PortainerClient:
                        content=b"{}", headers={"Content-Type": "application/json"}, timeout=timeout)
         return _strip_docker_stream(sr.content)
 
-    def update_stack_image(self, stack_id: int, endpoint_id: int, image: str) -> None:
+    def update_stack_image(self, stack_id: int, endpoint_id: int, image: str,
+                           pull: bool = True) -> None:
         """Update an n8n stack's image and redeploy it. The stack file content
         carries `image: n8nio/n8n:<tag>`; swap that tag and PUT the stack (which
         recreates the container against the same volume). Preserve stack env.
-        `image` may be a bare tag ('2.31.6') or a full 'n8nio/n8n:2.31.6'."""
+        `image` may be a bare tag ('2.31.6') or a full 'n8nio/n8n:2.31.6'.
+        `pull=True` (default) mirrors Portainer's "pull latest image" redeploy
+        flag: the image is fetched from the registry first, so a tag that is not
+        yet cached on the environment server still deploys (2026-09-03). The
+        pull can take minutes over the internet, so this call uses a long
+        timeout (the default 30s would abort mid-pull)."""
         import re
         # Normalize to the exact registry image we expect in the compose.
         tag = image.split("/")[-1]
@@ -102,13 +108,21 @@ class PortainerClient:
             tag = tag.split(":")[-1]
         full = f"n8nio/n8n:{tag}" if tag != "latest" else "n8nio/n8n:latest"
         content = self.get_stack_file(stack_id)
-        new_content = re.sub(r"(image:\s*n8nio/n8n:)[^\s]+", r"\g<1>" + tag, content)
-        if new_content == content:
+        # Count real substitutions: identical-tag redeploys (the Portainer
+        # "re-pull current version" case) keep the content the same but MUST
+        # still PUT + pull. Only raise when the image line is not present at all.
+        new_content, n_subs = re.subn(r"(image:\s*n8nio/n8n:)[^\s]+",
+                                      r"\g<1>" + tag, content)
+        if n_subs == 0:
             raise RuntimeError(f"Image '{image}' not found in stack {stack_id} compose.")
         detail = self.get_stack(stack_id)
         env = detail.get("Env") or []
         payload = {"env": env, "prune": False, "stackFileContent": new_content}
-        self._req("PUT", f"/stacks/{stack_id}?endpointId={endpoint_id}", json=payload)
+        url = f"/stacks/{stack_id}?endpointId={endpoint_id}"
+        if pull:
+            url += "&pullImage=true"
+            payload["pullImage"] = True
+        self._req("PUT", url, json=payload, timeout=600.0)
         return full
 
     def stop_container(self, endpoint_id: int, container_id: str) -> None:

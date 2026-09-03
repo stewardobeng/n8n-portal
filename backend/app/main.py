@@ -23,7 +23,7 @@ from pydantic import BaseModel, EmailStr, Field
 from .config import settings
 from . import db
 from .services import provisioner, billing, access_gate, admin_ops, backup_ops
-from .services import account_security, passkeys
+from .services import account_security, passkeys, n8n_releases
 from .services import security_controls as sc
 from .services.admin_ops import AdminOpsError
 from .services.portainer_client import PortainerClient
@@ -191,6 +191,7 @@ class InstanceStatusOut(BaseModel):
     status: str
     locked: int = 0
     managed: int = 1
+    image: str = ""
     error: Optional[str]
     created_at: int
 
@@ -342,6 +343,7 @@ def _instance_to_out(i) -> InstanceStatusOut:
         environment_name=i["environment_name"], port=i["port"], domain=i["domain"],
         status=i["status"], locked=_row_get(i, "locked", 0), error=i["error"],
         managed=_row_get(i, "managed", 1),
+        image=_row_get(i, "image", ""),
         created_at=i["created_at"],
     )
 
@@ -1760,6 +1762,18 @@ def admin_update_image(instance_id: int, payload: UpdateImageIn):
     except ValueError as e:
         raise HTTPException(422, str(e))
     except Exception as e:
+        msg = str(e)
+        low = msg.lower()
+        if any(k in low for k in ("manifest unknown", "pull access denied",
+                                  "no such image", "not found",
+                                  "does not exist", "repository does not exist")):
+            # A real registry miss (the old failure mode looked like the image
+            # was missing on the server when the pull was never requested).
+            raise HTTPException(
+                422,
+                "Version '" + payload.image + "' does not exist on Docker Hub for "
+                "n8n. Double-check the tag (format like 2.31.6) and try again.",
+            )
         log.error("update image %s: %s", instance_id, e)
         raise HTTPException(502, f"Image update failed: {e}")
     return {"ok": True, "instance_id": instance_id, "image": new_image}
@@ -1789,6 +1803,18 @@ def admin_list_instances():
         inst["account_display"] = (acc["username"] if acc else "customer #" + str(r["account_id"]))
         out.append(inst)
     return {"instances": out}
+
+
+@app.get("/api/v1/admin/n8n-releases", dependencies=[Depends(verify_admin)])
+def admin_n8n_releases(force: int = 0):
+    """Latest official n8n release tags from Docker Hub (admin-only). Lets the
+    UI show when a workspace can be updated and offer a one-click update to the
+    newest release. Cached server-side for 15 minutes; force=1 bypasses."""
+    try:
+        return n8n_releases.latest_release(force=bool(force))
+    except Exception as e:
+        log.warning("n8n releases fetch failed: %s", e)
+        raise HTTPException(502, "Could not fetch n8n releases from Docker Hub.")
 
 
 @app.get("/api/v1/health")
