@@ -197,7 +197,7 @@ var ICONS = {
     return a + b;
   }
   function currentKind() {
-    var h = location.hash || "";
+    var h = (location.hash || "").slice(1);   // strip leading '#'
     return h.indexOf("/admin/") === 0 ? "admin" : "customer";
   }
 
