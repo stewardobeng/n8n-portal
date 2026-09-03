@@ -26,7 +26,9 @@
     pollTimer: null,
     provisioningPw: null, // signup password held in-session for owner auto-create
     mfa: null,             // 2FA challenge in-flight (email, challenge, methods)
-    security2fa: null       // 2FA setup state (GET /me/security or /admin/security)
+    security2fa: null,     // 2FA setup state (GET /me/security or /admin/security)
+    adminInstances: [],    // admin: all instances (GET /admin/instances) for backup/update triggers
+    adminInstancesLoaded: false
   };
 
   var $ = function (sel, root) { return (root || document).querySelector(sel); };
@@ -569,7 +571,7 @@ var ICONS = {
         status + dl + "</div>";
     }).join("");
     var listHtml = rows ? rows : '<div class="empty-state"><div><h3>No backups yet</h3>' +
-      '<p class="muted">Create a backup of your workspace below. A full backup includes your database, workflows, and credentials.</p></div></div>';
+      '<p class="muted">Create a backup of your workspace below.</p></div></div>';
 
     var buttonsByInst = insts.map(function (i) {
       var st = i.locked ? "locked" : i.status;
@@ -584,7 +586,7 @@ var ICONS = {
 
     return appLayout("customer", "Backups", "backup",
       '<main class="page">' + pageHead("Backups", "Create and download a copy of your workspace data at any time.", "") +
-      '<section class="card flush"><div class="card-head"><h3>Create a backup</h3><p class="small muted" style="margin:0">A full backup bundles everything: the database, all workflows, and credentials. Export workflows alone if you just want the automation definitions as JSON.</p></div>' +
+      '<section class="card flush"><div class="card-head"><h3>Create a backup</h3></div>' +
       (buttonsByInst || '<p class="muted" style="padding:20px">You have no active workspace to back up yet.</p>') + "</section>" +
       '<section class="card" style="margin-top:18px"><div class="card-head"><h3>Backup history</h3><p class="small muted" style="margin:0">You can download any completed backup below.</p></div>' + listHtml + "</section>" +
       "</main>");
@@ -895,11 +897,27 @@ var ICONS = {
       var d = state.accountCache[id];
       (d && d.instances || []).forEach(function (i) { instMap[i.id] = i; });
     });
+    // All instances (from GET /admin/instances) so the admin can trigger a backup
+    // right here without opening each account page.
+    var allInsts = state.adminInstances || [];
+    var creatable = allInsts.map(function (i) {
+      var disabled = i.status !== "healthy" || i.locked;
+      var name = titleCase(i.stack_name);
+      var who = i.account_display || (acctMap[i.account_id] ? (acctMap[i.account_id].display_name || acctMap[i.account_id].username) : "customer #" + i.account_id);
+      return '<div class="workspace-item"><span class="workspace-logo">' + icon("workspace") + "</span>" +
+        "<div><h3>" + esc(name) + " workspace</h3><p>" + esc(who) + " &middot; " + esc(i.domain || ("env " + i.environment_name)) + (i.locked ? " &middot; switched off" : "") + "</p></div>" +
+        '<div class="actions end" style="margin-left:auto;flex-wrap:wrap">' +
+        '<button class="button small-btn" data-action="admin-backup-run" data-id="' + i.id + '" data-kind="full"' + (disabled ? " disabled" : "") + '>' + icon("archive") + " Full backup</button>" +
+        '<button class="button secondary small-btn" data-action="admin-backup-run" data-id="' + i.id + '" data-kind="workflows"' + (disabled ? " disabled" : "") + '>Export workflows</button>' +
+        (i.managed !== 0 ? '<button class="button secondary small-btn" data-action="admin-backup-run" data-id="' + i.id + '" data-kind="credentials"' + (disabled ? " disabled" : "") + '>Export credentials</button>' : "") +
+        "</div></div>";
+    }).join("");
+
     var rows = backups.map(function (b) {
-      var inst = instMap[b.instance_id];
+      var inst = instMap[b.instance_id] || allInsts.find(function (x) { return String(x.id) === String(b.instance_id); });
       var acct = acctMap[b.account_id];
       var label = inst ? titleCase(inst.stack_name) : ("#" + b.instance_id);
-      var who = acct ? (acct.display_name || acct.username) : ("account #" + b.account_id);
+      var who = acct ? (acct.display_name || acct.username) : (inst ? inst.account_display : ("account #" + b.account_id));
       var kindLabel = b.kind === "full" ? "Full workspace" : b.kind === "workflows" ? "Workflows" : "Credentials";
       var sizeTxt = b.size_bytes ? fmtBytes(b.size_bytes) : "pending";
       var status = b.status === "ready" ? statusBadge("running", "Ready")
@@ -912,10 +930,23 @@ var ICONS = {
         "<p>Customer: " + esc(who) + " &middot; " + esc(fmtDate(b.created_at)) + " &middot; " + esc(sizeTxt) + (b.error ? " &middot; " + esc(b.error) : "") + "</p></div>" +
         status + dl + "</div>";
     }).join("");
+    var historySection = '<section class="card" style="margin-top:18px"><div class="card-head"><h3>Backup history</h3><p class="small muted" style="margin:0">Completed backups are downloadable in your browser.</p></div>' +
+      (rows || '<div class="empty-state" style="min-height:160px"><div><h3>No backups yet</h3><p class="muted">Create one above and it will appear here.</p></div></div>') + "</section>";
+    var triggerSection = '<section class="card flush"><div class="card-head"><h3>Create a backup</h3></div>' +
+      (creatable || '<p class="muted" style="padding:20px">There are no workspaces to back up right now.</p>') + "</section>";
+
+    // Only load the instance list once per visit (avoid re-fetch churn).
+    if (!state.adminInstancesLoaded) {
+      api("/admin/instances").then(function (d) {
+        state.adminInstances = (d && d.instances) || [];
+        state.adminInstancesLoaded = true;
+        if (!modalRoot.children.length) render();
+      }).catch(function () { state.adminInstances = state.adminInstances || []; });
+    }
+
     return appLayout("admin", "Backups", "backup",
-      '<main class="page">' + pageHead("Backups", "All workspace backups across every customer. Trigger or download from here.", "") +
-      '<section class="card flush"><div class="card-head"><h3>Backup history</h3><p class="small muted" style="margin:0">Full backups bundle the database, workflows, and credentials. Completed backups are downloadable in your browser.</p></div>' +
-      (rows || '<div class="empty-state" style="min-height:220px"><div><h3>No backups yet</h3><p class="muted">Use a workspace Actions menu to create a backup. They appear here.</p></div></div>') + "</section></main>");
+      '<main class="page">' + pageHead("Backups", "Create a full backup or a workflow/credential export for any workspace, or download an existing one.") +
+      triggerSection + historySection + "</main>");
   }
 
   function adminAccountPage(id) {
@@ -1564,7 +1595,7 @@ var ICONS = {
       else if (action === "signout-route") {
         if (currentKind() === "admin") {
           localStorage.removeItem("admin_token"); state.adminAuthed = false;
-          state.adminAccounts = []; state.adminArchived = []; state.requests = []; state.accountCache = {};
+          state.adminAccounts = []; state.adminArchived = []; state.requests = []; state.accountCache = {}; state.adminInstances = []; state.adminInstancesLoaded = false;
           showToast("Signed out", "Admin session ended."); navigate("/admin/signin");
         } else {
           if (window.confirm("Sign out of the portal?")) { localStorage.removeItem("portal_token"); state.session = null; state.provisioningPw = null; stopPolling(); navigate("/entry"); }
@@ -1877,7 +1908,7 @@ var ICONS = {
         if (!bInst) { showToast("Backup", "Workspace not found."); return; }
         var disabled = bInst.status !== "healthy" || bInst.locked;
         showModal(modalHeader("Back up " + titleCase(bInst.stack_name) + " workspace") +
-          "<p class=\"muted\">Choose what to back up. A full backup bundles everything: the database, all workflows, and credentials.</p>" +
+          "<p class=\"muted\">Choose what to back up for this workspace.</p>" +
           '<div class="actions end" style="justify-content:flex-start;flex-wrap:wrap">' +
           '<button class="button" data-action="admin-backup-run" data-id="' + bInst.id + '" data-kind="full"' + (disabled ? " disabled" : "") + '>' + icon("archive") + " Full backup</button>" +
           '<button class="button secondary" data-action="admin-backup-run" data-id="' + bInst.id + '" data-kind="workflows"' + (disabled ? " disabled" : "") + '>Export workflows</button>' +
