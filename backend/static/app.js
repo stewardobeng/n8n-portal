@@ -2480,9 +2480,29 @@ var ICONS = {
   }
 
   /* ================= boot ================= */
+  function _validStoredToken(tok) {
+    // Only trust a real session JWT. The broken pre-0.1.40 flow could write the
+    // literal '__mfa__' sentinel (which must NEVER be treated as a session), so
+    // reject anything that is not a 3-part JWT. A stale/garbage token would
+    // otherwise make boot() think we're authed, then the next admin API call
+    // 401s and the session is torn down -> the "locks me in then locks me out"
+    // symptom Steward hit 2026-09-03.
+    if (!tok || typeof tok !== "string") return false;
+    if (tok === "__mfa__") return false;
+    var parts = tok.split(".");
+    if (parts.length !== 3) return false;
+    return true;
+  }
+
   function boot() {
     loadPlans();
-    state.adminAuthed = !!localStorage.getItem("admin_token");
+    var storedAdmin = localStorage.getItem("admin_token");
+    // Drop a stale/invalid admin token so boot() never treats it as a live session.
+    if (!_validStoredToken(storedAdmin)) {
+      if (storedAdmin) localStorage.removeItem("admin_token");
+      storedAdmin = null;
+    }
+    state.adminAuthed = !!storedAdmin;
     var portalToken = localStorage.getItem("portal_token");
     // handle payment return: ?status=success after Paystack redirect
     var params = new URLSearchParams(location.search);
