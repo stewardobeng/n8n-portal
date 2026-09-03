@@ -586,7 +586,7 @@ var ICONS = {
 
     return appLayout("customer", "Backups", "backup",
       '<main class="page">' + pageHead("Backups", "Create and download a copy of your workspace data at any time.", "") +
-      '<section class="card flush"><div class="card-head"><h3>Create a backup</h3></div>' +
+      '<section class="card"><div class="card-head"><h3>Create a backup</h3><p class="small muted" style="margin:0">Choose what to back up for your workspace.</p></div>' +
       (buttonsByInst || '<p class="muted" style="padding:20px">You have no active workspace to back up yet.</p>') + "</section>" +
       '<section class="card" style="margin-top:18px"><div class="card-head"><h3>Backup history</h3><p class="small muted" style="margin:0">You can download any completed backup below.</p></div>' + listHtml + "</section>" +
       "</main>");
@@ -932,7 +932,7 @@ var ICONS = {
     }).join("");
     var historySection = '<section class="card" style="margin-top:18px"><div class="card-head"><h3>Backup history</h3><p class="small muted" style="margin:0">Completed backups are downloadable in your browser.</p></div>' +
       (rows || '<div class="empty-state" style="min-height:160px"><div><h3>No backups yet</h3><p class="muted">Create one above and it will appear here.</p></div></div>') + "</section>";
-    var triggerSection = '<section class="card flush"><div class="card-head"><h3>Create a backup</h3></div>' +
+    var triggerSection = '<section class="card"><div class="card-head"><h3>Create a backup</h3><p class="small muted" style="margin:0">Choose what to back up for each workspace.</p></div>' +
       (creatable || '<p class="muted" style="padding:20px">There are no workspaces to back up right now.</p>') + "</section>";
 
     // Only load the instance list once per visit (avoid re-fetch churn).
