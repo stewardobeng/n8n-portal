@@ -266,6 +266,17 @@ tbody tr:hover { background: #fbfdfd; }
 .banner.warning { border-color: #edce94; color: #754b0a; background: var(--amber-100); }
 .banner.danger { border-color: #ebbbbb; color: #8e2929; background: var(--red-100); }
 .banner.success { border-color: #b9d9c1; color: #1e6037; background: var(--green-100); }
+/* Admin "login as customer" strip (2026-09-03) */
+.imp-strip { display: flex; align-items: center; gap: 12px; padding: 10px clamp(20px,3vw,42px); background: var(--navy-900); color: #fff; font-size: .86rem; }
+.imp-strip .imp-icon { display: inline-flex; color: #25b4b8; }
+.imp-strip .imp-icon .icon-svg { width: 18px; height: 18px; }
+.imp-strip .imp-copy { display: flex; flex-direction: column; line-height: 1.35; }
+.imp-strip .imp-copy strong { font-weight: 600; }
+.imp-strip .imp-copy span { opacity: .82; font-size: .8rem; }
+.imp-strip .imp-exit { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; padding: 7px 14px; border: 1px solid rgba(255,255,255,.35); border-radius: var(--radius-sm); color: #fff; background: rgba(255,255,255,.1); font-size: .82rem; font-weight: 600; }
+.imp-strip .imp-exit:hover { background: rgba(255,255,255,.18); }
+.imp-strip .imp-exit .icon-svg { width: 15px; height: 15px; }
+@media (max-width: 640px) { .imp-strip { flex-wrap: wrap; } .imp-strip .imp-exit { margin-left: 0; } }
 .timeline { position: relative; display: grid; gap: 0; }
 .timeline-item { position: relative; padding: 0 0 24px 32px; }
 .timeline-item::before { content:""; position: absolute; left: 8px; top: 9px; bottom: -5px; width: 2px; background: var(--slate-200); }
