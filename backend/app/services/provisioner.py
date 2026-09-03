@@ -29,6 +29,34 @@ class ProvisionError(Exception):
     """Raised when provisioning fails; carries a rollback-safe message."""
 
 
+# Number of attempts + backoff for the NPM Let's Encrypt certificate request.
+# LE's ACME API returns transient errors (e.g. "No such authorization",
+# "Internal Error") at order-creation time even when DNS + port-80 are fine.
+# Retrying a few times almost always succeeds and avoids rolling back a
+# provision whose stack + proxy host are already healthy.
+_CERT_RETRIES = 5
+_CERT_BACKOFF_S = 6
+
+
+def _request_cert_with_retry(npm: NPMClient, domains: list[str],
+                             name: str | None = None) -> dict:
+    last_exc: Exception | None = None
+    for attempt in range(1, _CERT_RETRIES + 1):
+        try:
+            cert = npm.request_certificate(domains, name=name)
+            if cert.get("id"):
+                return cert
+            last_exc = RuntimeError(f"NPM create certificate returned no id: {cert}")
+        except Exception as e:  # noqa: BLE001 - any transient failure is retried
+            last_exc = e
+        if attempt < _CERT_RETRIES:
+            time.sleep(_CERT_BACKOFF_S * attempt)
+    raise ProvisionError(
+        f"Let's Encrypt certificate creation kept failing after "
+        f"{_CERT_RETRIES} attempts: {last_exc}"
+    ) from last_exc
+
+
 # ---------- naming helpers ----------
 
 def derive_username_from_email(email: str) -> str:
@@ -411,6 +439,14 @@ def provision_account(account_id: int, password: str | None = None) -> dict:
     account = db.get_account(account_id)
     if not account:
         raise ProvisionError("Account not found.")
+    # Retry safety: clear stale instance rows from earlier failed attempts FIRST,
+    # so a failed/orphaned instance (stack + volume already rolled back) does not
+    # count against the quota and block re-provisioning. Without this, a quota=1
+    # account whose first attempt failed is stuck at "Instance quota reached"
+    # forever (verified 2026-09-03 with space@steprotech.com).
+    for old in db.list_instances(account_id):
+        if old["status"] != "healthy":
+            db.delete_instance(old["id"])
     # Quota gate (Steward 2026-09-01): one instance per account by default; the
     # admin can raise the quota. count live instances vs the account's quota.
     quota = account["quota"] if "quota" in account.keys() else settings.default_quota
@@ -422,14 +458,6 @@ def provision_account(account_id: int, password: str | None = None) -> dict:
         )
     if account["status"] == "provisioned" and live_count > 0 and quota == 1:
         raise ProvisionError("Account already provisioned.")
-
-    # Retry safety: clear stale instance rows from earlier failed attempts so a
-    # re-provision doesn't die on the stack_name UNIQUE constraint (verified
-    # 2026-09-01 with gamma: first attempt failed, second hit
-    # 'UNIQUE constraint failed: instances.stack_name').
-    for old in db.list_instances(account_id):
-        if old["status"] != "healthy":
-            db.delete_instance(old["id"])
 
     email = account["email"]
     username = account["username"]
@@ -500,8 +528,11 @@ def provision_account(account_id: int, password: str | None = None) -> dict:
         npm_host_id = host.get("id")
         db.update_instance(instance_id, npm_host_id=npm_host_id)
 
-        # 7. Let's Encrypt cert via NPM, then attach to host
-        cert = npm.request_certificate([domain], name=f"{username} ({domain})")
+        # 7. Let's Encrypt cert via NPM, then attach to host.
+        # LE ACME can fail transiently ("No such authorization", "Internal Error")
+        # at order creation, even though DNS/port are fine. Retry a few times with
+        # backoff so a transient ACME blip does NOT roll back a healthy provision.
+        cert = _request_cert_with_retry(npm, [domain], name=f"{username} ({domain})")
         cert_id = cert.get("id")
         db.update_instance(instance_id, certificate_id=cert_id)
         _wait_for_cert(npm, cert_id, timeout=120)

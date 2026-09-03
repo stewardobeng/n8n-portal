@@ -388,12 +388,15 @@ def set_account_state(account_id: int, state: str) -> None:
 
 
 def count_instances(account_id: int) -> int:
-    """Number of live (non-deleted) instances for the quota check."""
+    """Number of live instances for the quota check. Excludes 'deleted' rows AND
+    'failed' rows — a failed/reprovisioned instance has its stack + volume rolled
+    back and must not consume quota, otherwise a first-attempt failure permanently
+    blocks re-provisioning (verified 2026-09-03 with space@steprotech.com)."""
     conn = get_conn()
     try:
         row = conn.execute(
             "SELECT COUNT(*) AS n FROM instances "
-            "WHERE account_id = ? AND status != 'deleted'",
+            "WHERE account_id = ? AND status NOT IN ('deleted', 'failed')",
             (account_id,),
         ).fetchone()
         return int(row["n"])
