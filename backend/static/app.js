@@ -98,6 +98,7 @@ var ICONS = {
   drag: '<circle cx="9" cy="12" r="1" /> <circle cx="9" cy="5" r="1" /> <circle cx="9" cy="19" r="1" /> <circle cx="15" cy="12" r="1" /> <circle cx="15" cy="5" r="1" /> <circle cx="15" cy="19" r="1" />',
   error: '<circle cx="12" cy="12" r="10" /> <path d="m15 9-6 6" /> <path d="m9 9 6 6" />',
   external: '<path d="M15 3h6v6" /> <path d="M10 14 21 3" /> <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />',
+  download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /> <path d="m7 10 5 5 5-5" /> <path d="M12 15V3" />',
   eye: '<path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0" /> <circle cx="12" cy="12" r="3" />',
   eyeoff: '<path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49" /> <path d="M14.084 14.158a3 3 0 0 1-4.242-4.242" /> <path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143" /> <path d="m2 2 20 20" />',
   lock: '<rect width="18" height="11" x="3" y="11" rx="2" ry="2" /> <path d="M7 11V7a5 5 0 0 1 10 0v4" />',
@@ -109,6 +110,7 @@ var ICONS = {
   plus: '<path d="M5 12h14" /> <path d="M12 5v14" />',
   requests: '<polyline points="22 12 16 12 14 15 10 15 8 12 2 12" /> <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />',
   server: '<rect width="20" height="8" x="2" y="2" rx="2" ry="2" /> <rect width="20" height="8" x="2" y="14" rx="2" ry="2" /> <line x1="6" x2="6.01" y1="6" y2="6" /> <line x1="6" x2="6.01" y1="18" y2="18" />',
+  refresh: '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" /> <path d="M21 3v5h-5" /> <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" /> <path d="M8 16H3v5" />',
   settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" /> <circle cx="12" cy="12" r="3" />',
   shield: '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" /> <path d="m9 12 2 2 4-4" />',
   signout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /> <polyline points="16 17 21 12 16 7" /> <line x1="21" x2="9" y1="12" y2="12" />',
@@ -160,6 +162,7 @@ var ICONS = {
   var customerNav = [
     ["dashboard", "Dashboard", "/customer/dashboard"],
     ["workspace", "My workspaces", "/customer/workspaces"],
+    ["backup", "Backups", "/customer/backups"],
     ["billing", "Plans & billing", "/customer/billing"],
     ["support", "Support", "/customer/support"],
     ["account", "Account", "/customer/account"],
@@ -169,6 +172,7 @@ var ICONS = {
     ["overview", "Overview", "/admin/overview"],
     ["requests", "Access requests", "/admin/requests"],
     ["accounts", "Accounts", "/admin/accounts"],
+    ["backup", "Backups", "/admin/backups"],
     ["maintenance", "Billing maintenance", "/admin/maintenance"],
     ["settings", "Settings", "/admin/settings"],
     ["security", "Security", "/admin/security"]
@@ -540,6 +544,56 @@ var ICONS = {
       "</main>");
   }
 
+  function customerBackups() {
+    var acc = state.session ? state.session.account : null;
+    var insts = state.session ? (state.session.instances || []).filter(function (i) { return i.status !== "deleted"; }) : [];
+    var backups = state.backups || [];
+    var instById = {};
+    insts.forEach(function (i) { instById[i.id] = i; });
+    var rows = backups.map(function (b) {
+      var inst = instById[b.instance_id];
+      var label = inst ? titleCase(inst.stack_name) : ("#" + b.instance_id);
+      var kindLabel = b.kind === "full" ? "Full workspace" : b.kind === "workflows" ? "Workflows" : "Credentials";
+      var sizeTxt = b.size_bytes ? fmtBytes(b.size_bytes) : "pending";
+      var status = b.status === "ready" ? statusBadge("running", "Ready")
+        : b.status === "failed" ? statusBadge("failed", "Failed")
+        : statusBadge("provisioning", "Creating");
+      var dl = b.status === "ready"
+        ? '<a class="button small-btn" href="#" data-action="backup-download" data-id="' + b.id + '" data-kind="' + esc(b.kind) + '">' + icon("download") + " Download</a>" : "";
+      return '<div class="workspace-item"><span class="workspace-logo">' + icon("archive") + "</span>" +
+        "<div><h3>" + esc(kindLabel) + " &middot; " + esc(label) + "</h3>" +
+        "<p>" + esc(fmtDate(b.created_at)) + " &middot; " + esc(sizeTxt) + (b.error ? " &middot; " + esc(b.error) : "") + "</p></div>" +
+        status + dl + "</div>";
+    }).join("");
+    var listHtml = rows ? rows : '<div class="empty-state"><div><h3>No backups yet</h3>' +
+      '<p class="muted">Create a backup of your workspace below. A full backup includes your database, workflows, and credentials.</p></div></div>';
+
+    var buttonsByInst = insts.map(function (i) {
+      var st = i.locked ? "locked" : i.status;
+      var disabled = (st !== "running" && st !== "healthy") || i.locked;
+      return '<div class="workspace-item"><span class="workspace-logo">' + icon("workspace") + "</span>" +
+        "<div><h3>" + esc(titleCase(i.stack_name)) + " workspace</h3><p>https://" + esc(i.domain) + "</p></div>" +
+        '<div class="actions end" style="margin-left:auto">' +
+        '<button class="button small-btn" data-action="backup-run" data-id="' + i.id + '" data-kind="full"' + (disabled ? " disabled" : "") + '>' + icon("archive") + " Full backup</button>" +
+        '<button class="button secondary small-btn" data-action="backup-run" data-id="' + i.id + '" data-kind="workflows"' + (disabled ? " disabled" : "") + '>Export workflows</button>' +
+        "</div></div>";
+    }).join("");
+
+    return appLayout("customer", "Backups", "backup",
+      '<main class="page">' + pageHead("Backups", "Create and download a copy of your workspace data at any time.", "") +
+      '<section class="card flush"><div class="card-head"><h3>Create a backup</h3><p class="small muted" style="margin:0">A full backup bundles everything: the database, all workflows, and credentials. Export workflows alone if you just want the automation definitions as JSON.</p></div>' +
+      (buttonsByInst || '<p class="muted" style="padding:20px">You have no active workspace to back up yet.</p>') + "</section>" +
+      '<section class="card" style="margin-top:18px"><div class="card-head"><h3>Backup history</h3><p class="small muted" style="margin:0">You can download any completed backup below.</p></div>' + listHtml + "</section>" +
+      "</main>");
+  }
+
+  function fmtBytes(n) {
+    if (!n) return "0 B";
+    var u = ["B", "KB", "MB", "GB"]; var i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return (n >= 10 ? Math.round(n) : n.toFixed(1)) + " " + u[i];
+  }
+
   function customerBilling() {
     var acc = state.session ? state.session.account : null;
     var s = subscriptionState();
@@ -811,6 +865,38 @@ var ICONS = {
       "</tbody></table></div></section></main>");
   }
 
+  function adminBackups() {
+    var backups = state.adminBackups || [];
+    var acctMap = {};
+    (state.adminAccounts || []).forEach(function (a) { acctMap[a.id] = a; });
+    var instMap = {};
+    Object.keys(state.accountCache || {}).forEach(function (id) {
+      var d = state.accountCache[id];
+      (d && d.instances || []).forEach(function (i) { instMap[i.id] = i; });
+    });
+    var rows = backups.map(function (b) {
+      var inst = instMap[b.instance_id];
+      var acct = acctMap[b.account_id];
+      var label = inst ? titleCase(inst.stack_name) : ("#" + b.instance_id);
+      var who = acct ? (acct.display_name || acct.username) : ("account #" + b.account_id);
+      var kindLabel = b.kind === "full" ? "Full workspace" : b.kind === "workflows" ? "Workflows" : "Credentials";
+      var sizeTxt = b.size_bytes ? fmtBytes(b.size_bytes) : "pending";
+      var status = b.status === "ready" ? statusBadge("running", "Ready")
+        : b.status === "failed" ? statusBadge("failed", "Failed")
+        : statusBadge("provisioning", "Creating");
+      var dl = b.status === "ready"
+        ? '<a class="button small-btn" href="#" data-action="backup-download" data-id="' + b.id + '" data-kind="' + esc(b.kind) + '">' + icon("download") + " Download</a>" : "";
+      return '<div class="workspace-item"><span class="workspace-logo">' + icon("archive") + "</span>" +
+        "<div><h3>" + esc(kindLabel) + " &middot; " + esc(label) + "</h3>" +
+        "<p>Customer: " + esc(who) + " &middot; " + esc(fmtDate(b.created_at)) + " &middot; " + esc(sizeTxt) + (b.error ? " &middot; " + esc(b.error) : "") + "</p></div>" +
+        status + dl + "</div>";
+    }).join("");
+    return appLayout("admin", "Backups", "backup",
+      '<main class="page">' + pageHead("Backups", "All workspace backups across every customer. Trigger or download from here.", "") +
+      '<section class="card flush"><div class="card-head"><h3>Backup history</h3><p class="small muted" style="margin:0">Full backups bundle the database, workflows, and credentials. Completed backups are downloadable in your browser.</p></div>' +
+      (rows || '<div class="empty-state" style="min-height:220px"><div><h3>No backups yet</h3><p class="muted">Use a workspace Actions menu to create a backup. They appear here.</p></div></div>') + "</section></main>");
+  }
+
   function adminAccountPage(id) {
     var a = (state.adminAccounts || []).find(function (x) { return x.id === Number(id); });
     var detail = state.accountCache[id];
@@ -990,6 +1076,7 @@ var ICONS = {
     /* ---- customer app ---- */
     else if (route === "/customer/dashboard") html = requireCustomer(function () { return customerDashboard(); });
     else if (route === "/customer/workspaces") html = requireCustomer(function () { return customerWorkspaces(); });
+    else if (route === "/customer/backups") html = requireCustomer(function () { return customerBackups(); });
     else if (route === "/customer/billing") html = requireCustomer(function () { return customerBilling(); });
     else if (route === "/customer/support") html = requireCustomer(function () { return supportPage(); });
     else if (route === "/customer/account") html = requireCustomer(function () { return accountPage(); });
@@ -1000,6 +1087,7 @@ var ICONS = {
     else if (route === "/admin/overview") html = requireAdmin(function () { return adminOverview(); });
     else if (route === "/admin/requests") html = requireAdmin(function () { return adminRequests(); });
     else if (route === "/admin/accounts") html = requireAdmin(function () { return adminAccounts(); });
+    else if (route === "/admin/backups") html = requireAdmin(function () { return adminBackups(); });
     else if (route === "/admin/archived") html = requireAdmin(function () { return archivedAccounts(); });
     else if (parts[0] === "admin" && parts[1] === "account") html = requireAdmin(function () { return adminAccountPage(parts[2]); });
     else if (route === "/admin/maintenance") html = requireAdmin(function () { return maintenancePage(); });
@@ -1078,10 +1166,12 @@ var ICONS = {
     var ev = state.adminEnvs ? JSON.stringify(state.adminEnvs) : "";
     var ul = state.unlinkedStacks ? JSON.stringify(state.unlinkedStacks) : "";
     var sec = state.security2fa ? JSON.stringify(state.security2fa) : "";
+    var bk = state.backups ? JSON.stringify(state.backups) : "";
+    var abk = state.adminBackups ? JSON.stringify(state.adminBackups) : "";
     var route = (location.hash || "").slice(1);
     var m = route.match(/^\/admin\/account\/(\d+)$/);
     var d = m && state.accountCache[m[1]] ? JSON.stringify(state.accountCache[m[1]]) : "";
-    return c + "|" + a + "|" + ar + "|" + r + "|" + e + "|" + p + "|" + d + "|" + ev + "|" + ul + "|" + sec;
+    return c + "|" + a + "|" + ar + "|" + r + "|" + e + "|" + p + "|" + d + "|" + ev + "|" + ul + "|" + sec + "|" + bk + "|" + abk;
   }
 
   async function refreshSession() {
@@ -1091,6 +1181,12 @@ var ICONS = {
       var data = await api("/me");
       state.session = { token: token, account: data.account, instances: data.instances || [] };
       if (!state.plans.length) await loadPlans();
+      // lazily load backups when the customer opens the Backups page
+      if ((location.hash || "").indexOf("/customer/backups") === 1 || state.backupsLoaded) {
+        var bk = await api("/me/backups");
+        state.backups = (bk && bk.backups) || [];
+        state.backupsLoaded = true;
+      }
       return state.session;
     } catch (e) {
       if (e.status === 401) {
@@ -1128,6 +1224,13 @@ var ICONS = {
         try { state.environmentList = await api("/environments"); } catch (e) { state.environmentList = []; }
       }
       try { state.adminEnvs = await api("/admin/environments"); } catch (e) { state.adminEnvs = []; }
+      try {
+        if ((location.hash || "").indexOf("/admin/backups") === 1 || state.adminBackupsLoaded) {
+          var bk = await api("/admin/backups");
+          state.adminBackups = (bk && bk.backups) || [];
+          state.adminBackupsLoaded = true;
+        }
+      } catch (e) { state.adminBackups = state.adminBackups || []; }
     } catch (e) {
       if (e.status === 401) { localStorage.removeItem("admin_token"); state.adminAuthed = false; showToast("Admin session ended", "Please sign in again."); navigate("/admin/signin"); }
     }
@@ -1284,6 +1387,8 @@ var ICONS = {
       (inst && inst.managed === 0
         ? '<button class="button secondary" data-action="workspace-detail" data-id="' + inst.id + '">' + icon("server") + " View details</button>"
         : '<button class="button secondary" data-action="reset-password" data-id="' + inst.id + '">' + icon("lock") + " Reset workspace password</button>") +
+      '<button class="button secondary" data-action="admin-backup" data-id="' + inst.id + '">' + icon("archive") + " Back up</button>" +
+      (inst && inst.managed !== 0 ? '<button class="button secondary" data-action="admin-update-image" data-id="' + inst.id + '">' + icon("refresh") + " Update n8n</button>" : "") +
       "</div>");
   }
 
@@ -1460,6 +1565,47 @@ var ICONS = {
       else if (action === "payment-continue") { doPayment(); }
       else if (action === "pay-now") paymentModal();
       else if (action === "provision-now") { autoProvision(); }
+      else if (action === "backup-run") {
+        event.preventDefault();
+        var bid = act.dataset.id, kind = act.dataset.kind || "full";
+        var kindLabel = kind === "full" ? "full backup" : kind === "workflows" ? "workflow export" : "credential export";
+        var instance = null;
+        (state.session && state.session.instances || []).some(function (i) { if (i.id === Number(bid)) { instance = i; return true; } return false; });
+        if (!instance) return;
+        api("/me/instances/" + bid + "/backup?kind=" + kind, { method: "POST" }).then(function (d) {
+          showToast("Backup started", "Creating a " + kindLabel + " of your " + titleCase(instance.stack_name) + " workspace. It will be ready to download in a few seconds.");
+          // refresh the backups list shortly after
+          setTimeout(function () {
+            api("/me/backups").then(function (bk) { state.backups = (bk && bk.backups) || []; state.backupsLoaded = true; render(); })
+              .catch(function () {});
+          }, 4000);
+        }).catch(function (err) { showToast("Could not start backup", err.message); });
+      }
+      else if (action === "backup-download") {
+        event.preventDefault();
+        var bkid = act.dataset.id;
+        var token = localStorage.getItem("portal_token") || localStorage.getItem("admin_token");
+        var isAdmin = currentKind() === "admin";
+        var base = isAdmin ? "/admin/backups" : "/me/backups";
+        fetch(API + base + "/" + bkid + "/download", {
+          headers: { "Authorization": "Bearer " + token }
+        }).then(function (res) {
+          if (!res.ok) { return res.json().then(function (d) { throw new Error(d.detail || "Download failed (" + res.status + ")"); }); }
+          var name = (act.dataset.kind === "workflows" ? "workflows.json"
+            : act.dataset.kind === "credentials" ? "credentials.json"
+            : "n8n-data.tar.gz");
+          var disp = res.headers.get("Content-Disposition") || "";
+          var m = disp.match(/filename="?([^";]+)"?/);
+          if (m) name = m[1];
+          return res.blob().then(function (blob) {
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement("a");
+            a.href = url; a.download = name;
+            document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+          });
+        }).catch(function (err) { showToast("Download failed", err.message); });
+      }
       else if (action === "sec-totp-setup") {
         showModal(modalHeader("Set up authenticator 2FA") + '<div class="spinner"></div>');
         api(act.dataset.kind === "admin" ? "/admin/security/totp/setup" : "/me/security/totp/setup", { method: "POST" }).then(function (d) {
@@ -1584,6 +1730,43 @@ var ICONS = {
         var accId = null;
         var inst = findInstanceById(act.dataset.id);
         workspaceActionsModal(inst || { id: act.dataset.id, stack_name: "Workspace" });
+      }
+      else if (action === "admin-backup") {
+        event.preventDefault();
+        var bInst = findInstanceById(act.dataset.id);
+        if (!bInst) { showToast("Backup", "Workspace not found."); return; }
+        var disabled = bInst.status !== "healthy" || bInst.locked;
+        showModal(modalHeader("Back up " + titleCase(bInst.stack_name) + " workspace") +
+          "<p class=\"muted\">Choose what to back up. A full backup bundles everything: the database, all workflows, and credentials.</p>" +
+          '<div class="actions end" style="justify-content:flex-start;flex-wrap:wrap">' +
+          '<button class="button" data-action="admin-backup-run" data-id="' + bInst.id + '" data-kind="full"' + (disabled ? " disabled" : "") + '>' + icon("archive") + " Full backup</button>" +
+          '<button class="button secondary" data-action="admin-backup-run" data-id="' + bInst.id + '" data-kind="workflows"' + (disabled ? " disabled" : "") + '>Export workflows</button>' +
+          '<button class="button secondary" data-action="admin-backup-run" data-id="' + bInst.id + '" data-kind="credentials"' + (disabled ? " disabled" : "") + '>Export credentials</button>' +
+          "</div>" +
+          '<p class="small muted" style="margin-top:16px">Downloads appear in your browser. Backup files stay on the portal for 30 days.</p>');
+      }
+      else if (action === "admin-backup-run") {
+        event.preventDefault();
+        var abInst = findInstanceById(act.dataset.id);
+        var abKind = act.dataset.kind || "full";
+        api("/admin/instances/" + act.dataset.id + "/backup?kind=" + abKind, { method: "POST" }).then(function (d) {
+          showToast("Backup started", "Creating a " + (abKind === "full" ? "full backup" : abKind + " export") + ". Check the portal Backups page shortly.");
+          refreshAdminData();
+        }).catch(function (err) { showToast("Could not start backup", err.message); });
+      }
+      else if (action === "admin-update-image") {
+        event.preventDefault();
+        var uInst = findInstanceById(act.dataset.id);
+        if (!uInst) { showToast("Update n8n", "Workspace not found."); return; }
+        showModal(modalHeader("Update n8n for " + titleCase(uInst.stack_name)) +
+          "<p class=\"muted\">Update the n8n image for this workspace. The container is recreated against the same data volume, so your customer's workflows and credentials are preserved.</p>" +
+          '<div class="field"><label>n8n version tag</label><div class="input-row">' +
+          '<input id="img-tag" type="text" placeholder="e.g. 2.31.6" value="2.31.6">' +
+          '<span class="input-suffix">n8nio/n8n:</span></div>' +
+          '<span class="hint">Enter a version tag that exists on Docker Hub (community edition). Leave at 2.31.6 to stay on the current version.</span></div>' +
+          '<div class="consequence"><strong>This action will:</strong><ul><li>Pull the new image and recreate the container</li><li>Keep the data volume and all credentials</li><li>Briefly make the workspace unreachable while it restarts</li></ul></div>' +
+          '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+          '<button class="button" data-confirm-admin-update-image="' + uInst.id + '">Update workspace n8n</button></div>');
       }
       else if (action === "lock-workspace") confirmLock(act.dataset.id);
       else if (action === "unlock-workspace") confirmUnlock(act.dataset.id);
@@ -1715,6 +1898,16 @@ var ICONS = {
       if (cReset) {
         closeModal();
         adminAction("/instances/" + cReset.dataset.confirmReset + "/reset-password", "Password reset started", "The new n8n password will be emailed to the customer.").then(refreshAdminData);
+      }
+      var cUi = event.target.closest("[data-confirm-admin-update-image]");
+      if (cUi) {
+        var tag = (($("#img-tag") || {}).value || "").trim();
+        if (!tag) { showToast("Invalid version", "Enter an n8n version tag."); return; }
+        closeModal();
+        api("/admin/instances/" + cUi.dataset.confirmAdminUpdateImage + "/update-image", { method: "POST", body: { image: tag } }).then(function (d) {
+          showToast("n8n updated", "The workspace was recreated on " + d.image + ". It may take a minute to come back online.");
+          refreshAdminData();
+        }).catch(function (err) { showToast("Update failed", err.message); });
       }
       var cQuota = event.target.closest("[data-confirm-quota]");
       if (cQuota) {
