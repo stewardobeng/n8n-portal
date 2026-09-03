@@ -214,6 +214,26 @@ def init_db(db_path: str | None = None) -> None:
             expires_at INTEGER,            -- NULL = permanent
             created_at INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS passkeys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope TEXT NOT NULL,           -- 'account' | 'admin'
+            account_id INTEGER,            -- NULL for admin
+            credential_id TEXT NOT NULL UNIQUE,
+            public_key BLOB NOT NULL,
+            sign_count INTEGER DEFAULT 0,
+            transports TEXT DEFAULT '',
+            name TEXT DEFAULT '',
+            created_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS passkey_challenges (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope TEXT NOT NULL,
+            account_id INTEGER,
+            challenge BLOB NOT NULL,
+            kind TEXT DEFAULT 'register',  -- 'register' | 'login'
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL
+        );
         """)
         conn.commit()
     finally:
@@ -876,5 +896,100 @@ def list_ip_bans() -> list[sqlite3.Row]:
     conn = get_conn()
     try:
         return conn.execute("SELECT * FROM ip_bans ORDER BY created_at DESC").fetchall()
+    finally:
+        conn.close()
+
+
+# ---------- passkeys (WebAuthn) ----------
+
+def add_passkey(scope: str, account_id: int | None, credential_id: str,
+                public_key: bytes, sign_count: int, transports: str = "",
+                name: str = "") -> int:
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "INSERT INTO passkeys (scope, account_id, credential_id, public_key,"
+            " sign_count, transports, name, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (scope, account_id, credential_id, public_key, sign_count,
+             transports or "", name or "", now()))
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def list_passkeys(scope: str, account_id: int | None = None) -> list[sqlite3.Row]:
+    conn = get_conn()
+    try:
+        if scope == "admin":
+            return conn.execute(
+                "SELECT * FROM passkeys WHERE scope='admin' ORDER BY id DESC").fetchall()
+        return conn.execute(
+            "SELECT * FROM passkeys WHERE scope='account' AND account_id=? ORDER BY id DESC",
+            (account_id,)).fetchall()
+    finally:
+        conn.close()
+
+
+def get_passkey_by_credential_id(credential_id: str) -> sqlite3.Row | None:
+    conn = get_conn()
+    try:
+        return conn.execute(
+            "SELECT * FROM passkeys WHERE credential_id=?", (credential_id,)).fetchone()
+    finally:
+        conn.close()
+
+
+def delete_passkey(scope: str, credential_id: str, account_id: int | None = None) -> bool:
+    conn = get_conn()
+    try:
+        if scope == "admin":
+            cur = conn.execute(
+                "DELETE FROM passkeys WHERE scope='admin' AND credential_id=?",
+                (credential_id,))
+        else:
+            cur = conn.execute(
+                "DELETE FROM passkeys WHERE scope='account' AND account_id=? AND credential_id=?",
+                (account_id, credential_id))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def save_passkey_challenge(scope: str, account_id: int | None, challenge: bytes,
+                           kind: str = "register", ttl: int = 600) -> int:
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "INSERT INTO passkey_challenges (scope, account_id, challenge, kind,"
+            " created_at, expires_at) VALUES (?,?,?,?,?,?)",
+            (scope, account_id, challenge, kind, now(), now() + ttl))
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def get_latest_passkey_challenge(scope: str, account_id: int | None,
+                                 kind: str = "register") -> sqlite3.Row | None:
+    conn = get_conn()
+    try:
+        if scope == "admin":
+            return conn.execute(
+                "SELECT * FROM passkey_challenges WHERE scope='admin' AND kind=?"
+                " ORDER BY id DESC LIMIT 1", (kind,)).fetchone()
+        return conn.execute(
+            "SELECT * FROM passkey_challenges WHERE scope='account' AND account_id=?"
+            " AND kind=? ORDER BY id DESC LIMIT 1", (account_id, kind)).fetchone()
+    finally:
+        conn.close()
+
+
+def consume_passkey_challenge(challenge_id: int) -> None:
+    conn = get_conn()
+    try:
+        conn.execute("DELETE FROM passkey_challenges WHERE id=?", (challenge_id,))
+        conn.commit()
     finally:
         conn.close()

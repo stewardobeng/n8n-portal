@@ -120,6 +120,8 @@ var ICONS = {
   users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /> <circle cx="9" cy="7" r="4" /> <path d="M22 21v-2a4 4 0 0 0-3-3.87" /> <path d="M16 3.13a4 4 0 0 1 0 7.75" />',
   warning: '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" /> <path d="M12 9v4" /> <path d="M12 17h.01" />',
   workspace: '<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />',
+  key: '<path d="m15.5 7.5 3 3L22 7l-3-3" /><path d="m21 2-9.6 9.6" /><circle cx="7.5" cy="15.5" r="5.5" />',
+  fingerprint: '<path d="M12 11a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4" /><path d="M14 14c0 .52-.02 1.11-.08 1.82-.12 1.36-.28 2.75-.44 4.05" /><path d="M18 13c0 2.68-.32 5.26-1.06 7.67" /><path d="M6 13c0-2.2.86-4.2 2.25-5.67A7.07 7.07 0 0 1 12 5c1.49 0 2.87.45 4.02 1.23" /><path d="M8 13a4 4 0 0 1 7.31-2.11c1.04 1.4 1.69 3.07 1.69 4.85 0 3.69-1.31 7.44-3.24 10.74" /><path d="M9 13c0 5.74-2.19 11.06-5.06 15.02" /><path d="M10 13c0 4.5-1.36 8.7-3.69 11.92" />',
 };
 
   function icon(name) {
@@ -357,6 +359,7 @@ var ICONS = {
       '<input id="signin-password" name="password" type="password" required>' +
       '<button type="button" class="input-action" data-action="toggle-password" data-target="signin-password">' + icon("eye") + '</button></div></div>' +
       '<button class="button primary-wide" type="submit">Sign in</button></form>' +
+      '<div style="text-align:center;margin-top:12px"><button class="button secondary" data-action="signin-passkey">' + icon("fingerprint") + " Sign in with a passkey</button></div>" +
       '<p class="small muted" style="text-align:center;margin-top:14px"><a href="#/forgot">Forgot your portal password?</a></p>' +
       '<p class="small muted" style="text-align:center;margin-top:18px">No account yet? <a href="#/entry">Request access</a></p>'
     );
@@ -701,6 +704,7 @@ var ICONS = {
       '<input id="admin-password" name="password" type="password" required>' +
       '<button type="button" class="input-action" data-action="toggle-password" data-target="admin-password">' + icon("eye") + '</button></div></div>' +
       '<button class="button primary-wide" type="submit">Sign in</button></form>' +
+      '<div style="text-align:center;margin-top:12px"><button class="button secondary" data-action="admin-signin-passkey">' + icon("fingerprint") + " Sign in with a passkey</button></div>" +
       '<p class="small muted" style="text-align:center;margin-top:20px">Customer? <a href="#/entry">Return to customer portal</a></p>'
     );
   }
@@ -742,6 +746,7 @@ var ICONS = {
           '<a class="button" href="#/admin/requests">Review access requests</a>' +
           '<a class="button secondary" href="#/admin/accounts">Find a customer</a>' +
           '<a class="button secondary" href="#/admin/maintenance">Run expiry maintenance</a>' +
+          '<a class="button secondary" href="#/admin/backups">' + icon("archive") + " Backups &amp; updates</a>" +
         "</div>" +
         (attentionRows.length ? '<div class="banner warning" style="margin-top:18px">' + icon("clock") +
           "<div><strong>" + attentionRows.length + " account(s) need attention</strong><br><span class=\"small\">" +
@@ -824,12 +829,28 @@ var ICONS = {
         ? '<button class="button secondary" data-action="sec-email-disable" data-kind="' + (isAdmin ? "admin" : "user") + '">Turn off email 2FA</button>'
         : '<button class="button" data-action="sec-email-setup" data-kind="' + (isAdmin ? "admin" : "user") + '">' + icon("mail") + " Set up email 2FA</button>") +
       "</section>";
+    // Passkey card
+    var passkeys = (st && st.passkeys) || [];
+    var passkeyList = passkeys.length
+      ? '<div class="passkey-list" style="margin-top:12px">' + passkeys.map(function (p) {
+          return '<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--line)"><span>' + icon("key") + " " + esc(p.name || "Passkey") + ' <span class="muted small">' + esc(p.transports || "") + "</span></span>" +
+            '<button class="button danger small-btn" data-action="sec-passkey-delete" data-kind="' + (isAdmin ? "admin" : "user") + '" data-cred="' + esc(p.credential_id) + '">Remove</button></div>';
+        }).join("") + "</div>"
+      : "";
+    var passkeyCard =
+      '<section class="card"><div class="card-head"><h2>Passkey</h2>' +
+      (passkeys.length ? statusBadge("active", "On") : statusBadge("pending", "Off")) + "</div>" +
+      '<p class="muted">Sign in with a passkey (Windows Hello, Touch ID, a security key) instead of a password. Your device stores the private key; we only keep a public key.</p>' +
+      '<button class="button" data-action="sec-passkey-setup" data-kind="' + (isAdmin ? "admin" : "user") + '">' + icon("key") + " Add a passkey</button>" +
+      passkeyList +
+      "</section>";
     var heading = isAdmin ? "Admin security" : "Account security";
     return appLayout(isAdmin ? "admin" : "customer", "Security", "security",
       '<main class="page">' + pageHead(heading, "Add a second factor to your sign-in. You can use any combination; a code from one of them is required at login.") +
       '<div class="grid cols-2" style="margin-top:10px">' + totpCard + emailCard + "</div>" +
+      '<div class="grid cols-2" style="margin-top:10px">' + passkeyCard + "</div>" +
       '<div class="banner" style="margin-top:18px">' + icon("shield") +
-      "<div><strong>How it works</strong><br><span class=\"small\">After entering your password, you will be asked for a code. Add at least one method so you cannot be locked out if you lose a device. You can add both and use either.</span></div></div>" +
+      "<div><strong>How it works</strong><br><span class=\"small\">After entering your password, you will be asked for a code. Add at least one factor so you cannot be locked out if you lose a device. A passkey is a first-factor sign-in: when set up, you can sign in without a password.</span></div></div>" +
       "</main>");
   }
 
@@ -963,7 +984,9 @@ var ICONS = {
           var attachedTag = i.managed === 0 ? ' <span class=\"status info\">Attached</span>' : "";
           return '<article class="workspace-item"><span class="workspace-logo">' + icon("workspace") + "</span>" +
             "<div><h3>" + esc(titleCase(i.stack_name)) + " workspace" + attachedTag + "</h3><p>" + esc(i.domain) + "<br>Env " + esc(i.environment_name || i.environment_id) + " · Port " + esc(i.port) + (i.managed === 0 ? " · password unchanged" : "") + "</p></div>" +
-            badge + '<button class="button secondary small-btn" data-action="workspace-actions" data-id="' + i.id + '" data-name="' + esc(i.stack_name) + '">Actions</button></article>';
+            badge + '<button class="button secondary small-btn" data-action="workspace-actions" data-id="' + i.id + '" data-name="' + esc(i.stack_name) + '">Actions</button>' +
+              '<button class="button secondary small-btn" data-action="admin-backup" data-id="' + i.id + '">' + icon("archive") + " Back up</button>" +
+              (i.managed !== 0 ? '<button class="button secondary small-btn" data-action="admin-update-image" data-id="' + i.id + '">' + icon("refresh") + " Update n8n</button>" : "") + '</article>';
         }).join("") : '<div class="empty-state" style="min-height:200px"><div><h3>No workspaces yet</h3><p class="muted">The customer has not provisioned a workspace.</p></div></div>') +
         "</div></section>" +
         '<section class="card"><h2>Subscription timeline</h2><div class="timeline">' +
@@ -1554,6 +1577,73 @@ var ICONS = {
           act.innerHTML = icon(inp.type === "password" ? "eye" : "eyeoff");
         }
       }
+      else if (action === "signin-passkey" || action === "admin-signin-passkey") {
+        var isAdminPk = action === "admin-signin-passkey";
+        var pkStart = isAdminPk ? "/admin/passkey/login/start" : "/auth/passkey/login/start";
+        var pkVerify = isAdminPk ? "/admin/passkey/login/verify" : "/auth/passkey/login/verify";
+        var pkEmail = isAdminPk ? "" : (state.gateEmail || "");
+        if (!window.PublicKeyCredential) {
+          showToast("Passkeys not supported", "This browser does not support WebAuthn. Use a modern browser, or sign in with your password.");
+          return;
+        }
+        showModal(modalHeader(isAdminPk ? "Admin passkey" : "Sign in with passkey") + '<div class="spinner"></div>');
+        var pkBody = pkEmail ? { email: pkEmail } : {};
+        api(pkStart, { method: "POST", body: pkBody }).then(function (opts) {
+          var raw = typeof opts === "string" ? JSON.parse(opts) : opts;
+          var publicKey = Object.assign({}, raw);
+          publicKey.challenge = _b64urlToBuf(raw.challenge);
+          if (publicKey.allowCredentials) {
+            publicKey.allowCredentials = publicKey.allowCredentials.map(function (c) {
+              return { type: c.type, id: _b64urlToBuf(c.id), transports: c.transports };
+            });
+          }
+          return navigator.credentials.get({ publicKey: publicKey }).then(function (cred) {
+            var credentialJson = {
+              id: cred.id, rawId: _bufToB64url(cred.rawId), type: cred.type,
+              response: {
+                clientDataJSON: _bufToB64url(cred.response.clientDataJSON),
+                authenticatorData: _bufToB64url(cred.response.authenticatorData),
+                signature: _bufToB64url(cred.response.signature),
+                userHandle: cred.response.userHandle ? _bufToB64url(cred.response.userHandle) : undefined,
+              },
+            };
+            return api(pkVerify, { method: "POST", body: { credential: credentialJson } });
+          });
+        }).then(function (r) {
+          closeModal();
+          var tok = r && r.token;
+          if (isAdminPk) {
+            if (tok && tok !== "__mfa__") {
+              localStorage.setItem("admin_token", tok);
+              state.isAdmin = true;
+              navigate("/admin/overview");
+            } else {
+              // Admin 2FA is enabled; the frontend has no admin-MFA gate page yet
+              // (the password login has the same limitation). Keep the passkey
+              // flow honest: tell the admin to complete the second step.
+              showToast("Step 2 required", "This admin account has 2FA on. Sign in with your password to complete the second step.");
+              navigate("/admin/signin");
+            }
+          } else {
+            if (tok && tok !== "__mfa__") {
+              localStorage.setItem("portal_token", tok);
+              state.session = { token: tok, account: r.account, instances: [] };
+              state.mfa = null;
+              loadPlans();
+              navigate("/customer/dashboard");
+            } else {
+              state.mfa = r && r.mfa ? Object.assign({ email: pkEmail }, r.mfa) : null;
+              navigate("/mfa");
+            }
+          }
+        }).catch(function (err) {
+          if (err && (err.name === "AbortError" || (err.message && err.message.indexOf("abort") !== -1))) {
+            closeModal(); showToast("Passkey sign-in cancelled", "");
+          } else {
+            showToast("Passkey sign-in failed", err.message || String(err));
+          }
+        });
+      }
       else if (action === "mfa-resend") {
         event.preventDefault();
         var ms = state.mfa;
@@ -1619,6 +1709,56 @@ var ICONS = {
             '<button class="button primary-wide" type="submit">Confirm &amp; enable</button></form>' +
             '<p class="small muted" style="text-align:center;margin-top:14px">The code changes every 30 seconds.</p>');
         }).catch(function (err) { showToast("Setup failed", err.message); closeModal(); });
+      }
+      else if (action === "sec-passkey-setup") {
+        var pkBase = act.dataset.kind === "admin" ? "/admin/security/passkey" : "/me/security/passkey";
+        if (!window.PublicKeyCredential) {
+          showToast("Passkeys not supported", "This browser does not support WebAuthn. Use a modern browser, or set up an authenticator method instead.");
+          return;
+        }
+        showModal(modalHeader("Add a passkey") + '<div class="spinner"></div>');
+        api(pkBase + "/register", { method: "POST" }).then(function (opts) {
+          var raw = typeof opts === "string" ? JSON.parse(opts) : opts;
+          var publicKey = Object.assign({}, raw);
+          // The library returns already-fetchable fields; browser needs them as-is.
+          publicKey.challenge = _b64urlToBuf(raw.challenge);
+          publicKey.user.id = _b64urlToBuf(raw.user.id);
+          if (publicKey.excludeCredentials) {
+            publicKey.excludeCredentials = publicKey.excludeCredentials.map(function (c) {
+              return { type: c.type, id: _b64urlToBuf(c.id), transports: c.transports };
+            });
+          }
+          if (!publicKey.rp) publicKey.rp = { id: location.hostname, name: "SteProTECH Portal" };
+          navigator.credentials.create({ publicKey: publicKey }).then(function (cred) {
+            var credentialJson = {
+              id: cred.id, rawId: _bufToB64url(cred.rawId),
+              type: cred.type,
+              response: {
+                clientDataJSON: _bufToB64url(cred.response.clientDataJSON),
+                attestationObject: _bufToB64url(cred.response.attestationObject),
+              },
+            };
+            if (cred.response.transports) credentialJson.transports = Array.from(cred.response.transports);
+            return api(pkBase + "/verify", { method: "POST", body: { credential: credentialJson } });
+          }).then(function () {
+            closeModal();
+            showToast("Passkey added", "You can now sign in with this device.");
+            refreshSecurity();
+          }).catch(function (err) {
+            // AbortError = user cancelled the prompt
+            if (err && (err.name === "AbortError" || (err.message && err.message.indexOf("abort") !== -1))) {
+              closeModal(); showToast("Passkey setup cancelled", "");
+            } else {
+              showToast("Passkey setup failed", err.message || String(err));
+            }
+          });
+        }).catch(function (err) { showToast("Setup failed", err.message); closeModal(); });
+      }
+      else if (action === "sec-passkey-delete") {
+        var dk2 = act.dataset.kind === "admin" ? "/admin/security/passkeys/" : "/me/security/passkeys/";
+        showModal(modalHeader("Remove this passkey?") + "<p>You will no longer be able to sign in with this device's passkey.</p>" +
+          '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+          '<button class="button danger" data-confirm-sec-passkey-delete="' + esc(act.dataset.kind) + '" data-cred="' + esc(act.dataset.cred) + '">Remove passkey</button></div>');
       }
       else if (action === "sec-totp-disable") {
         var dk = act.dataset.kind === "admin" ? "/admin/security/totp/disable" : "/me/security/totp/disable";
@@ -1980,6 +2120,35 @@ var ICONS = {
         })();
       }
 
+      // sec-* confirm buttons (2FA toggle-off + passkey remove)
+      var cSecTotp = event.target.closest("[data-confirm-sec-totp-disable]");
+      if (cSecTotp) {
+        closeModal();
+        api(cSecTotp.dataset.confirmSecTotpDisable, { method: "POST" }).then(function () {
+          showToast("Authenticator 2FA off", "");
+          refreshSecurity();
+        }).catch(function (err) { showToast("Could not disable", err.message); });
+      }
+      var cSecEmail = event.target.closest("[data-confirm-sec-email-disable]");
+      if (cSecEmail) {
+        closeModal();
+        api(cSecEmail.dataset.confirmSecEmailDisable, { method: "POST" }).then(function () {
+          showToast("Email 2FA off", "");
+          refreshSecurity();
+        }).catch(function (err) { showToast("Could not disable", err.message); });
+      }
+      var cSecPk = event.target.closest("[data-confirm-sec-passkey-delete]");
+      if (cSecPk) {
+        closeModal();
+        var pkKind = cSecPk.dataset.confirmSecPasskeyDelete; // 'admin' | 'user'
+        var pkCred = cSecPk.dataset.cred;
+        var pkPath = (pkKind === "admin" ? "/admin/security/passkeys/" : "/me/security/passkeys/") + pkCred;
+        api(pkPath, { method: "DELETE" }).then(function () {
+          showToast("Passkey removed", "");
+          refreshSecurity();
+        }).catch(function (err) { showToast("Could not remove passkey", err.message); });
+      }
+
       /* filters */
       var filter = event.target.closest("[data-filter]");
       if (filter) { state.accessFilter = filter.dataset.filter; render(); }
@@ -2192,6 +2361,23 @@ var ICONS = {
     // The backend returns the QR as a data URI in the setup response (d.qr);
     // this is a passthrough when a caller passes the URI directly.
     return (uri && uri.indexOf("data:") === 0) ? uri : "";
+  }
+
+  // ---- passkey helpers (WebAuthn base64url <-> ArrayBuffer) ----
+  function _b64urlToBuf(str) {
+    if (!str) return new Uint8Array(0);
+    var b64 = String(str).replace(/-/g, "+").replace(/_/g, "/");
+    while (b64.length % 4) b64 += "=";
+    var bin = atob(b64);
+    var out = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out.buffer;
+  }
+  function _bufToB64url(buf) {
+    var bytes = new Uint8Array(buf);
+    var bin = "";
+    for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   }
 
   function findInstanceById(id) {
