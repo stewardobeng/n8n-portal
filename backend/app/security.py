@@ -43,6 +43,47 @@ def create_client_token(account_id: int) -> str:
     return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
 
 
+def create_impersonation_token(account_id: int) -> str:
+    """Admin-issued customer session for troubleshooting (2026-09-03).
+
+    Same subject as a normal customer token (acc:<id>) so every customer route
+    accepts it unchanged, but it carries the 'imp' flag and a short expiry, so a
+    forgotten session cannot linger. Minted only by the admin impersonate
+    endpoint; ended explicitly via /auth/impersonate-end (or self-expires)."""
+    payload = {
+        "sub": f"acc:{account_id}",
+        "imp": True,
+        "exp": int(time.time()) + settings.impersonation_ttl_minutes * 60,
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
+
+def _decode_impersonation_token(token: str) -> int:
+    """Return the account id when the JWT is a client token carrying the 'imp' flag."""
+    try:
+        payload = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+    except jwt.PyJWTError as e:
+        raise HTTPException(401, f"Invalid token: {e}")
+    if not payload.get("imp"):
+        raise HTTPException(401, "Not an impersonation token.")
+    sub = str(payload.get("sub", ""))
+    if not sub.startswith("acc:"):
+        raise HTTPException(401, "Not a client impersonation token.")
+    try:
+        return int(sub.split(":", 1)[1])
+    except ValueError:
+        raise HTTPException(401, "Invalid impersonation token subject.")
+
+
+def verify_impersonation(authorization: Optional[str] = Header(default=None, alias="Authorization")):
+    """FastAPI dependency for ending an impersonation session: requires a client
+    JWT that carries the 'imp' flag. No account-state gate here, so an admin can
+    always end a session even if the account's lifecycle changed mid-way."""
+    _require_jwt_secret()
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, "Missing bearer token.")
+    return _decode_impersonation_token(authorization.split(" ", 1)[1])
+
+
 def create_mfa_token(account_id: int, methods: list[str]) -> str:
     """Short-lived challenge JWT for the second factor (2FA). Not a session:
     it only proves the password was correct; the real token is minted after the

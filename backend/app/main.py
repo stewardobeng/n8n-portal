@@ -33,7 +33,8 @@ from .services.emailer import (send_welcome_credentials, send_reset_password,
 from .security import (create_access_token, verify_admin,
                        verify_admin_password, verify_password, hash_password,
                        create_client_token, verify_client, create_mfa_token,
-                       verify_mfa_token, authorize_owner_or_admin)
+                       verify_mfa_token, verify_impersonation,
+                       create_impersonation_token, authorize_owner_or_admin)
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("n8n-portal")
@@ -681,6 +682,16 @@ def verify_access_token(payload: TokenVerifyIn, request: Request):
         sc.record_failed(ip, "verify_fail", None, "bad access token")
         raise HTTPException(401, "Invalid or expired access token.")
     return AccessCheckOut(action="verified", email=str(payload.email).lower())
+
+
+@app.post("/api/v1/auth/impersonate-end", response_model=dict)
+def impersonate_end(request: Request, account_id: int = Depends(verify_impersonation)):
+    """Explicit end of an admin impersonation session (2026-09-03). Audits the
+    exit on the security trail; the token also self-expires after
+    IMPERSONATION_TTL_MINUTES, so an exit is best-effort bookkeeping only."""
+    db.record_auth_event(sc.client_ip(request), "impersonate_end", account_id,
+                         detail="impersonation ended")
+    return {"ended": True, "account_id": account_id}
 
 
 @app.get("/api/v1/me", dependencies=[Depends(verify_client)])
@@ -1480,6 +1491,37 @@ def admin_set_backup(account_id: int, payload: BackupIn):
         raise HTTPException(404, "Account not found.")
     db.set_account_backup(account_id, payload.backup_enabled)
     return {"account_id": account_id, "backup_enabled": payload.backup_enabled}
+
+
+# ---------- admin impersonation (login as a customer, 2026-09-03) ----------
+# One-click troubleshooting: the admin steps into an ACTIVE customer's portal
+# session. The minted token is a normal customer session (sub acc:<id>) so every
+# customer route applies unchanged (lifecycle state still enforced), but it
+# carries the 'imp' flag + a short TTL, and both start and end are recorded on
+# the security trail (auth_events).
+
+@app.post("/api/v1/admin/accounts/{account_id}/impersonate", response_model=dict)
+def admin_impersonate(account_id: int, request: Request,
+                      _: None = Depends(verify_admin)):
+    account = db.get_account(account_id)
+    if not account:
+        raise HTTPException(404, "Account not found.")
+    if _row_get(account, "account_state", "active") != "active":
+        raise HTTPException(
+            409,
+            "Only active accounts can be impersonated. Unsuspend or restore the account first.",
+        )
+    token = create_impersonation_token(account_id)
+    db.record_auth_event(
+        sc.client_ip(request), "impersonate_start", account_id,
+        detail="username=" + str(account["username"]),
+    )
+    return {
+        "token": token,
+        "account": _account_to_out(account).model_dump(),
+        "impersonation": True,
+        "expires_minutes": settings.impersonation_ttl_minutes,
+    }
 
 
 @app.post("/api/v1/admin/billing/sweep-expired", dependencies=[Depends(verify_admin)])

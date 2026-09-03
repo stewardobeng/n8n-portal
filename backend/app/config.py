@@ -28,6 +28,8 @@ class Settings:
     admin_password_hash: str = os.getenv("ADMIN_PASSWORD_HASH", "")  # bcrypt hash
     jwt_secret: str = os.getenv("JWT_SECRET", "")
     jwt_expiry_hours: int = int(os.getenv("JWT_EXPIRY_HOURS", "24"))
+    # Admin impersonation (login as customer) session lifetime in minutes.
+    impersonation_ttl_minutes: int = int(os.getenv("IMPERSONATION_TTL_MINUTES", "60"))
 
     # --- SMTP (welcome / reset emails) ---
     smtp_host: str = os.getenv("SMTP_HOST", "smtp.purelymail.com")

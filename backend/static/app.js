@@ -29,7 +29,9 @@
     adminMfa: null,        // admin 2FA challenge in-flight (challenge, methods)
     security2fa: null,     // 2FA setup state (GET /me/security or /admin/security)
     adminInstances: [],    // admin: all instances (GET /admin/instances) for backup/update triggers
-    adminInstancesLoaded: false
+    adminInstancesLoaded: false,
+    impersonation: null,     // admin login-as: {id, label} while viewing a customer
+    impTtlMinutes: 60        // lifetime of the impersonation session (server-set)
   };
 
   var $ = function (sel, root) { return (root || document).querySelector(sel); };
@@ -211,6 +213,15 @@ var ICONS = {
     });
   }
 
+  function impersonationStrip() {
+    var imp = state.impersonation || {};
+    var label = esc(imp.label || ("Account #" + imp.id));
+    return '<div class="imp-strip"><span class="imp-icon">' + icon("eye") + "</span>" +
+      '<div class="imp-copy"><strong>Viewing as ' + label + "</strong>" +
+      "<span>This is the customer view, for troubleshooting. Anything changed here applies to this customer's account.</span></div>" +
+      '<button class="imp-exit" data-action="exit-impersonation">' + icon("signout") + " Exit and return to admin</button></div>";
+  }
+
   function appLayout(kind, title, active, content) {
     var isAdmin = kind === "admin";
     var nav = isAdmin ? adminNav : customerNavFor();
@@ -225,6 +236,7 @@ var ICONS = {
         '<div class="sidebar-footer">' + profileChip() + "</div>" +
       "</aside>" +
       '<div class="main-area">' +
+        (state.impersonation && !isAdmin ? impersonationStrip() : "") +
         '<header class="topbar"><div class="actions">' +
           '<button class="top-icon mobile-menu" data-action="menu" aria-label="Open menu">' + icon("menu") + "</button>" +
           "<h2>" + esc(title) + "</h2></div>" +
@@ -933,7 +945,8 @@ var ICONS = {
             "<td>" + esc(fmtDate(a.paid_until)) + "</td>" +
             "<td>" + (a.quota || 1) + "</td>" +
             "<td>" + bkBadge + ' <button class="button secondary small-btn" data-action="admin-backup-toggle" data-id="' + a.id + '" data-on="' + (a.backup_enabled ? "1" : "0") + '">' + (a.backup_enabled ? "Revoke" : "Allow") + " backup</button></td>" +
-            '<td><button class="button secondary small-btn" data-route="/admin/account/' + a.id + '">View account</button></td></tr>';
+            '<td>' + (a.account_state === "active" ? '<button class="button secondary small-btn" data-action="admin-impersonate" data-id="' + a.id + '">' + icon("eye") + " Login as user</button> " : "") +
+            '<button class="button secondary small-btn" data-route="/admin/account/' + a.id + '">View account</button></td></tr>';
         }).join("") : '<tr><td colspan="7"><div class="empty-state" style="min-height:240px"><div><h3>No customer accounts yet</h3><p class="muted">Accounts appear here after registration.</p></div></div></td></tr>') +
       "</tbody></table></div></section></main>");
   }
@@ -1032,7 +1045,8 @@ var ICONS = {
     return appLayout("admin", "Account details", "accounts",
       '<main class="page">' + pageHead(a.display_name || cap(a.username), esc(a.email) + " · " + esc(a.username), '<div class="actions">' +
         lifecycleButtons +
-        (acctState === "active" ? '<button class="button secondary" data-action="admin-mark-paid" data-id="' + a.id + '">' + icon("check") + " Mark paid</button>" +
+        (acctState === "active" ? '<button class="button" data-action="admin-impersonate" data-id="' + a.id + '">' + icon("eye") + " Login as user</button> " +
+        '<button class="button secondary" data-action="admin-mark-paid" data-id="' + a.id + '">' + icon("check") + " Mark paid</button>" +
         '<button class="button secondary" data-action="admin-attach" data-id="' + a.id + '">' + icon("workspace") + " Attach workspace</button>" +
         '<button class="button secondary" data-action="quota" data-id="' + a.id + '">Change quota</button>' +
         '<button class="button secondary" data-action="admin-backup-toggle" data-id="' + a.id + '" data-on="' + (a.backup_enabled ? "1" : "0") + '">' + icon("archive") + (a.backup_enabled ? " Revoke backup access" : " Allow backup") + "</button>" +
@@ -1172,6 +1186,13 @@ var ICONS = {
     var route = (location.hash || "#/entry").slice(1).split("?")[0];
     var parts = route.split("/").filter(Boolean);
     var html = null;
+
+    // While impersonating a customer, force the customer view: the admin panel,
+    // sign-in and entry routes stay locked until impersonation is exited.
+    if (state.impersonation && parts[0] !== "customer") {
+      navigate("/customer/dashboard");
+      return;
+    }
 
     /* ---- public / auth pages ---- */
     if (route === "/entry") html = entryPage();
@@ -1662,6 +1683,68 @@ var ICONS = {
     }
   }
 
+  /* ---- admin impersonation (login as a customer) ---- */
+  function impersonateTarget(id) {
+    var all = (state.adminAccounts || []).concat(state.adminArchived || []);
+    return all.find(function (x) { return String(x.id) === String(id); });
+  }
+
+  function impersonateConfirm(accountId) {
+    var a = impersonateTarget(accountId);
+    if (!a) { showToast("Login as user", "Account not found."); return; }
+    var name = esc(a.display_name || cap(a.username));
+    showModal(modalHeader("Login as " + name + "?") +
+      "<p>You will see the portal exactly as this customer sees it, for troubleshooting.</p>" +
+      '<div class="consequence"><strong>What you should know</strong><ul>' +
+      "<li>The session lasts " + state.impTtlMinutes + " minutes and ends when you exit</li>" +
+      "<li>Starting and ending the session is recorded on the security trail</li>" +
+      "<li>Changes you make here apply to the customer's account, like their own session would</li>" +
+      "<li>Exit returns you straight to this admin panel</li></ul></div>" +
+      '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+      '<button class="button" data-confirm-impersonate="' + accountId + '">' + icon("eye") + " Login as " + name + "</button></div>");
+  }
+
+  function beginImpersonation(accountId, r) {
+    var a = impersonateTarget(accountId);
+    var label = a ? (a.display_name || a.username || a.email)
+                  : (r.account ? (r.account.display_name || r.account.username) : ("#" + accountId));
+    var adminTok = localStorage.getItem("admin_token");
+    // Park the admin session, then step into the customer session.
+    if (adminTok) localStorage.setItem("admin_token_backup", adminTok);
+    localStorage.removeItem("admin_token");
+    localStorage.setItem("portal_token", r.token);
+    localStorage.setItem("impersonation", JSON.stringify({ id: Number(accountId), label: String(label) }));
+    state.adminAuthed = false;
+    state.impersonation = { id: Number(accountId), label: String(label) };
+    state.impTtlMinutes = r.expires_minutes || 60;
+    state.session = null;
+    state.menuOpen = false;
+    stopPolling();
+    showToast("Viewing as " + label, "Exit impersonation from the banner at any time.");
+    navigate("/customer/dashboard");
+  }
+
+  function exitImpersonation() {
+    var imp = state.impersonation;
+    var label = imp ? (imp.label || "customer") : "customer";
+    // Best-effort audit of the exit (an already-expired token is fine to ignore).
+    api("/auth/impersonate-end", { method: "POST" }).catch(function () {});
+    var adminTok = localStorage.getItem("admin_token_backup");
+    if (adminTok) {
+      localStorage.setItem("admin_token", adminTok);
+      state.adminAuthed = true;
+    }
+    localStorage.removeItem("admin_token_backup");
+    localStorage.removeItem("portal_token");
+    localStorage.removeItem("impersonation");
+    state.impersonation = null;
+    state.session = null;
+    state.provisioningPw = null;
+    stopPolling();
+    showToast("Returned to admin", "You are no longer viewing as " + label + ".");
+    navigate("/admin/accounts");
+  }
+
   function eventHandlers() {
     document.addEventListener("click", function (event) {
       var route = event.target.closest("[data-route]");
@@ -1673,12 +1756,17 @@ var ICONS = {
       if (action === "menu") { state.menuOpen = !state.menuOpen; render(); }
       else if (action === "close-modal" &&
                (event.target === act || !act.classList.contains("modal-backdrop"))) closeModal();
-      else if (action === "signout") { localStorage.removeItem("portal_token"); state.session = null; state.provisioningPw = null; stopPolling(); showToast("Signed out", "You have been signed out of the portal."); navigate("/entry"); }
+      else if (action === "signout") {
+        if (state.impersonation) { exitImpersonation(); }
+        else { localStorage.removeItem("portal_token"); state.session = null; state.provisioningPw = null; stopPolling(); showToast("Signed out", "You have been signed out of the portal."); navigate("/entry"); }
+      }
       else if (action === "signout-route") {
         if (currentKind() === "admin") {
           localStorage.removeItem("admin_token"); state.adminAuthed = false;
           state.adminAccounts = []; state.adminArchived = []; state.requests = []; state.accountCache = {}; state.adminInstances = []; state.adminInstancesLoaded = false;
           showToast("Signed out", "Admin session ended."); navigate("/admin/signin");
+        } else if (state.impersonation) {
+          exitImpersonation();
         } else {
           if (window.confirm("Sign out of the portal?")) { localStorage.removeItem("portal_token"); state.session = null; state.provisioningPw = null; stopPolling(); navigate("/entry"); }
         }
@@ -1914,6 +2002,8 @@ var ICONS = {
       else if (action === "add-workspace") addWorkspaceModal();
 
       /* admin */
+      else if (action === "admin-impersonate") impersonateConfirm(act.dataset.id);
+      else if (action === "exit-impersonation") { exitImpersonation(); }
       else if (action === "quota") quotaModal(act.dataset.id);
       else if (action === "admin-lock") {
         showModal(modalHeader("Switch workspace off?") + "<p>This will stop the customer workspace until it is switched back on or renewed.</p>" +
@@ -2196,6 +2286,18 @@ var ICONS = {
         else {
           adminAction("/admin/accounts/" + unlockAid + "/unlock", "Workspace switched on", "Access and automations have been restored.").then(function () { refreshAdminData(); });
         }
+      }
+
+      var cImp = event.target.closest("[data-confirm-impersonate]");
+      if (cImp) {
+        closeModal();
+        var impId = cImp.dataset.confirmImpersonate;
+        (async function () {
+          try {
+            var ir = await api("/admin/accounts/" + impId + "/impersonate", { method: "POST" });
+            beginImpersonation(impId, ir);
+          } catch (err) { showToast("Could not login as user", err.message); }
+        })();
       }
       var cReset = event.target.closest("[data-confirm-reset]");
       if (cReset) {
@@ -2628,6 +2730,17 @@ var ICONS = {
     }
     state.adminAuthed = !!storedAdmin;
     var portalToken = localStorage.getItem("portal_token");
+    // Rehydrate an in-flight admin impersonation across reloads (banner + exit
+    // stay available). Clean stale impersonation/backup keys otherwise.
+    var impRaw = localStorage.getItem("impersonation");
+    if (impRaw && portalToken && _validStoredToken(portalToken)) {
+      try { state.impersonation = JSON.parse(impRaw); } catch (e) { state.impersonation = null; }
+      if (!state.impersonation || !state.impersonation.id) state.impersonation = null;
+    }
+    if (!state.impersonation) {
+      localStorage.removeItem("impersonation");
+      localStorage.removeItem("admin_token_backup");
+    }
     // handle payment return: ?status=success after Paystack redirect
     var params = new URLSearchParams(location.search);
     if (params.get("status") === "success" && portalToken) {
