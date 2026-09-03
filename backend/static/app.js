@@ -285,10 +285,17 @@ var ICONS = {
   }
 
   function signinPage() {
+    var gateEmail = state.gateEmail || "";
+    // Pre-fill the email from the entry screen and lock it: the customer walks
+    // the email-first login, so editing the address here would break the login
+    // branch. "Change email" returns them to /entry to start over (2026-09-02).
     return authLayout(
       '<div class="eyebrow">Welcome back</div><h1>Sign in to your portal</h1>' +
       '<p class="muted">Use your portal password to manage billing and open your workspace.</p>' +
-      '<form data-form="signin"><div class="field"><label>Email address</label><input name="email" type="email" required></div>' +
+      '<form data-form="signin"><div class="field"><label>Email address</label>' +
+      '<input name="email" type="email" value="' + esc(gateEmail) + '" readonly aria-readonly="true">' +
+      '<small class="field-note">' + icon("account") + ' Signed in as ' + esc(gateEmail) +
+      ' &middot; <a href="#/entry">Change email</a></small></div>' +
       '<div class="field"><label>Password</label><div class="input-row">' +
       '<input id="signin-password" name="password" type="password" required>' +
       '<button type="button" class="input-action" data-action="toggle-password" data-target="signin-password">' + icon("eye") + '</button></div></div>' +
@@ -690,7 +697,7 @@ var ICONS = {
 
   function adminAccounts() {
     var accounts = state.adminAccounts || [];
-    var archivedCount = accounts.filter(function (a) { return a.account_state === "archived"; }).length;
+    var archivedCount = (state.adminArchived || []).length;
     return appLayout("admin", "Accounts", "accounts",
       '<main class="page">' + pageHead("Customer accounts", "Review subscriptions, quotas, and workspace availability.", '<div class="actions"><button class="button" data-action="admin-add-user">' + icon("plus") + " Add user</button>" +
         (archivedCount ? '<a class="button secondary" href="#/admin/archived">' + icon("archive") + " Archived (" + archivedCount + ")</a>" : "") +
