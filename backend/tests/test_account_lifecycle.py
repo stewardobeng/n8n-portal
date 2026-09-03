@@ -89,15 +89,22 @@ def test_suspended_blocks_login(monkeypatch):
                      "app.security", fromlist=["hash_password"]).hash_password(pw), acc))
     conn.commit()
     conn.close()
-    out = app_main.client_login(type("P", (), {"email": db.get_account(acc)["email"],
-                                               "password": pw})())
+
+    class FakeReq:
+        headers = {}
+        client = type("C", (), {"host": "127.0.0.1"})()
+
+    out = app_main.client_login(
+        type("P", (), {"email": db.get_account(acc)["email"], "password": pw})(),
+        FakeReq())
     assert out.token
     # suspend -> 403
     db.set_account_state(acc, "suspended")
     from fastapi import HTTPException
     with pytest.raises(HTTPException) as ei:
-        app_main.client_login(type("P", (), {"email": db.get_account(acc)["email"],
-                                             "password": pw})())
+        app_main.client_login(
+            type("P", (), {"email": db.get_account(acc)["email"], "password": pw})(),
+            FakeReq())
     assert ei.value.status_code == 403
     assert "suspended" in ei.value.detail
 
