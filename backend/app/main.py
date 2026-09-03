@@ -1507,6 +1507,23 @@ def admin_current_image(instance_id: int):
     return {"image": backup_ops.current_image(inst)}
 
 
+@app.get("/api/v1/admin/instances", dependencies=[Depends(verify_admin)])
+def admin_list_instances():
+    """All instances across every account, with the owning account's label, so the
+    admin Backups page can offer a per-workspace trigger without needing to open
+    each account page. (Steward 2026-09-03: the admin Backups page had history only.)"""
+    rows = db.list_instances(account_id=None)
+    out = []
+    for r in rows:
+        inst = _instance_to_out(r).model_dump()
+        acc = db.get_account(r["account_id"])
+        inst["account_email"] = acc["email"] if acc else ""
+        inst["account_username"] = acc["username"] if acc else ""
+        inst["account_display"] = (acc["username"] if acc else "customer #" + str(r["account_id"]))
+        out.append(inst)
+    return {"instances": out}
+
+
 @app.get("/api/v1/health")
 def health():
     return {"ok": True, "service": "n8n-portal-backend"}
