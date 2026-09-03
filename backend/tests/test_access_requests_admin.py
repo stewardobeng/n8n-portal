@@ -115,3 +115,35 @@ def test_delete_unknown_404(tmp_path, monkeypatch):
     h = {"Authorization": "Bearer " + _admin_token()}
     r = client.delete("/api/v1/admin/access-requests/999999", headers=h)
     assert r.status_code == 404, r.text
+
+
+def test_registration_removes_request_email(tmp_path, monkeypatch):
+    """A member's access-request row is deleted on successful registration, so
+    it never reappears in the admin access-requests list (their record lives
+    under the account now). Steward 2026-09-03."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    _seed(tmp_path, monkeypatch)
+    email = "request@" + os.getenv("TEST_DOMAIN", "steprotech.com")
+    client = TestClient(app)
+
+    # issue a token (admin approves)
+    h = {"Authorization": "Bearer " + _admin_token()}
+    rid = db.get_access_request(email)["id"]
+    tok_r = client.post(f"/api/v1/admin/access-requests/{rid}/token", headers=h)
+    tok = tok_r.json()["token"]
+
+    # verify token then register
+    v = client.post("/api/v1/auth/verify-token", json={"email": email, "token": tok})
+    assert v.status_code == 200, v.text
+    reg = client.post("/api/v1/accounts", json={
+        "email": email, "username": "newmember", "first_name": "N", "last_name": "M",
+        "password": "Abcdef123", "access_token": tok,
+    })
+    assert reg.status_code in (200, 201), reg.text
+
+    # the access request must be gone now
+    assert db.get_access_request(email) is None
+    # and the admin list no longer contains it
+    r_list = client.get("/api/v1/admin/access-requests", headers=h)
+    assert all(r["email"] != email for r in r_list.json())
