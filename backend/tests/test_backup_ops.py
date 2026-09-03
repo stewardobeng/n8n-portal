@@ -98,8 +98,31 @@ def test_update_stack_image_swaps_tag(monkeypatch):
     pc.update_stack_image(84, 8, "n8nio/n8n:2.31.6")
 
 
-def test_update_stack_image_no_change_raises(monkeypatch):
+def test_update_stack_image_same_tag_redeploys(monkeypatch):
+    # identical tag = the Portainer "re-pull current version" case: the content
+    # is unchanged but the stack must still be PUT with pull (0.1.50 behaviour).
     compose = "image: n8nio/n8n:latest\n"
+    calls = {}
+
+    def fake_request(method, url, headers=None, **kw):
+        if "/stacks/84/file" in url and method == "GET":
+            return FakeResp(status_code=200, json_data={"StackFileContent": compose})
+        if "/stacks/84" in url and method == "GET":
+            return FakeResp(status_code=200, json_data={"Env": []})
+        if "/stacks/84" in url and method == "PUT":
+            calls["put"] = url
+            return FakeResp(status_code=200, json_data={"ok": True})
+        return FakeResp()
+
+    monkeypatch.setattr(httpx, "request", fake_request)
+    pc = PortainerClient(base_url="http://pt:9000", token="tok")
+    pc.update_stack_image(84, 8, "n8nio/n8n:latest")
+    assert "pullImage=true" in calls["put"], calls
+
+
+def test_update_stack_image_missing_image_line_raises(monkeypatch):
+    # a stack whose compose has no n8nio/n8n image line at all is an error
+    compose = "image: busybox:1.36\n"
 
     def fake_request(method, url, headers=None, **kw):
         if "/stacks/84/file" in url and method == "GET":
@@ -109,8 +132,7 @@ def test_update_stack_image_no_change_raises(monkeypatch):
     monkeypatch.setattr(httpx, "request", fake_request)
     pc = PortainerClient(base_url="http://pt:9000", token="tok")
     with pytest.raises(RuntimeError):
-        # asking for latest when it's already latest => no-op guard
-        pc.update_stack_image(84, 8, "n8nio/n8n:latest")
+        pc.update_stack_image(84, 8, "n8nio/n8n:2.31.6")
 
 
 # ---------- backup service (mocked db + portainer) ----------
