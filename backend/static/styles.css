@@ -391,3 +391,9 @@ tbody tr:hover { background: #fbfdfd; }
 
 /* account lifecycle (suspend/archive) 2026-09-02 */
 .badge-stack { display: inline-flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+/* signin locked-email helper (2026-09-02) */
+.field-note { display:inline-flex; align-items:center; gap:6px; margin-top:8px; font-size:13px; color:var(--muted, #6b7a86); }
+.field-note a { color:var(--teal, #25b4b8); font-weight:600; }
+.field-note a:hover { text-decoration:underline; }
+input[readonly] { background:var(--bg-muted, #eef2f4); cursor:not-allowed; }
