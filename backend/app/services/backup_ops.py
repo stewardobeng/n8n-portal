@@ -193,9 +193,26 @@ def update_instance_image(instance, image: str) -> None:
 
     pc = PortainerClient()
     env = int(instance["environment_id"])
-    stack_id = instance["stack_id"]
-    if not stack_id or stack_id <= 0:
-        raise ValueError("Cannot update image: instance has no Portainer stack record.")
+    stack_id = instance["stack_id"] if "stack_id" in instance.keys() else None
+    if not stack_id or int(stack_id) <= 0:
+        # Admin-attached workspaces (managed=0) may predate the portal and carry
+        # no stack_id; resolve the Portainer stack by name so image updates work
+        # on them exactly like portal-provisioned ones (Steward 2026-09-03).
+        try:
+            for s in pc.list_stacks():
+                if (int(s.get("EndpointId", 0)) == env
+                        and s.get("Name") == instance["stack_name"]):
+                    stack_id = s.get("Id")
+                    break
+        except Exception as e:
+            log.warning("image update: stack lookup for %s failed: %s",
+                        instance["stack_name"], e)
+        if stack_id:
+            db.update_instance(instance["id"], stack_id=stack_id)
+        else:
+            raise ValueError(
+                "Cannot update image: this workspace has no Portainer stack "
+                "record. Attach it again or update it manually.")
     pc.update_stack_image(int(stack_id), env, full_image)
     db.update_instance(instance["id"], image=full_image)
     log.info("instance %s image updated to %s", instance["stack_name"], full_image)
