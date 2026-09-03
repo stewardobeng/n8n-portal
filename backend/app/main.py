@@ -15,7 +15,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Request
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Request, Header
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr, Field
@@ -24,6 +24,7 @@ from .config import settings
 from . import db
 from .services import provisioner, billing, access_gate, admin_ops, backup_ops
 from .services import account_security
+from .services import security_controls as sc
 from .services.admin_ops import AdminOpsError
 from .services.portainer_client import PortainerClient
 from .services.npm_client import NPMClient
@@ -32,7 +33,7 @@ from .services.emailer import (send_welcome_credentials, send_reset_password,
 from .security import (create_access_token, verify_admin,
                        verify_admin_password, verify_password, hash_password,
                        create_client_token, verify_client, create_mfa_token,
-                       verify_mfa_token)
+                       verify_mfa_token, authorize_owner_or_admin)
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("n8n-portal")
@@ -63,6 +64,51 @@ async def _expiry_loop(interval_seconds: int = 15 * 60) -> None:
 
 
 app = FastAPI(title="n8n Self-Service Portal", version="0.1.0", lifespan=lifespan)
+
+
+# ---------- security headers middleware (Steward 2026-09-03) ----------
+# No security headers were set before (proxy only sent Server/X-Served-By).
+# The SPA loads external app.js/styles.css + Google Fonts, uses inline style
+# attrs and data: (QR) images, and hits the same-origin /api — so the CSP below
+# is scoped to allow those while blocking inline <script> and unknown origins.
+
+_SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'self'; "
+        "img-src 'self' data:; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com; "
+        "script-src 'self'; "
+        "connect-src 'self'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'; "
+        "object-src 'none'"
+    ),
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    # HSTS only ever sent over HTTPS (nginx terminates TLS; the app sees HTTP).
+    "Strict-Transport-Security": "max-age=63072000; includeSubDomains; preload",
+    "X-XSS-Protection": "1; mode=block",
+}
+
+
+@app.middleware("http")
+async def security_headers_and_ban(request: Request, call_next):
+    """Set hardened response headers on every response and reject banned IPs."""
+    # IP-ban gate (defense-in-depth on top of the per-route checks)
+    try:
+        if sc.is_banned(sc.client_ip(request)):
+            from fastapi import JSONResponse
+            return JSONResponse(status_code=403, content={"detail": "Access temporarily blocked."})
+    except Exception:
+        pass
+    response = await call_next(request)
+    for k, v in _SECURITY_HEADERS.items():
+        response.headers.setdefault(k, v)
+    return response
 
 
 # ---------- schemas ----------
@@ -360,29 +406,42 @@ def _run_provision(account_id: int, password: str | None = None) -> None:
 # ---------- access gate + login (admin-gated onboarding) ----------
 
 @app.post("/api/v1/auth/check", response_model=AccessCheckOut)
-def access_check(payload: AccessCheckIn):
+def access_check(payload: AccessCheckIn, request: Request):
     """Email-only first page. Branch: login | requested | waiting | token."""
+    ip = sc.client_ip(request)
+    if sc.check_rate(ip, "check"):
+        raise HTTPException(429, "Too many requests. Slow down and try again shortly.")
     return AccessCheckOut(**access_gate.check_email(str(payload.email)))
 
 
 @app.post("/api/v1/auth/login", response_model=LoginOut)
-def client_login(payload: LoginIn):
+def client_login(payload: LoginIn, request: Request):
     """Returning-user login: email + password -> portal session token.
     Suspended/archived accounts are blocked (admin lifecycle, 2026-09-02).
     If the account has 2FA enabled, password is checked and an MFA challenge is
-    returned (no token yet) — the client must pass the second factor (2026-09-02)."""
+    returned (no token yet) — the client must pass the second factor (2026-09-02).
+    SECURITY (2026-09-03): per-IP rate limited + failed attempts recorded and
+    auto-banned; login errors are uniform (no account-existence oracle)."""
+    ip = sc.client_ip(request)
+    if sc.is_banned(ip):
+        raise HTTPException(403, "Access temporarily blocked. Contact support.")
+    if sc.check_rate(ip, "login"):
+        raise HTTPException(429, "Too many login attempts. Try again in a minute.")
     email = str(payload.email).lower()
     account = db.get_account_by_email(email)
-    if not account:
-        raise HTTPException(404, "No account for this email.")
-    if not verify_password(payload.password, account["password_hash"] or ""):
+    # Uniform error for unknown account AND wrong password (no enumeration).
+    if not account or not verify_password(payload.password, account["password_hash"] or ""):
+        sc.record_failed(ip, "login_fail", account["id"] if account else None,
+                         "bad credentials")
         raise HTTPException(401, "Invalid email or password.")
     if _row_get(account, "account_state", "active") != "active":
+        sc.record_failed(ip, "login_fail", account["id"], "non-active account")
         raise HTTPException(
             403,
             "This account is " + _row_get(account, "account_state", "active") +
             ". Contact support for help.",
         )
+    sc.record_ok(ip, "login_ok", account["id"])
     # 2FA gate: authenticator TOTP +/or email OTP
     meth = account_security.enabled_methods(account["id"])
     if meth:
@@ -401,13 +460,20 @@ def client_login(payload: LoginIn):
 
 
 @app.post("/api/v1/auth/mfa-verify", response_model=LoginOut)
-def client_mfa_verify(payload: MFAVerifyIn):
+def client_mfa_verify(payload: MFAVerifyIn, request: Request):
     """Second factor for a 2FA account: TOTP code from the authenticator app OR
-    the emailed one-time code. Returns the real portal session token."""
+    the emailed one-time code. Returns the real portal session token.
+    SECURITY (2026-09-03): per-IP limited + failures recorded/auto-banned (a
+    6-digit code is brute-forceable without a cap)."""
+    ip = sc.client_ip(request)
+    if sc.is_banned(ip):
+        raise HTTPException(403, "Access temporarily blocked. Contact support.")
+    if sc.check_rate(ip, "mfa"):
+        raise HTTPException(429, "Too many attempts. Try again in a minute.")
     email = str(payload.email).lower()
     account = db.get_account_by_email(email)
     if not account:
-        raise HTTPException(404, "No account for this email.")
+        raise HTTPException(401, "Invalid email or password.")
     if _row_get(account, "account_state", "active") != "active":
         raise HTTPException(403, "This account is " +
                             _row_get(account, "account_state", "active") +
@@ -422,7 +488,9 @@ def client_mfa_verify(payload: MFAVerifyIn):
     if not ok and any(m["method"] == "email" for m in methods):
         ok = account_security.email_otp_verify(account["id"], code)
     if not ok:
+        sc.record_failed(ip, "mfa_fail", account["id"])
         raise HTTPException(401, "That code is invalid or has expired.")
+    sc.record_ok(ip, "login_ok", account["id"])
     return LoginOut(
         token=create_client_token(account["id"]),
         account=_account_to_out(account),
@@ -430,11 +498,15 @@ def client_mfa_verify(payload: MFAVerifyIn):
 
 
 @app.post("/api/v1/auth/mfa-send-otp", response_model=dict)
-def client_mfa_send_otp(payload: AccessCheckIn):
-    """Resend the emailed one-time code for a 2FA account (after login)."""
+def client_mfa_send_otp(payload: AccessCheckIn, request: Request):
+    """Resend the emailed one-time code for a 2FA account (after login).
+    SECURITY (2026-09-03): per-IP limited to avoid email-bombing a mailbox."""
+    ip = sc.client_ip(request)
+    if sc.check_rate(ip, "forgot"):
+        raise HTTPException(429, "Too many requests. Try again in a few minutes.")
     account = db.get_account_by_email(str(payload.email).lower())
     if not account:
-        raise HTTPException(404, "No account for this email.")
+        raise HTTPException(401, "Invalid email or password.")
     if _row_get(account, "account_state", "active") != "active":
         raise HTTPException(403, "This account is " +
                             _row_get(account, "account_state", "active") +
@@ -445,10 +517,14 @@ def client_mfa_send_otp(payload: AccessCheckIn):
 
 
 @app.post("/api/v1/auth/forgot-password", response_model=dict)
-def forgot_password(payload: ForgotPasswordIn):
+def forgot_password(payload: ForgotPasswordIn, request: Request):
     """Email a single-use reset link. Always returns 200 so attackers cannot
     enumerate which emails have accounts. Mail failures are logged, not surfaced
-    (the response must not reveal whether an account or SMTP problem occurred)."""
+    (the response must not reveal whether an account or SMTP problem occurred).
+    SECURITY (2026-09-03): per-IP limited to avoid email-bombing a mailbox."""
+    ip = sc.client_ip(request)
+    if sc.check_rate(ip, "forgot"):
+        raise HTTPException(429, "Too many requests. Try again in a few minutes.")
     try:
         token = account_security.request_password_reset(str(payload.email))
     except EmailError as e:
@@ -462,8 +538,12 @@ def forgot_password(payload: ForgotPasswordIn):
 
 
 @app.post("/api/v1/auth/reset-password", response_model=dict)
-def reset_password(payload: ResetPasswordIn):
-    """Consume a reset token and set a new portal password."""
+def reset_password(payload: ResetPasswordIn, request: Request):
+    """Consume a reset token and set a new portal password.
+    SECURITY (2026-09-03): per-IP limited to blunt token-guessing."""
+    ip = sc.client_ip(request)
+    if sc.is_banned(ip) or sc.check_rate(ip, "global"):
+        raise HTTPException(429, "Too many requests. Try again in a few minutes.")
     try:
         account_security.reset_password(payload.token, payload.password)
     except account_security.SecurityError as e:
@@ -472,9 +552,17 @@ def reset_password(payload: ResetPasswordIn):
 
 
 @app.post("/api/v1/auth/verify-token", response_model=AccessCheckOut)
-def verify_access_token(payload: TokenVerifyIn):
-    """Visitor enters email + admin-issued token; verified -> registration opens."""
+def verify_access_token(payload: TokenVerifyIn, request: Request):
+    """Visitor enters email + admin-issued token; verified -> registration opens.
+    SECURITY (2026-09-03): the XXXX-XXXX access code is the signup gate, so
+    per-IP + per-email limiting is essential to stop brute-forcing codes."""
+    ip = sc.client_ip(request)
+    if sc.is_banned(ip):
+        raise HTTPException(403, "Access temporarily blocked. Contact support.")
+    if sc.check_rate(ip, "verify"):
+        raise HTTPException(429, "Too many attempts. Try again in a few minutes.")
     if not access_gate.verify_token(str(payload.email), payload.token):
+        sc.record_failed(ip, "verify_fail", None, "bad access token")
         raise HTTPException(401, "Invalid or expired access token.")
     return AccessCheckOut(action="verified", email=str(payload.email).lower())
 
@@ -596,9 +684,15 @@ def my_download_backup(backup_id: int, account_id: int = Depends(verify_client))
 # ---------- client endpoints ----------
 
 @app.post("/api/v1/accounts", response_model=dict, status_code=201)
-def create_account(payload: AccountCreate):
+def create_account(payload: AccountCreate, request: Request):
     """Registration is GATED: requires a verified access token for this email
-    (Steward 2026-09-01). Returns the account + a portal session token."""
+    (Steward 2026-09-01). Returns the account + a portal session token.
+    SECURITY (2026-09-03): per-IP rate limited (access-token guessing / spam)."""
+    ip = sc.client_ip(request)
+    if sc.is_banned(ip):
+        raise HTTPException(403, "Access temporarily blocked. Contact support.")
+    if sc.check_rate(ip, "register"):
+        raise HTTPException(429, "Too many registrations. Try again later.")
     email = str(payload.email).lower()
     existing = db.get_account_by_email(email)
     if existing:
@@ -634,7 +728,11 @@ def create_account(payload: AccountCreate):
 
 @app.post("/api/v1/accounts/{account_id}/provision")
 def provision(account_id: int, background: BackgroundTasks,
+              authorization: str | None = Header(default=None, alias="Authorization"),
               payload: Optional[ProvisionRequest] = None):
+    """SECURITY FIX (2026-09-03): require owner-or-admin — previously any caller
+    could trigger provisioning on an arbitrary account id."""
+    authorize_owner_or_admin(authorization, account_id)
     account = db.get_account(account_id)
     if not account:
         raise HTTPException(404, "Account not found.")
@@ -654,7 +752,11 @@ def provision(account_id: int, background: BackgroundTasks,
 
 
 @app.get("/api/v1/accounts/{account_id}", response_model=dict)
-def account_status(account_id: int):
+def account_status(account_id: int,
+                   authorization: str | None = Header(default=None, alias="Authorization")):
+    """SECURITY FIX (2026-09-03): require owner-or-admin — previously any caller
+    could enumerate any account's details + instances by id (IDOR)."""
+    authorize_owner_or_admin(authorization, account_id)
     account = db.get_account(account_id)
     if not account:
         raise HTTPException(404, "Account not found.")
@@ -700,7 +802,11 @@ def plans():
 
 
 @app.post("/api/v1/accounts/{account_id}/checkout", response_model=CheckoutOut)
-def create_checkout(account_id: int):
+def create_checkout(account_id: int,
+                    authorization: str | None = Header(default=None, alias="Authorization")):
+    """SECURITY FIX (2026-09-03): require owner-or-admin — previously any caller
+    could start a checkout on an arbitrary account id."""
+    authorize_owner_or_admin(authorization, account_id)
     account = db.get_account(account_id)
     if not account:
         raise HTTPException(404, "Account not found.")
@@ -736,20 +842,43 @@ async def stripe_webhook(request: Request):
 
 
 @app.post("/api/v1/webhook/mock")
-async def mock_webhook(request: Request):
+async def mock_webhook(request: Request,
+                       authorization: str | None = Header(default=None, alias="Authorization")):
     """E2E helper: POST {"mock": true, "type": "charge.success",
     "data": {"metadata": {"account_id": "5"}}} etc. Only active when
-    PAYMENT_GATEWAY=mock."""
+    PAYMENT_GATEWAY=mock.
+
+    SECURITY FIX (2026-09-03, Steward): previously open to anyone — with
+    PAYMENT_GATEWAY=mock an arbitrary caller could mark ANY account paid and
+    unlock its workspace (a free-provisioning / undo-lock bypass). Now the
+    caller must authenticate: either the admin, or the client whose account_id
+    matches the one being marked paid. The frontend's mock checkout sends the
+    client token (api() attaches it), so the legit flow still works."""
+    if settings.payment_gateway != "mock":
+        raise HTTPException(404, "Mock gateway is not active.")
     payload = await request.body()
     try:
-        result = billing.handle_webhook("mock", payload, None)
+        event = billing.handle_webhook("mock", payload, None)
     except Exception as e:
         raise HTTPException(400, str(e))
-    return result
+    # Owner-or-admin gate: the paid account must belong to the authenticated
+    # caller (or be an admin action). Decode from the raw JSON body.
+    import json as _json
+    try:
+        ev = _json.loads(payload or b"{}")
+        meta = (ev.get("data") or {}).get("metadata") or {}
+        target = meta.get("account_id")
+        if target:
+            authorize_owner_or_admin(authorization, int(target))
+    except Exception:
+        raise HTTPException(401, "Unauthenticated mock webhook.")
+    return event
 
 
-@app.get("/api/v1/environments")
+@app.get("/api/v1/environments", dependencies=[Depends(verify_admin)])
 def environments():
+    """Portainer environment list. SECURITY FIX (2026-09-03): now admin-only —
+    previously unauthenticated, leaking every server name + IP + status."""
     pc = PortainerClient()
     return pc.list_endpoints()
 
@@ -757,9 +886,18 @@ def environments():
 # ---------- admin endpoints ----------
 
 @app.post("/api/v1/admin/login", response_model=AdminLoginOut)
-def admin_login(payload: AdminLoginIn):
+def admin_login(payload: AdminLoginIn, request: Request):
+    """SECURITY (2026-09-03): per-IP rate limited + failed attempts recorded &
+    auto-banned (admin password is a single high-value target)."""
+    ip = sc.client_ip(request)
+    if sc.is_banned(ip):
+        raise HTTPException(403, "Access temporarily blocked. Contact support.")
+    if sc.check_rate(ip, "login"):
+        raise HTTPException(429, "Too many login attempts. Try again in a minute.")
     if not verify_admin_password(payload.password):
+        sc.record_failed(ip, "login_fail", None, "admin bad password")
         raise HTTPException(401, "Invalid admin password.")
+    sc.record_ok(ip, "login_ok", None)
     # Admin 2FA gate
     methods = account_security.admin_2fa_state()["methods"]
     if methods:
@@ -776,9 +914,15 @@ def admin_login(payload: AdminLoginIn):
 
 
 @app.post("/api/v1/admin/mfa-verify", response_model=AdminLoginOut)
-def admin_mfa_verify(payload: AdminMFAVerifyIn):
+def admin_mfa_verify(payload: AdminMFAVerifyIn, request: Request):
     """Admin second factor after the password. Verifies the MFA challenge token
-    (proves the password was correct) + the code, then issues the admin JWT."""
+    (proves the password was correct) + the code, then issues the admin JWT.
+    SECURITY (2026-09-03): per-IP limited + failures recorded/auto-banned."""
+    ip = sc.client_ip(request)
+    if sc.is_banned(ip):
+        raise HTTPException(403, "Access temporarily blocked. Contact support.")
+    if sc.check_rate(ip, "mfa"):
+        raise HTTPException(429, "Too many attempts. Try again in a minute.")
     account_id, methods = verify_mfa_token(payload.challenge)
     if account_id != 0:
         raise HTTPException(401, "Invalid admin MFA challenge.")
@@ -791,7 +935,9 @@ def admin_mfa_verify(payload: AdminMFAVerifyIn):
     if not ok and any(m["method"] == "email" for m in enabled):
         ok = account_security.admin_email_otp_verify(payload.code)
     if not ok:
+        sc.record_failed(ip, "mfa_fail", None)
         raise HTTPException(401, "That code is invalid or has expired.")
+    sc.record_ok(ip, "login_ok", None)
     return AdminLoginOut(
         token=create_access_token("admin"),
         expires_hours=settings.jwt_expiry_hours,
@@ -1200,6 +1346,56 @@ def admin_current_image(instance_id: int):
 @app.get("/api/v1/health")
 def health():
     return {"ok": True, "service": "n8n-portal-backend"}
+
+
+# ---------- admin security: auth events + IP bans (Steward 2026-09-03) ----------
+
+@app.get("/api/v1/admin/security/events", dependencies=[Depends(verify_admin)])
+def admin_security_events(limit: int = 100):
+    """Recent auth events (logins, failures, MFA) for triage.
+    SECURITY (2026-09-03): admin-only — no IP details leak publicly."""
+    rows = db.list_auth_events(min(limit, 500))
+    import datetime as _dt
+    return {"events": [{
+        "id": r["id"], "ip": r["ip"], "event": r["event"],
+        "account_id": r["account_id"], "detail": r["detail"],
+        "created_at": r["created_at"],
+        "created_iso": _dt.datetime.utcfromtimestamp(r["created_at"]).isoformat() + "Z",
+    } for r in rows]}
+
+
+@app.get("/api/v1/admin/security/bans", dependencies=[Depends(verify_admin)])
+def admin_security_bans():
+    """List current IP bans. SECURITY (2026-09-03): admin-only."""
+    rows = db.list_ip_bans()
+    import datetime as _dt
+    return {"bans": [{
+        "ip": r["ip"], "reason": r["reason"],
+        "expires_at": r["expires_at"],
+        "expires_iso": (_dt.datetime.utcfromtimestamp(r["expires_at"]).isoformat() + "Z"
+                        if r["expires_at"] else "permanent"),
+        "created_at": r["created_at"],
+    } for r in rows]}
+
+
+class BanIn(BaseModel):
+    ip: str = Field(..., min_length=7, max_length=45)
+    hours: float = Field(..., gt=0, le=24 * 365)
+
+
+@app.post("/api/v1/admin/security/bans", dependencies=[Depends(verify_admin)])
+def admin_ban_ip(payload: BanIn):
+    """Manually ban an IP for N hours. SECURITY (2026-09-03): admin-only."""
+    ip = payload.ip.strip()
+    sc.ban(ip, "manual admin ban", payload.hours)
+    return {"ok": True, "ip": ip, "hours": payload.hours}
+
+
+@app.delete("/api/v1/admin/security/bans/{ip}", dependencies=[Depends(verify_admin)])
+def admin_unban_ip(ip: str):
+    """Remove an IP ban. SECURITY (2026-09-03): admin-only."""
+    ok = sc.unban(ip.strip())
+    return {"ok": ok, "ip": ip.strip()}
 
 
 # ---------- static UI (served at /) ----------

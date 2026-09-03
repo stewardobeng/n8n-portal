@@ -199,6 +199,21 @@ def init_db(db_path: str | None = None) -> None:
             created_at INTEGER NOT NULL,
             UNIQUE(account_id, instance_id, kind, created_at)
         );
+        CREATE TABLE IF NOT EXISTS auth_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ip TEXT NOT NULL,
+            event TEXT NOT NULL,          -- login_fail | login_ok | register | mfa_fail | reset | ban_env ...
+            account_id INTEGER,
+            detail TEXT DEFAULT '',
+            created_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS ip_bans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ip TEXT NOT NULL UNIQUE,
+            reason TEXT DEFAULT '',
+            expires_at INTEGER,            -- NULL = permanent
+            created_at INTEGER NOT NULL
+        );
         """)
         conn.commit()
     finally:
@@ -771,5 +786,95 @@ def list_backups(account_id: int | None = None) -> list[sqlite3.Row]:
                 (account_id,),
             ).fetchall()
         return conn.execute("SELECT * FROM backups ORDER BY created_at DESC").fetchall()
+    finally:
+        conn.close()
+
+
+# ---- auth events + IP bans (2026-09-03, Steward hardening) ----
+
+def record_auth_event(ip: str, event: str, account_id: int | None = None,
+                      detail: str = "") -> None:
+    conn = get_conn()
+    try:
+        conn.execute(
+            "INSERT INTO auth_events (ip, event, account_id, detail, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (ip, event, account_id, detail[:500] if detail else "", now()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def count_auth_events(ip: str, event: str, since_ts: int) -> int:
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM auth_events WHERE ip = ? AND event = ? AND created_at > ?",
+            (ip, event, since_ts),
+        ).fetchone()
+        return row["n"] if row else 0
+    finally:
+        conn.close()
+
+
+def list_auth_events(limit: int = 100) -> list[sqlite3.Row]:
+    conn = get_conn()
+    try:
+        return conn.execute(
+            "SELECT * FROM auth_events ORDER BY created_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def ban_ip(ip: str, reason: str = "", expires_at: int | None = None) -> None:
+    conn = get_conn()
+    try:
+        conn.execute(
+            "INSERT INTO ip_bans (ip, reason, expires_at, created_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(ip) DO UPDATE SET reason = excluded.reason, "
+            "expires_at = excluded.expires_at, created_at = excluded.created_at",
+            (ip, reason[:200] if reason else "", expires_at, now()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def unban_ip(ip: str) -> bool:
+    conn = get_conn()
+    try:
+        cur = conn.execute("DELETE FROM ip_bans WHERE ip = ?", (ip,))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def is_ip_banned(ip: str, now_ts: int) -> bool:
+    """True if the IP is on the ban list and not expired."""
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT expires_at FROM ip_bans WHERE ip = ?", (ip,)
+        ).fetchone()
+        if not row:
+            return False
+        exp = row["expires_at"]
+        if exp is not None and exp < now_ts:
+            # expired: auto-clear
+            conn.execute("DELETE FROM ip_bans WHERE ip = ?", (ip,))
+            conn.commit()
+            return False
+        return True
+    finally:
+        conn.close()
+
+
+def list_ip_bans() -> list[sqlite3.Row]:
+    conn = get_conn()
+    try:
+        return conn.execute("SELECT * FROM ip_bans ORDER BY created_at DESC").fetchall()
     finally:
         conn.close()

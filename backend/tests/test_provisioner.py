@@ -411,25 +411,26 @@ def test_mock_checkout_then_charge_success():
     billing_mod.settings.payment_gateway = "mock"
     try:
         client = TestClient(app)
-        acc, _tok = make_account(client, "billing@steprotech.com", "billing",
-                                 password="BillingPass123")
+        acc, tok = make_account(client, "billing@steprotech.com", "billing",
+                                password="BillingPass123")
         aid = acc["id"]
+        hdr = {"Authorization": "Bearer " + tok}
 
         # checkout gives a mock URL
-        r = client.post(f"/api/v1/accounts/{aid}/checkout")
+        r = client.post(f"/api/v1/accounts/{aid}/checkout", headers=hdr)
         assert r.status_code == 200, r.text
         co = r.json()
         assert co["gateway"] == "mock" and co["url"]
 
         # webhook: charge success
-        r = client.post("/api/v1/webhook/mock", json={
+        r = client.post("/api/v1/webhook/mock", headers=hdr, json={
             "mock": True, "type": "charge.success",
             "data": {"metadata": {"account_id": str(aid)}},
         })
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "active"
 
-        acc = client.get(f"/api/v1/accounts/{aid}").json()["account"]
+        acc = client.get(f"/api/v1/accounts/{aid}", headers=hdr).json()["account"]
         assert acc["subscription_status"] == "active"
         assert acc["paid_until"] and acc["paid_until"] > 0
     finally:
@@ -446,10 +447,11 @@ def test_payment_gate_blocks_provision():
     billing_mod.settings.payment_gateway = "paystack"
     try:
         client = TestClient(app)
-        acc, _tok = make_account(client, "gate@steprotech.com", "gate",
-                                 password="GatePass123")
+        acc, tok = make_account(client, "gate@steprotech.com", "gate",
+                                password="GatePass123")
         aid = acc["id"]
         r = client.post(f"/api/v1/accounts/{aid}/provision",
+                        headers={"Authorization": "Bearer " + tok},
                         json={"password": "GatePass123"})
         assert r.status_code == 402, r.text
         assert "Payment required" in r.json()["detail"]
@@ -471,21 +473,22 @@ def test_mock_payment_failed_then_sweep_locks():
     billing_mod.settings.lock_grace_days = 7
     try:
         client = TestClient(app)
-        acc, _tok = make_account(client, "late@steprotech.com", "late",
-                                 password="LatePass123")
+        acc, tok = make_account(client, "late@steprotech.com", "late",
+                                password="LatePass123")
         aid = acc["id"]
+        hdr = {"Authorization": "Bearer " + tok}
 
         # active first, then renewal fails
-        client.post("/api/v1/webhook/mock", json={
+        client.post("/api/v1/webhook/mock", headers=hdr, json={
             "mock": True, "type": "charge.success",
             "data": {"metadata": {"account_id": str(aid)}},
         })
-        r = client.post("/api/v1/webhook/mock", json={
+        r = client.post("/api/v1/webhook/mock", headers=hdr, json={
             "mock": True, "type": "invoice.payment_failed",
             "data": {"metadata": {"account_id": str(aid)}},
         })
         assert r.json()["status"] == "past_due"
-        acc = client.get(f"/api/v1/accounts/{aid}").json()["account"]
+        acc = client.get(f"/api/v1/accounts/{aid}", headers=hdr).json()["account"]
         assert acc["subscription_status"] == "past_due"
 
         # force deadline into the past, then sweep
@@ -496,7 +499,7 @@ def test_mock_payment_failed_then_sweep_locks():
         assert r.status_code in (401, 503)
         result = billing_mod.sweep_past_due()
         assert aid in result["locked"]
-        acc = client.get(f"/api/v1/accounts/{aid}").json()["account"]
+        acc = client.get(f"/api/v1/accounts/{aid}", headers=hdr).json()["account"]
         assert acc["subscription_status"] == "locked"
     finally:
         billing_mod.settings.payment_gateway = old_gw
@@ -631,9 +634,10 @@ def test_quota_gate_and_admin_raise():
     from app.services import access_gate
 
     client = TestClient(app)
-    acc, _tok = make_account(client, "quota@steprotech.com", "quota",
-                             password="QuotaPass123")
+    acc, tok = make_account(client, "quota@steprotech.com", "quota",
+                            password="QuotaPass123")
     aid = acc["id"]
+    hdr = {"Authorization": "Bearer " + tok}
     assert acc["quota"] == 1
 
     # fake a live instance row (no real provisioning in unit tests)
@@ -646,7 +650,7 @@ def test_quota_gate_and_admin_raise():
     db_mod.update_instance(iid, status="healthy", stack_id=1)
 
     # second provision attempt blocked by quota
-    r = client.post(f"/api/v1/accounts/{aid}/provision",
+    r = client.post(f"/api/v1/accounts/{aid}/provision", headers=hdr,
                     json={"password": "QuotaPass123"})
     assert r.status_code == 409, r.text
     assert "quota" in r.json()["detail"].lower()
@@ -675,11 +679,11 @@ def test_quota_gate_and_admin_raise():
     old_gw = billing_mod.settings.payment_gateway
     billing_mod.settings.payment_gateway = "mock"
     try:
-        client.post("/api/v1/webhook/mock", json={
+        client.post("/api/v1/webhook/mock", headers=hdr, json={
             "mock": True, "type": "charge.success",
             "data": {"metadata": {"account_id": str(aid)}},
         })
-        r = client.post(f"/api/v1/accounts/{aid}/provision",
+        r = client.post(f"/api/v1/accounts/{aid}/provision", headers=hdr,
                         json={"password": "QuotaPass123"})
         assert r.status_code in (200, 409), r.text
     finally:
@@ -696,9 +700,10 @@ def test_sweep_expired_locks_when_paid_until_passed(monkeypatch):
     from app.services.portainer_client import PortainerClient
 
     client = TestClient(app)
-    acc, _tok = make_account(client, "expiry@steprotech.com", "expiry",
-                             password="ExpiryPass123")
+    acc, tok = make_account(client, "expiry@steprotech.com", "expiry",
+                            password="ExpiryPass123")
     aid = acc["id"]
+    hdr = {"Authorization": "Bearer " + tok}
     iid = db_mod.create_instance(
         account_id=aid, stack_name="expiry", environment_id=8,
         environment_name="test", port=32911, domain="expiry.steprotech.com",
@@ -720,18 +725,19 @@ def test_sweep_expired_locks_when_paid_until_passed(monkeypatch):
 
     result = billing_mod.sweep_expired()
     assert aid in result["locked"], result
-    acc = client.get(f"/api/v1/accounts/{aid}").json()["account"]
+    acc = client.get(f"/api/v1/accounts/{aid}", headers=hdr).json()["account"]
     assert acc["subscription_status"] == "locked"
     assert calls == [("stop", 2, 8)], calls
 
     # renewal: charge.success -> unlock (start) + active + paid_until future
-    r = client.post("/api/v1/webhook/mock", json={
+    billing_mod.settings.payment_gateway = "mock"  # mock webhook only accepts when gateway=mock (SOC hardening)
+    r = client.post("/api/v1/webhook/mock", headers=hdr, json={
         "mock": True, "type": "charge.success",
         "data": {"metadata": {"account_id": str(aid)}},
     })
     assert r.json()["status"] == "active"
     assert calls[-1] == ("start", 2, 8), calls
-    acc = client.get(f"/api/v1/accounts/{aid}").json()["account"]
+    acc = client.get(f"/api/v1/accounts/{aid}", headers=hdr).json()["account"]
     assert acc["subscription_status"] == "active"
     assert acc["paid_until"] > int(t.time())
 
