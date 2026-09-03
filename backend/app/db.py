@@ -157,6 +157,11 @@ def init_db(db_path: str | None = None) -> None:
         acols3 = [r[1] for r in cur.execute("PRAGMA table_info(accounts)")]
         if "account_state" not in acols3:
             cur.execute('ALTER TABLE accounts ADD COLUMN account_state TEXT NOT NULL DEFAULT "active"')
+        # Migration: instances record the running n8n image (update feature tracks
+        # the current image tag so the admin can change it on one instance).
+        ic2 = [r[1] for r in cur.execute("PRAGMA table_info(instances)")]
+        if "image" not in ic2:
+            cur.execute('ALTER TABLE instances ADD COLUMN image TEXT DEFAULT "n8nio/n8n:latest"')
         # Migration: 2FA columns (authenticator TOTP + email OTP) + reset/otp tables
         acols4 = [r[1] for r in cur.execute("PRAGMA table_info(accounts)")]
         for c, ddl in (
@@ -181,6 +186,18 @@ def init_db(db_path: str | None = None) -> None:
             otp_hash TEXT NOT NULL,
             created_at INTEGER NOT NULL,
             expires_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS backups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL,
+            instance_id INTEGER NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'full',   -- full | workflows | credentials
+            filename TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'creating', -- creating | ready | failed
+            error TEXT DEFAULT '',
+            created_at INTEGER NOT NULL,
+            UNIQUE(account_id, instance_id, kind, created_at)
         );
         """)
         conn.commit()
@@ -693,5 +710,66 @@ def clear_email_otp(account_id: int) -> None:
     try:
         conn.execute("DELETE FROM email_otps WHERE account_id = ?", (account_id,))
         conn.commit()
+    finally:
+        conn.close()
+
+
+# ---- backups (2026-09-03) ----
+
+def create_backup(account_id: int, instance_id: int, kind: str, filename: str) -> int:
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "INSERT INTO backups (account_id, instance_id, kind, filename, status, created_at) "
+            "VALUES (?, ?, ?, ?, 'creating', ?)",
+            (account_id, instance_id, kind, filename, now()),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def finish_backup(backup_id: int, size_bytes: int) -> None:
+    conn = get_conn()
+    try:
+        conn.execute(
+            "UPDATE backups SET status = 'ready', size_bytes = ? WHERE id = ?",
+            (size_bytes, backup_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def fail_backup(backup_id: int, error: str) -> None:
+    conn = get_conn()
+    try:
+        conn.execute(
+            "UPDATE backups SET status = 'failed', error = ? WHERE id = ?",
+            (error[:500], backup_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_backup(backup_id: int) -> sqlite3.Row | None:
+    conn = get_conn()
+    try:
+        return conn.execute("SELECT * FROM backups WHERE id = ?", (backup_id,)).fetchone()
+    finally:
+        conn.close()
+
+
+def list_backups(account_id: int | None = None) -> list[sqlite3.Row]:
+    conn = get_conn()
+    try:
+        if account_id is not None:
+            return conn.execute(
+                "SELECT * FROM backups WHERE account_id = ? ORDER BY created_at DESC",
+                (account_id,),
+            ).fetchall()
+        return conn.execute("SELECT * FROM backups ORDER BY created_at DESC").fetchall()
     finally:
         conn.close()

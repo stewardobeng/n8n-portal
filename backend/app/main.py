@@ -16,12 +16,13 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Request
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr, Field
 
 from .config import settings
 from . import db
-from .services import provisioner, billing, access_gate, admin_ops
+from .services import provisioner, billing, access_gate, admin_ops, backup_ops
 from .services import account_security
 from .services.admin_ops import AdminOpsError
 from .services.portainer_client import PortainerClient
@@ -275,6 +276,68 @@ def _instance_to_out(i) -> InstanceStatusOut:
     )
 
 
+def _backup_to_out(b):
+    import datetime as _dt
+    return {
+        "id": b["id"],
+        "account_id": b["account_id"],
+        "instance_id": b["instance_id"],
+        "kind": b["kind"],
+        "filename": b["filename"],
+        "size_bytes": b["size_bytes"],
+        "status": b["status"],
+        "error": b["error"],
+        "created_at": b["created_at"],
+        "created_iso": _dt.datetime.utcfromtimestamp(b["created_at"]).isoformat() + "Z",
+    }
+
+
+def _get_owned_instance(account_id: int, instance_id: int):
+    """Fetch an instance row and ensure it belongs to the signed-in account."""
+    inst = db.get_instance(instance_id)
+    if not inst:
+        raise HTTPException(404, "Instance not found.")
+    if inst["account_id"] != account_id:
+        raise HTTPException(403, "Not your instance.")
+    return inst
+
+
+def _run_backup(backup_id: int, instance: dict, kind: str) -> None:
+    """Background task wrapper for a backup job (called via BackgroundTasks)."""
+    try:
+        if kind == "workflows":
+            backup_ops.run_workflows_backup(backup_id, instance, kind="workflows")
+        elif kind == "credentials":
+            backup_ops.run_workflows_backup(backup_id, instance, kind="credentials")
+        else:
+            backup_ops.run_full_backup(backup_id, instance)
+    except Exception as e:
+        log.error("backup %s crashed: %s", backup_id, e)
+        db.fail_backup(backup_id, str(e))
+
+
+def _serve_backup(b):
+    """Build a FileResponse for a ready backup (or 409/400 if not usable)."""
+    if b["status"] != "ready":
+        raise HTTPException(409, f"Backup is {b['status']}; try again once ready.")
+    import os
+    p = os.path.join(settings.backup_dir, b["filename"])
+    # lookup the actual file: <backup_dir>/<stack>/<ts>/<filename> — we stored
+    # only the basename; resolve via the instance's stack dir.
+    inst = db.get_instance(b["instance_id"])
+    if inst:
+        # scan the per-instance folders for the newest matching file
+        base = settings.backup_dir
+        import glob
+        matches = glob.glob(os.path.join(base, inst["stack_name"], "*", b["filename"]))
+        if matches:
+            p = max(matches, key=os.path.getmtime)
+    if not os.path.exists(p):
+        raise HTTPException(404, "Backup file no longer exists.")
+    media = ("application/gzip" if b["filename"].endswith(".gz") else "application/json")
+    return FileResponse(p, media_type=media, filename=b["filename"])
+
+
 def _run_provision(account_id: int, password: str | None = None) -> None:
     """Background task wrapper — provisioning runs async so the API returns fast."""
     try:
@@ -490,6 +553,44 @@ def my_email_enable(payload: OTPEnableIn, account_id: int = Depends(verify_clien
 def my_email_disable(account_id: int = Depends(verify_client)):
     db.set_account_email_2fa(account_id, False)
     return {"ok": True}
+
+
+# ---------- client backups (Steward 2026-09-03) ----------
+
+@app.get("/api/v1/me/backups", dependencies=[Depends(verify_client)])
+def my_backups(account_id: int = Depends(verify_client)):
+    """List the signed-in account's workspace backups (newest first)."""
+    rows = db.list_backups(account_id)
+    return {"backups": [_backup_to_out(r) for r in rows]}
+
+
+@app.post("/api/v1/me/instances/{instance_id}/backup",
+          dependencies=[Depends(verify_client)], status_code=201)
+def my_create_backup(instance_id: int, kind: str = "full",
+                     background: BackgroundTasks = None,
+                     account_id: int = Depends(verify_client)):
+    """Trigger a backup of one of the signed-in account's instances.
+    kind = 'full' (entire ~/.n8n dir incl. db) | 'workflows' | 'credentials'."""
+    inst = _get_owned_instance(account_id, instance_id)
+    if kind not in ("full", "workflows", "credentials"):
+        raise HTTPException(400, "kind must be 'full', 'workflows' or 'credentials'.")
+    filename = {"full": "n8n-data.tar.gz", "workflows": "workflows.json",
+                "credentials": "credentials.json"}[kind]
+    bid = db.create_backup(account_id, instance_id, kind, filename)
+    if background:
+        background.add_task(_run_backup, bid, dict(inst), kind)
+    return {"id": bid, "status": "creating"}
+
+
+@app.get("/api/v1/me/backups/{backup_id}/download", dependencies=[Depends(verify_client)])
+def my_download_backup(backup_id: int, account_id: int = Depends(verify_client)):
+    """Download a backup file for the signed-in account's own instance."""
+    b = db.get_backup(backup_id)
+    if not b:
+        raise HTTPException(404, "Backup not found.")
+    if b["account_id"] != account_id:
+        raise HTTPException(403, "Not your backup.")
+    return _serve_backup(b)
 
 
 # ---------- client endpoints ----------
@@ -1026,6 +1127,74 @@ def reset_password(instance_id: int):
         log.warning(f"Reset email failed for instance {instance_id}: {e}")
 
     return {"status": "password_reset", "new_password": new_pass}
+
+
+# ---------- admin backups + image update (Steward 2026-09-03) ----------
+
+@app.get("/api/v1/admin/backups", dependencies=[Depends(verify_admin)])
+def admin_backups(account_id: int | None = None):
+    """All backups (or one account's). Control host can see every tenant's."""
+    rows = db.list_backups(account_id)
+    return {"backups": [_backup_to_out(r) for r in rows]}
+
+
+@app.post("/api/v1/admin/instances/{instance_id}/backup",
+          dependencies=[Depends(verify_admin)], status_code=201)
+def admin_create_backup(instance_id: int, kind: str = "full",
+                        background: BackgroundTasks = None):
+    """Admin triggers a backup on any instance. kind = full | workflows | credentials."""
+    inst = db.get_instance(instance_id)
+    if not inst:
+        raise HTTPException(404, "Instance not found.")
+    if kind not in ("full", "workflows", "credentials"):
+        raise HTTPException(400, "kind must be 'full', 'workflows' or 'credentials'.")
+    filename = {"full": "n8n-data.tar.gz", "workflows": "workflows.json",
+                "credentials": "credentials.json"}[kind]
+    bid = db.create_backup(inst["account_id"], instance_id, kind, filename)
+    if background:
+        background.add_task(_run_backup, bid, dict(inst), kind)
+    return {"id": bid, "status": "creating"}
+
+
+@app.get("/api/v1/admin/backups/{backup_id}/download", dependencies=[Depends(verify_admin)])
+def admin_download_backup(backup_id: int):
+    """Admin downloads any backup file."""
+    b = db.get_backup(backup_id)
+    if not b:
+        raise HTTPException(404, "Backup not found.")
+    return _serve_backup(b)
+
+
+class UpdateImageIn(BaseModel):
+    image: str = Field(..., min_length=1, max_length=120)
+
+
+@app.post("/api/v1/admin/instances/{instance_id}/update-image",
+          dependencies=[Depends(verify_admin)])
+def admin_update_image(instance_id: int, payload: UpdateImageIn):
+    """Change the n8n image tag on an instance and redeploy its stack container.
+    The stack is recreated against the same volume (no data loss). Roll back by
+    setting the previous image tag."""
+    inst = db.get_instance(instance_id)
+    if not inst:
+        raise HTTPException(404, "Instance not found.")
+    try:
+        new_image = backup_ops.update_instance_image(inst, payload.image)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except Exception as e:
+        log.error("update image %s: %s", instance_id, e)
+        raise HTTPException(502, f"Image update failed: {e}")
+    return {"ok": True, "instance_id": instance_id, "image": new_image}
+
+
+@app.get("/api/v1/admin/instances/{instance_id}/image", dependencies=[Depends(verify_admin)])
+def admin_current_image(instance_id: int):
+    """Report the instance's current running n8n image tag (for the UI)."""
+    inst = db.get_instance(instance_id)
+    if not inst:
+        raise HTTPException(404, "Instance not found.")
+    return {"image": backup_ops.current_image(inst)}
 
 
 @app.get("/api/v1/health")

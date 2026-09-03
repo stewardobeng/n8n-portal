@@ -56,6 +56,7 @@ class Settings:
         "COMPOSE_TEMPLATE_PATH", "/app/templates/n8n-stack-compose.yml"
     )
     data_dir: str = "/data"
+    backup_dir: str = os.getenv("BACKUP_DIR", "/data/backups")
 
     # --- Payments (facade: paystack | stripe | mock) ---
     # paystack is PRIMARY (GHS, native annual plans with auto-renewal). stripe is
