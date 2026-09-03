@@ -1732,7 +1732,7 @@ var ICONS = {
         event.preventDefault();
         var ms = state.mfa;
         if (!ms) return;
-        api("/auth/mfa-send-otp", { method: "POST", body: { email: ms.email } }).then(function () {
+        api("/auth/mfa-send-otp", { method: "POST", body: { email: ms.email, challenge: ms.challenge } }).then(function () {
           showToast("Code sent", "A new code has been emailed to you.");
         }).catch(function (err) { showToast("Could not send", err.message); });
       }
@@ -2423,7 +2423,7 @@ var ICONS = {
         var code = String(new FormData(form).get("code") || "").trim();
         var btnm = form.querySelector("button[type=submit]");
         if (btnm) btnm.disabled = true;
-        api("/auth/mfa-verify", { method: "POST", body: { email: ms.email, code: code } }).then(function (r) {
+        api("/auth/mfa-verify", { method: "POST", body: { email: ms.email, code: code, challenge: ms.challenge } }).then(function (r) {
           localStorage.setItem("portal_token", r.token);
           state.session = { token: r.token, account: r.account, instances: [] };
           state.mfa = null;
