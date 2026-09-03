@@ -134,6 +134,7 @@ class AccountOut(BaseModel):
     paid_until: Optional[int] = None
     paid_from: Optional[int] = None
     account_state: str = "active"  # active | suspended | archived
+    backup_enabled: bool = False   # customer may self-service backup (admin-set)
     created_at: int
     provisioned_at: Optional[int] = None
 
@@ -328,6 +329,7 @@ def _account_to_out(a) -> AccountOut:
         paid_until=_row_get(a, "paid_until"),
         paid_from=_row_get(a, "paid_from"),
         account_state=_row_get(a, "account_state", "active"),
+        backup_enabled=bool(_row_get(a, "backup_enabled", 0)),
         created_at=a["created_at"], provisioned_at=a["provisioned_at"],
     )
 
@@ -367,6 +369,16 @@ def _get_owned_instance(account_id: int, instance_id: int):
     if inst["account_id"] != account_id:
         raise HTTPException(403, "Not your instance.")
     return inst
+
+
+def _require_backup(account_id: int) -> None:
+    """Backup is admin-gated (2026-09-03): a customer can only self-service
+    backups when the admin enabled it for their account; otherwise the backup UI
+    is hidden AND the API refuses (defense in depth)."""
+    acct = db.get_account(account_id)
+    if acct and bool(_row_get(acct, "backup_enabled", 0)):
+        return
+    raise HTTPException(403, "Backup is not enabled for this account. Contact support.")
 
 
 def _run_backup(backup_id: int, instance: dict, kind: str) -> None:
@@ -840,6 +852,7 @@ def client_passkey_login_verify(payload: PasskeyVerifyIn, request: Request):
 @app.get("/api/v1/me/backups", dependencies=[Depends(verify_client)])
 def my_backups(account_id: int = Depends(verify_client)):
     """List the signed-in account's workspace backups (newest first)."""
+    _require_backup(account_id)
     rows = db.list_backups(account_id)
     return {"backups": [_backup_to_out(r) for r in rows]}
 
@@ -851,6 +864,7 @@ def my_create_backup(instance_id: int, kind: str = "full",
                      account_id: int = Depends(verify_client)):
     """Trigger a backup of one of the signed-in account's instances.
     kind = 'full' (entire ~/.n8n dir incl. db) | 'workflows' | 'credentials'."""
+    _require_backup(account_id)
     inst = _get_owned_instance(account_id, instance_id)
     if kind not in ("full", "workflows", "credentials"):
         raise HTTPException(400, "kind must be 'full', 'workflows' or 'credentials'.")
@@ -865,6 +879,7 @@ def my_create_backup(instance_id: int, kind: str = "full",
 @app.get("/api/v1/me/backups/{backup_id}/download", dependencies=[Depends(verify_client)])
 def my_download_backup(backup_id: int, account_id: int = Depends(verify_client)):
     """Download a backup file for the signed-in account's own instance."""
+    _require_backup(account_id)
     b = db.get_backup(backup_id)
     if not b:
         raise HTTPException(404, "Backup not found.")
@@ -1451,6 +1466,20 @@ def admin_set_quota(account_id: int, payload: QuotaIn):
         raise HTTPException(404, "Account not found.")
     db.set_account_quota(account_id, payload.quota)
     return {"account_id": account_id, "quota": payload.quota}
+
+
+class BackupIn(BaseModel):
+    backup_enabled: bool
+
+
+@app.put("/api/v1/admin/accounts/{account_id}/backup", dependencies=[Depends(verify_admin)])
+def admin_set_backup(account_id: int, payload: BackupIn):
+    """Grant/revoke a customer's self-service backup permission. When False the
+    customer sees NO backup UI. The admin always retains backup access."""
+    if not db.get_account(account_id):
+        raise HTTPException(404, "Account not found.")
+    db.set_account_backup(account_id, payload.backup_enabled)
+    return {"account_id": account_id, "backup_enabled": payload.backup_enabled}
 
 
 @app.post("/api/v1/admin/billing/sweep-expired", dependencies=[Depends(verify_admin)])
