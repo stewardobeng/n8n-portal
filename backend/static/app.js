@@ -202,9 +202,18 @@ var ICONS = {
     return h.indexOf("/admin/") === 0 ? "admin" : "customer";
   }
 
+  function customerNavFor() {
+    // The Backup item is admin-gated (2026-09-03): only shown when the admin
+    // enabled self-service backup for THIS account. Default hidden.
+    var enabled = !!(state.session && state.session.account && state.session.account.backup_enabled);
+    return customerNav.filter(function (n) {
+      return !(n[0] === "backup" && !enabled);
+    });
+  }
+
   function appLayout(kind, title, active, content) {
     var isAdmin = kind === "admin";
-    var nav = isAdmin ? adminNav : customerNav;
+    var nav = isAdmin ? adminNav : customerNavFor();
     return '<div class="app-shell">' +
       '<aside class="sidebar' + (state.menuOpen ? " open" : "") + '">' + brand() +
         '<div class="side-label">' + (isAdmin ? "Admin portal" : "Customer portal") + "</div>" +
@@ -907,7 +916,7 @@ var ICONS = {
         (archivedCount ? '<a class="button secondary" href="#/admin/archived">' + icon("archive") + " Archived (" + archivedCount + ")</a>" : "") +
         '<a class="button secondary" href="#/admin/requests">' + icon("requests") + " New requests</a></div>") +
       '<section class="card flush"><div class="table-tools"><div class="search"><input id="account-search" type="search" placeholder="Search name, email, or username" aria-label="Search accounts"></div></div>' +
-      '<div class="table-wrap"><table><thead><tr><th>Customer</th><th>Plan</th><th>Subscription</th><th>Period end</th><th>Quota</th><th></th></tr></thead><tbody>' +
+      '<div class="table-wrap"><table><thead><tr><th>Customer</th><th>Plan</th><th>Subscription</th><th>Period end</th><th>Quota</th><th>Backup</th><th></th></tr></thead><tbody>' +
         (accounts.length ? accounts.map(function (a) {
           var badge = a.subscription_status === "active" ? statusBadge("active", "Active")
             : a.subscription_status === "past_due" ? statusBadge("pastdue", "Past due")
@@ -916,14 +925,16 @@ var ICONS = {
             : statusBadge("pending", "No subscription");
           var stateBadge = a.account_state === "suspended" ? statusBadge("suspended", "Suspended")
             : a.account_state === "archived" ? statusBadge("archived", "Archived") : "";
+          var bkBadge = a.backup_enabled ? statusBadge("active", "On") : statusBadge("off", "Off");
           return "<tr data-account-row=\"" + a.id + "\">" +
             '<td><div class="customer-cell"><span class="avatar">' + esc(initialsOf(a.display_name || a.username)) + '</span><span class="cell-text"><strong>' + esc(a.display_name || cap(a.username)) + "</strong><span>" + esc(a.email) + "</span></span></div></td>" +
             "<td>" + esc(planName(a)) + "</td>" +
             "<td>" + badge + (stateBadge ? " " + stateBadge : "") + "</td>" +
             "<td>" + esc(fmtDate(a.paid_until)) + "</td>" +
             "<td>" + (a.quota || 1) + "</td>" +
+            "<td>" + bkBadge + ' <button class="button secondary small-btn" data-action="admin-backup-toggle" data-id="' + a.id + '" data-on="' + (a.backup_enabled ? "1" : "0") + '">' + (a.backup_enabled ? "Revoke" : "Allow") + " backup</button></td>" +
             '<td><button class="button secondary small-btn" data-route="/admin/account/' + a.id + '">View account</button></td></tr>';
-        }).join("") : '<tr><td colspan="6"><div class="empty-state" style="min-height:240px"><div><h3>No customer accounts yet</h3><p class="muted">Accounts appear here after registration.</p></div></div></td></tr>') +
+        }).join("") : '<tr><td colspan="7"><div class="empty-state" style="min-height:240px"><div><h3>No customer accounts yet</h3><p class="muted">Accounts appear here after registration.</p></div></div></td></tr>') +
       "</tbody></table></div></section></main>");
   }
 
@@ -1024,6 +1035,7 @@ var ICONS = {
         (acctState === "active" ? '<button class="button secondary" data-action="admin-mark-paid" data-id="' + a.id + '">' + icon("check") + " Mark paid</button>" +
         '<button class="button secondary" data-action="admin-attach" data-id="' + a.id + '">' + icon("workspace") + " Attach workspace</button>" +
         '<button class="button secondary" data-action="quota" data-id="' + a.id + '">Change quota</button>' +
+        '<button class="button secondary" data-action="admin-backup-toggle" data-id="' + a.id + '" data-on="' + (a.backup_enabled ? "1" : "0") + '">' + icon("archive") + (a.backup_enabled ? " Revoke backup access" : " Allow backup") + "</button>" +
         (sub === "locked" ? '<button class="button" data-action="admin-unlock" data-id="' + a.id + '">' + icon("check") + " Switch workspace on</button>"
                           : '<button class="button secondary" data-action="admin-lock" data-id="' + a.id + '">' + icon("warning") + " Switch workspace off</button>") : "") +
         "</div>") +
@@ -1043,6 +1055,11 @@ var ICONS = {
           '<p class="small muted" style="margin-top:20px">' + (used < quota ? "The customer may provision another workspace." : "Quota fully used.") + "</p>" +
           '<button class="button secondary small-btn" data-action="quota" data-id="' + a.id + '">Change allowance</button></section>' +
       "</div>" +
+      '<section class="card" style="margin-top:18px"><div class="card-head"><h2>Backup access</h2>' + (a.backup_enabled ? statusBadge("active", "Enabled for customer") : statusBadge("off", "Disabled")) + "</div>" +
+        '<p class="small muted" style="margin:0">' + (a.backup_enabled
+          ? "This customer can create and download backups from their own portal. You can revoke this at any time."
+          : "This customer does not see a backup option. Only the admin can back up this workspace until you enable it.") + "</p>" +
+        '<button class="button secondary small-btn" data-action="admin-backup-toggle" data-id="' + a.id + '" data-on="' + (a.backup_enabled ? "1" : "0") + '" style="margin-top:14px">' + (a.backup_enabled ? " Revoke backup access" : " Allow customer to back up") + "</button></section>" +
       '<div class="grid cols-3" style="margin-top:18px"><section class="card span-2"><div class="card-head"><h2>Workspaces</h2>' +
         (used < quota ? '<button class="button secondary small-btn" data-action="admin-add-workspace" data-id="' + a.id + '">Add workspace</button>' : "") + "</div>" +
         '<div class="workspace-list">' +
@@ -1170,7 +1187,11 @@ var ICONS = {
     /* ---- customer app ---- */
     else if (route === "/customer/dashboard") html = requireCustomer(function () { return customerDashboard(); });
     else if (route === "/customer/workspaces") html = requireCustomer(function () { return customerWorkspaces(); });
-    else if (route === "/customer/backups") html = requireCustomer(function () { return customerBackups(); });
+    else if (route === "/customer/backups") html = requireCustomer(function () {
+      var enabled = !!(state.session && state.session.account && state.session.account.backup_enabled);
+      if (!enabled) { navigate("/customer/dashboard"); return ""; }
+      return customerBackups();
+    });
     else if (route === "/customer/billing") html = requireCustomer(function () { return customerBilling(); });
     else if (route === "/customer/support") html = requireCustomer(function () { return supportPage(); });
     else if (route === "/customer/account") html = requireCustomer(function () { return accountPage(); });
@@ -1986,6 +2007,23 @@ var ICONS = {
           refreshAdminData();
         }).catch(function (err) { showToast("Could not start backup", err.message); });
       }
+      else if (action === "admin-backup-toggle") {
+        event.preventDefault();
+        var bktId = act.dataset.id, bktOn = act.dataset.on === "1";
+        if (bktOn) {
+          showModal(modalHeader("Revoke backup access?") +
+            "<p>The customer will no longer see the backup option in their portal. The admin can still back this workspace up.</p>" +
+            '<div class="consequence"><strong>This action will:</strong><ul><li>Hide the backup option from this customer</li><li>Not delete any existing backups</li><li>Be reversible (you can allow backup again)</li></ul></div>' +
+            '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+            '<button class="button danger" data-confirm-admin-backup-toggle="' + bktId + '" data-on="0">Revoke access</button></div>');
+        } else {
+          showModal(modalHeader("Allow this customer to back up?") +
+            "<p>Showing the backup option lets this customer create and download backups from their own portal. The admin can always back up this workspace too.</p>" +
+            '<div class="consequence safe"><strong>This action will:</strong><ul><li>Show the backup option in the customer portal</li><li>Let the customer download their own backups</li><li>Be reversible (you can revoke at any time)</li></ul></div>' +
+            '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+            '<button class="button" data-confirm-admin-backup-toggle="' + bktId + '" data-on="1">Allow backup</button></div>');
+        }
+      }
       else if (action === "admin-update-image") {
         event.preventDefault();
         var uInst = findInstanceById(act.dataset.id);
@@ -2186,6 +2224,19 @@ var ICONS = {
             refreshAdminData();
           } catch (err) { showToast("Quota update failed", err.message); }
         })();
+      }
+      var cBackupToggle = event.target.closest("[data-confirm-admin-backup-toggle]");
+      if (cBackupToggle) {
+        var bktId = cBackupToggle.dataset.confirmAdminBackupToggle;
+        var bktEnabled = cBackupToggle.dataset.on === "1";
+        closeModal();
+        api("/admin/accounts/" + bktId + "/backup", { method: "PUT", body: { backup_enabled: bktEnabled } }).then(function () {
+          showToast(bktEnabled ? "Backup access granted" : "Backup access revoked", bktEnabled
+            ? "The customer can now create and download backups from their portal."
+            : "The customer no longer sees a backup option.");
+          refreshAdminData();
+          render();
+        }).catch(function (err) { showToast("Update failed", err.message); });
       }
       var cMarkPaid = event.target.closest("[data-confirm-mark-paid]");
       if (cMarkPaid) {
