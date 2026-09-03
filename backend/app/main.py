@@ -249,6 +249,10 @@ class Login2FAIn(BaseModel):
 class MFAVerifyIn(BaseModel):
     email: EmailStr
     code: str = Field(..., min_length=6, max_length=10)
+    # MFA challenge minted by /auth/login after the password was accepted. Binds
+    # the code to the password-authenticated step so a code alone can never mint a
+    # session token (mirrors the passkey-MFA / admin flows). Audit vuln-0015.
+    challenge: str = Field(..., min_length=10, max_length=512)
 
 
 class TOTPSetupIn(BaseModel):
@@ -480,17 +484,32 @@ def client_login(payload: LoginIn, request: Request):
 def client_mfa_verify(payload: MFAVerifyIn, request: Request):
     """Second factor for a 2FA account: TOTP code from the authenticator app OR
     the emailed one-time code. Returns the real portal session token.
-    SECURITY (2026-09-03): per-IP limited + failures recorded/auto-banned (a
-    6-digit code is brute-forceable without a cap)."""
+
+    AUDIT FIX (2026-09-03, vuln-0015): the MFA challenge issued by /auth/login
+    after a correct password was NOT verified here, so a single valid code could
+    mint a session token without the password. Now require + verify the challenge
+    (proves the password step), bind it to this account, and only accept a code
+    kind (totp/email) the challenge allows — mirroring the passkey-MFA / admin
+    flows. A code alone can never mint a token."""
     ip = sc.client_ip(request)
     if sc.is_banned(ip):
         raise HTTPException(403, "Access temporarily blocked. Contact support.")
     if sc.check_rate(ip, "mfa"):
         raise HTTPException(429, "Too many attempts. Try again in a minute.")
+    # Bind to the password step: the challenge (sub acc:<id>, claim mfa) must be
+    # valid and match this account.
+    try:
+        challenge_account_id, challenge_methods = verify_mfa_token(payload.challenge)
+    except HTTPException:
+        sc.record_failed(ip, "mfa_fail", None, "invalid/expired challenge")
+        raise HTTPException(401, "Invalid or expired sign-in challenge. Sign in again.")
     email = str(payload.email).lower()
     account = db.get_account_by_email(email)
     if not account:
         raise HTTPException(401, "Invalid email or password.")
+    if challenge_account_id != account["id"]:
+        sc.record_failed(ip, "mfa_fail", account["id"], "challenge/account mismatch")
+        raise HTTPException(401, "Invalid or expired sign-in challenge. Sign in again.")
     if _row_get(account, "account_state", "active") != "active":
         raise HTTPException(403, "This account is " +
                             _row_get(account, "account_state", "active") +
@@ -499,10 +518,15 @@ def client_mfa_verify(payload: MFAVerifyIn, request: Request):
     methods = account_security.enabled_methods(account["id"])
     if not methods:
         raise HTTPException(409, "This account does not require a second factor.")
+    # Only a code kind the challenge allowed (totp/email) may be used.
+    allowed = [m for m in methods if m["method"] in challenge_methods]
+    if not any(m["method"] in ("totp", "email") for m in allowed):
+        sc.record_failed(ip, "mfa_fail", account["id"], "method not in challenge")
+        raise HTTPException(409, "This account does not allow a code as the second factor.")
     ok = False
-    if any(m["method"] == "totp" for m in methods):
+    if any(m["method"] == "totp" for m in allowed):
         ok = account_security.totp_verify_code(account["id"], code)
-    if not ok and any(m["method"] == "email" for m in methods):
+    if not ok and any(m["method"] == "email" for m in allowed):
         ok = account_security.email_otp_verify(account["id"], code)
     if not ok:
         sc.record_failed(ip, "mfa_fail", account["id"])
@@ -514,16 +538,32 @@ def client_mfa_verify(payload: MFAVerifyIn, request: Request):
     )
 
 
+class MFASendOTPIn(BaseModel):
+    email: EmailStr
+    # MFA challenge proves the password step (vuln-0015): prevent mailbox spam /
+    # guessing by someone who has not completed the password step.
+    challenge: str = Field(..., min_length=10, max_length=512)
+
+
 @app.post("/api/v1/auth/mfa-send-otp", response_model=dict)
-def client_mfa_send_otp(payload: AccessCheckIn, request: Request):
-    """Resend the emailed one-time code for a 2FA account (after login).
-    SECURITY (2026-09-03): per-IP limited to avoid email-bombing a mailbox."""
+def client_mfa_send_otp(payload: MFASendOTPIn, request: Request):
+    """Resend the emailed one-time code for a 2FA account (after the password
+    step). SECURITY (2026-09-03): per-IP limited to avoid email-bombing a mailbox.
+    AUDIT FIX (2026-09-03, vuln-0015): require the MFA challenge so an emailed
+    code can only be requested once the password step is proven."""
     ip = sc.client_ip(request)
     if sc.check_rate(ip, "forgot"):
         raise HTTPException(429, "Too many requests. Try again in a few minutes.")
+    # The password step must have been completed (challenge valid + matches).
+    try:
+        challenge_account_id, _ = verify_mfa_token(payload.challenge)
+    except HTTPException:
+        raise HTTPException(401, "Invalid or expired sign-in challenge. Sign in again.")
     account = db.get_account_by_email(str(payload.email).lower())
     if not account:
         raise HTTPException(401, "Invalid email or password.")
+    if challenge_account_id != account["id"]:
+        raise HTTPException(401, "Invalid or expired sign-in challenge. Sign in again.")
     if _row_get(account, "account_state", "active") != "active":
         raise HTTPException(403, "This account is " +
                             _row_get(account, "account_state", "active") +
@@ -1005,25 +1045,47 @@ async def mock_webhook(request: Request,
     unlock its workspace (a free-provisioning / undo-lock bypass). Now the
     caller must authenticate: either the admin, or the client whose account_id
     matches the one being marked paid. The frontend's mock checkout sends the
-    client token (api() attaches it), so the legit flow still works."""
+    client token (api() attaches it), so the legit flow still works.
+
+    SECOND SECURITY FIX (2026-09-03, audit vuln-0014): the gate was applied
+    AFTER billing.handle_webhook() already mutated subscription/instance state,
+    so a caller that failed authz still got the side effect (check-after-act
+    TOCTOU); and events addressed only by customer.email/email skipped the gate
+    entirely (returning 200 unauthenticated). The owner-or-admin gate now runs
+    BEFORE any state change and is unconditional: the target account is resolved
+    exactly as the mock handler resolves it (metadata.account_id, else
+    customer.email / email), a known account is required, and the caller must be
+    the owner or admin. Anonymous posts cannot change any state."""
     if settings.payment_gateway != "mock":
         raise HTTPException(404, "Mock gateway is not active.")
     payload = await request.body()
+    # Owner-or-admin gate FIRST: billing.handle_webhook mutates subscription and
+    # instance state, so the caller must be authenticated before any side effect.
+    import json as _json
+    try:
+        ev = _json.loads(payload or b"{}")
+    except Exception:
+        raise HTTPException(400, "Invalid mock webhook JSON.")
+    data = ev.get("data") or {}
+    meta = data.get("metadata") or {}
+    target = None
+    if meta.get("account_id"):
+        try:
+            target = int(meta["account_id"])
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Invalid account_id in mock webhook.")
+    else:
+        email = (data.get("customer") or {}).get("email") or data.get("email")
+        if email:
+            acc = db.get_account_by_email(str(email))
+            target = acc["id"] if acc else None
+    if target is None:
+        raise HTTPException(400, "Mock webhook must reference a known account.")
+    authorize_owner_or_admin(authorization, target)
     try:
         event = billing.handle_webhook("mock", payload, None)
     except Exception as e:
         raise HTTPException(400, str(e))
-    # Owner-or-admin gate: the paid account must belong to the authenticated
-    # caller (or be an admin action). Decode from the raw JSON body.
-    import json as _json
-    try:
-        ev = _json.loads(payload or b"{}")
-        meta = (ev.get("data") or {}).get("metadata") or {}
-        target = meta.get("account_id")
-        if target:
-            authorize_owner_or_admin(authorization, int(target))
-    except Exception:
-        raise HTTPException(401, "Unauthenticated mock webhook.")
     return event
 
 

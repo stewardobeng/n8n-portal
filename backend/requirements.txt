@@ -3,8 +3,8 @@ uvicorn[standard]==0.34.0
 httpx==0.28.1
 pydantic==2.10.4
 pydantic[email]==2.10.4
-PyJWT==2.10.1
-python-multipart==0.0.20
+PyJWT==2.13.0
+python-multipart==0.0.31
 stripe==11.4.1
 pyotp==2.9.0
 qrcode==8.0

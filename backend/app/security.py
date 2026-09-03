@@ -73,15 +73,19 @@ def verify_mfa_token(token: str) -> tuple[int, list[str]]:
 
 def verify_client(authorization: str | None = Header(default=None, alias="Authorization")):
     """FastAPI dependency for client (portal user) routes: requires a valid
-    Bearer JWT whose sub is acc:<id>."""
+    Bearer JWT whose sub is acc:<id> AND whose account is in the 'active'
+    lifecycle state. Suspended/archived accounts are cut off everywhere, not only
+    at /me and /auth/login (audit vuln-0016)."""
     _require_jwt_secret()
     sub = _decode_subject(authorization)
     if not sub.startswith("acc:"):
         raise HTTPException(401, "Not a client token.")
     try:
-        return int(sub.split(":", 1)[1])
+        account_id = int(sub.split(":", 1)[1])
     except ValueError:
         raise HTTPException(401, "Invalid client token subject.")
+    _require_account_active(account_id)
+    return account_id
 
 
 def verify_admin(authorization: str | None = Header(default=None, alias="Authorization")):
@@ -122,7 +126,9 @@ def _decode_subject(authorization: str | None) -> str:
 def authorize_owner_or_admin(authorization: str | None, account_id: int) -> None:
     """Allow access only if the caller is (a) the admin, or (b) the client whose
     account_id matches the resource being accessed. Used to close unauthenticated
-    IDOR on /accounts/{id}, /checkout, /provision, /me/backups, etc. (2026-09-03)."""
+    IDOR on /accounts/{id}, /checkout, /provision, /me/backups, etc. (2026-09-03).
+    A client caller whose account is suspended/archived is denied just like the
+    login and /me checks; the admin path is unaffected (audit vuln-0016)."""
     _require_jwt_secret()
     sub = _decode_subject(authorization)
     if sub == "admin":
@@ -130,7 +136,26 @@ def authorize_owner_or_admin(authorization: str | None, account_id: int) -> None
     if sub.startswith("acc:"):
         try:
             if int(sub.split(":", 1)[1]) == account_id:
+                _require_account_active(account_id)
                 return
         except ValueError:
             pass
     raise HTTPException(403, "Not authorized for this account.")
+
+
+def _require_account_active(account_id: int) -> None:
+    """Reject a client whose account is suspended/archived (lifecycle state).
+    Imported lazily to avoid an import cycle (db imports this module at load)."""
+    from . import db  # deferred import
+
+    try:
+        account = db.get_account(account_id)
+    except Exception:
+        raise HTTPException(503, "Account state could not be checked.")
+    if account is None:
+        # No row for this id (never existed / purged): the route's own lookup
+        # returns 404 — nothing sensitive is reachable.
+        return
+    state = account["account_state"] if "account_state" in account.keys() else "active"
+    if state != "active":
+        raise HTTPException(403, "This account is " + state + ". Contact support for help.")
