@@ -627,6 +627,15 @@ def update_access_request(request_id: int, **fields) -> None:
         conn.close()
 
 
+def delete_access_request(request_id: int) -> None:
+    conn = get_conn()
+    try:
+        conn.execute("DELETE FROM access_requests WHERE id = ?", (request_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 # ---- account security: password reset + 2FA (2026-09-02) ----
 
 def set_account_password(account_id: int, password_hash: str) -> None:

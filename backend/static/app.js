@@ -136,7 +136,7 @@ var ICONS = {
     var map = { active: "success", running: "success", approved: "success", awaiting: "warning",
       pastdue: "warning", provisioning: "info", registered: "info", failed: "danger",
       expired: "danger", off: "neutral", cancelled: "neutral", locked: "danger",
-      suspended: "warning", archived: "neutral",
+      suspended: "warning", archived: "neutral", denied: "danger",
       healthy: "success", pending: "info", requested: "warning", token_sent: "info", past_due: "warning" };
     return '<span class="status ' + (map[type] || "neutral") + '">' + esc(label || type) + "</span>";
   }
@@ -250,6 +250,16 @@ var ICONS = {
       '<div class="banner" style="margin:26px 0;text-align:left">' + icon("clock") +
         "<div><strong>Watch your inbox</strong><br><span class=\"small\">Approval is handled by a person. You do not need to submit another request.</span></div></div>" +
       '<div class="actions" style="justify-content:center"><button class="button secondary" data-route="/entry">Use a different email</button></div></div>'
+    );
+  }
+
+  function deniedPage() {
+    var email = state.gateEmail || "";
+    return authLayout(
+      '<div class="center-state"><div class="state-orb danger">' + icon("error") + "</div>" +
+      '<div class="eyebrow">Request declined</div><h1>This request was disapproved</h1>' +
+      '<p class="muted">A SteProTECH administrator declined the access request for <strong>' + esc(email) + "</strong>. If you believe this is a mistake, contact support from a different address or ask an administrator to approve you.</p>" +
+      '<div class="actions" style="justify-content:center;margin-top:24px"><button class="button secondary" data-route="/entry">Use a different email</button></div></div>'
     );
   }
 
@@ -780,6 +790,7 @@ var ICONS = {
   function requestStatusLabel(st) {
     if (st === "requested") return statusBadge("awaiting", "Awaiting approval");
     if (st === "token_sent") return statusBadge("approved", "Code sent");
+    if (st === "denied") return statusBadge("denied", "Disapproved");
     return statusBadge("registered", "Already registered");
   }
 
@@ -789,22 +800,31 @@ var ICONS = {
       all: requests.length,
       awaiting: requests.filter(function (r) { return r.status === "requested"; }).length,
       approved: requests.filter(function (r) { return r.status === "token_sent"; }).length,
+      denied: requests.filter(function (r) { return r.status === "denied"; }).length,
       registered: requests.filter(function (r) { return r.status === "registered"; }).length
     };
     var filter = state.accessFilter || "all";
-    var rows = requests.filter(function (r) { return filter === "all" || (filter === "awaiting" ? r.status === "requested" : filter === "approved" ? r.status === "token_sent" : r.status === "registered"); });
+    var rows = requests.filter(function (r) {
+      if (filter === "all") return true;
+      if (filter === "awaiting") return r.status === "requested";
+      if (filter === "approved") return r.status === "token_sent";
+      if (filter === "denied") return r.status === "denied";
+      return r.status === "registered";
+    });
     return appLayout("admin", "Access requests", "requests",
-      '<main class="page">' + pageHead("Access requests", "Approve new customers and issue a one-time registration code.") +
+      '<main class="page">' + pageHead("Access requests", "Approve new customers, decline unwanted requests, or remove test/spam entries.") +
       '<section class="card flush"><div class="tabs">' +
-        [["all", "All"], ["awaiting", "Awaiting approval"], ["approved", "Code sent"], ["registered", "Already registered"]].map(function (t) {
+        [["all", "All"], ["awaiting", "Awaiting approval"], ["approved", "Code sent"], ["denied", "Disapproved"], ["registered", "Already registered"]].map(function (t) {
           return '<button class="tab' + (filter === t[0] ? " active" : "") + '" data-filter="' + t[0] + '">' + t[1] + " (" + counts[t[0]] + ")</button>";
         }).join("") +
       "</div>" +
       '<div class="table-wrap"><table><thead><tr><th>Email</th><th>Requested</th><th>Status</th><th>Action</th></tr></thead><tbody>' +
         (rows.length ? rows.map(function (r) {
-          var action = r.status === "requested"
-            ? '<button class="button small-btn" data-approve="' + r.id + '">Approve</button>'
-            : '<button class="button ghost small-btn" data-request-state="' + r.id + '">View</button>';
+          var canApprove = r.status === "requested";
+          var canCourse = r.status === "requested" || r.status === "token_sent";
+          var action = (canApprove ? '<button class="button small-btn" data-approve="' + r.id + '">Approve</button>' : "") +
+            (canCourse ? '<button class="button ghost small-btn" data-request-deny="' + r.id + '">Disapprove</button>' : "") +
+            '<button class="button ghost small-btn" data-request-delete="' + r.id + '">Delete</button>';
           return "<tr><td><strong>" + esc(r.email) + "</strong></td><td>" + esc(fmtDateTime(r.created_at)) + "</td><td>" + requestStatusLabel(r.status) + "</td><td>" + action + "</td></tr>";
         }).join("") : '<tr><td colspan="4"><div class="empty-state" style="min-height:220px"><div><h3>No matching requests</h3><p class="muted">New requests will appear here after someone enters their email on the portal.</p></div></div></td></tr>') +
       "</tbody></table></div></section></main>");
@@ -1141,6 +1161,7 @@ var ICONS = {
     /* ---- public / auth pages ---- */
     if (route === "/entry") html = entryPage();
     else if (route === "/request") html = requestPage();
+    else if (route === "/denied") html = deniedPage();
     else if (route === "/code") html = codePage();
     else if (route === "/register") html = registerPage();
     else if (route === "/signin") html = signinPage();
@@ -1352,6 +1373,26 @@ var ICONS = {
       '<div class="consequence" style="background:var(--amber-100)"><strong>What happens next</strong><ul><li>The code is emailed automatically</li><li>It expires after 72 hours</li><li>The same code is shown here once for copying</li></ul></div>' +
       '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
       '<button class="button" data-confirm-approve="' + id + '">Approve and send code</button></div>');
+  }
+
+  function denyModal(id) {
+    var r = (state.requests || []).find(function (x) { return x.id === Number(id); });
+    if (!r) return;
+    showModal(modalHeader("Disapprove " + esc(r.email) + "?") +
+      "<p>This declines the request and clears any access code that was already sent. The person will not be able to register with this email.</p>" +
+      '<div class="consequence" style="background:var(--red-100)"><strong>What happens next</strong><ul><li>The request is marked <strong>Disapproved</strong></li><li>Any previously issued code is invalidated</li><li>The email is blocked from requesting again</li><li>Delete the request later to let them try again</li></ul></div>' +
+      '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+      '<button class="button danger" data-confirm-request-deny="' + id + '">' + icon("close") + " Disapprove</button></div>");
+  }
+
+  function deleteRequestModal(id) {
+    var r = (state.requests || []).find(function (x) { return x.id === Number(id); });
+    if (!r) return;
+    showModal(modalHeader("Delete this request?") +
+      "<p>This permanently removes the request for <strong>" + esc(r.email) + "</strong> from this list.</p>" +
+      '<div class="consequence" style="background:var(--red-100)"><strong>This cannot be undone</strong><ul><li>The request row is deleted</li><li>The email is no longer tracked here</li><li>If they enter this email on the portal again, a new request is created</li></ul></div>' +
+      '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+      '<button class="button danger" data-confirm-request-delete="' + id + '">' + icon("error") + " Delete</button></div>");
   }
 
   function approvalSuccess(data) {
@@ -2045,6 +2086,39 @@ var ICONS = {
         })();
       }
 
+      /* request disapprove + delete */
+      var denyBtn = event.target.closest("[data-request-deny]");
+      if (denyBtn) denyModal(denyBtn.dataset.requestDeny);
+      var delBtn = event.target.closest("[data-request-delete]");
+      if (delBtn) deleteRequestModal(delBtn.dataset.requestDelete);
+
+      var confirmDeny = event.target.closest("[data-confirm-request-deny]");
+      if (confirmDeny) {
+        var rid2 = confirmDeny.dataset.confirmRequestDeny;
+        (async function () {
+          try {
+            closeModal();
+            showToast("Disapproving\u2026", "Marking the request as disapproved.");
+            await api("/admin/access-requests/" + rid2 + "/deny", { method: "POST" });
+            showToast("Request disapproved", "The email cannot register.");
+            refreshAdminData().then(function () { render(); });
+          } catch (err) { showToast("Could not disapprove", err.message); }
+        })();
+      }
+      var confirmDel = event.target.closest("[data-confirm-request-delete]");
+      if (confirmDel) {
+        var rid3 = confirmDel.dataset.confirmRequestDelete;
+        (async function () {
+          try {
+            closeModal();
+            showToast("Deleting request\u2026");
+            await api("/admin/access-requests/" + rid3, { method: "DELETE" });
+            showToast("Request deleted");
+            refreshAdminData().then(function () { render(); });
+          } catch (err) { showToast("Could not delete", err.message); }
+        })();
+      }
+
       var cState = event.target.closest("[data-confirm-account-state]");
       if (cState) {
         var stId = cState.dataset.id;
@@ -2266,6 +2340,7 @@ var ICONS = {
           state.gateEmail = r.email;
           if (r.action === "login") navigate("/signin");
           else if (r.action === "token") navigate("/code");
+          else if (r.action === "denied") navigate("/denied");
           else navigate("/request"); // requested | waiting -> same screen copy
         }).catch(function (err) { showToast("Could not continue", err.message); });
       }

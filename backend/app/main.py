@@ -212,7 +212,7 @@ class AccessCheckIn(BaseModel):
 
 
 class AccessCheckOut(BaseModel):
-    action: str  # login | requested | waiting | token
+    action: str  # login | requested | waiting | token | denied
     email: str
 
 
@@ -1320,6 +1320,29 @@ def admin_issue_token(request_id: int):
             log.warning(f"Access-token email failed for {email}: {e}")
     return {"request_id": request_id, "email": email,
             "token": token, "expires_hours": access_gate.TOKEN_VALID_HOURS}
+
+
+@app.post("/api/v1/admin/access-requests/{request_id}/deny", dependencies=[Depends(verify_admin)])
+def admin_deny_request(request_id: int):
+    """Admin action: decline a request. Sets a terminal 'denied' state so the
+    person cannot register, and clears any issued code. Delete the request to
+    let them try again later. Steward 2026-09-03."""
+    try:
+        access_gate.deny_request(request_id)
+    except access_gate.AccessGateError as e:
+        raise HTTPException(409, str(e))
+    return {"request_id": request_id, "status": "denied"}
+
+
+@app.delete("/api/v1/admin/access-requests/{request_id}", dependencies=[Depends(verify_admin)])
+def admin_delete_request(request_id: int):
+    """Admin action: permanently remove a request row so it is no longer listed.
+    If that email enters the portal again, a fresh request is created."""
+    req = db.get_access_request_by_id(request_id)
+    if not req:
+        raise HTTPException(404, "Access request not found.")
+    db.delete_access_request(request_id)
+    return {"request_id": request_id, "deleted": True}
 
 
 @app.post("/api/v1/admin/billing/sweep", dependencies=[Depends(verify_admin)])
