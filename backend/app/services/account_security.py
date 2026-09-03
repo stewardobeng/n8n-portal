@@ -18,6 +18,7 @@ import qrcode
 from .. import db
 from ..security import hash_password, verify_password
 from .emailer import send_email, EmailError
+from . import passkeys
 
 RESET_TOKEN_TTL = 3600 * 1          # reset link valid 1 hour
 OTP_TTL = 300                        # email OTP valid 5 minutes
@@ -199,6 +200,10 @@ def has_2fa(account_id: int) -> bool:
 
 
 def enabled_methods(account_id: int) -> list[dict]:
+    """Second-factor methods available for an account after its password is
+    accepted. Now (2026-09-03, Steward) a registered passkey is a second factor
+    on the same footing as authenticator/email — it no longer replaces the
+    password, it is offered *after* it at the MFA step."""
     a = db.get_account(account_id)
     out = []
     if a:
@@ -206,6 +211,9 @@ def enabled_methods(account_id: int) -> list[dict]:
             out.append({"method": "totp", "label": "Authenticator app", "enabled": True})
         if db._row_get(a, "email_2fa", 0):
             out.append({"method": "email", "label": "Email code", "enabled": True})
+    # passkey as a second factor (registered credential)
+    if passkeys.list_passkeys_for("account", account_id):
+        out.append({"method": "passkey", "label": "Passkey", "enabled": True})
     return out
 
 
@@ -225,6 +233,9 @@ def _admin_methods() -> list[dict]:
         out.append({"method": "totp", "label": "Authenticator app", "enabled": True})
     if "email" in val:
         out.append({"method": "email", "label": "Email code", "enabled": True})
+    # passkey as a second factor for the admin (registered credential)
+    if passkeys.list_passkeys_for("admin"):
+        out.append({"method": "passkey", "label": "Passkey", "enabled": True})
     return out
 
 

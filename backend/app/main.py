@@ -271,6 +271,17 @@ class AdminMFAVerifyIn(BaseModel):
     code: str = Field(..., min_length=6, max_length=10)
 
 
+class MFAPasskeyStartIn(BaseModel):
+    # The MFA challenge (proves the password was accepted) — passkey is the second
+    # factor offered at the post-password step (Steward 2026-09-03).
+    challenge: str = Field(..., min_length=10, max_length=512)
+
+
+class MFAPasskeyVerifyIn(BaseModel):
+    challenge: str = Field(..., min_length=10, max_length=512)
+    credential: dict = Field(...)
+
+
 class AccessRequestOut(BaseModel):
     id: int
     email: str
@@ -520,6 +531,53 @@ def client_mfa_send_otp(payload: AccessCheckIn, request: Request):
     if not _row_get(account, "email_2fa", 0):
         raise HTTPException(409, "Email 2FA is not enabled for this account.")
     return account_security.email_otp_send(account["id"])
+
+
+@app.post("/api/v1/auth/passkey/mfa/start", response_model=dict)
+def client_passkey_mfa_start(payload: MFAPasskeyStartIn, request: Request):
+    """Passkey as a SECOND factor, after the password was accepted. The MFA
+    challenge (a short-lived JWT proving the password) is required so a passkey
+    alone can never mint a token — the password must come first.
+    (Steward 2026-09-03: passkey is a 2FA option alongside authenticator/email.)"""
+    ip = sc.client_ip(request)
+    if sc.is_banned(ip) or sc.check_rate(ip, "login"):
+        raise HTTPException(429, "Too many attempts. Try again in a minute.")
+    account_id, methods = verify_mfa_token(payload.challenge)
+    if "passkey" not in methods:
+        raise HTTPException(403, "This account does not allow a passkey as the second factor.")
+    account = db.get_account(account_id)
+    if not account:
+        raise HTTPException(401, "Account not found.")
+    try:
+        return passkeys.authentication_options("account", account_id)
+    except passkeys.PasskeyError:
+        raise HTTPException(401, "No passkey registered for this account.")
+
+
+@app.post("/api/v1/auth/passkey/mfa/verify", response_model=LoginOut)
+def client_passkey_mfa_verify(payload: MFAPasskeyVerifyIn, request: Request):
+    """Finishes the second factor with a passkey. Requires the MFA challenge
+    (password already proven) + a valid WebAuthn assertion, then issues the token."""
+    ip = sc.client_ip(request)
+    if sc.is_banned(ip):
+        raise HTTPException(403, "Access temporarily blocked. Contact support.")
+    if sc.check_rate(ip, "mfa"):
+        raise HTTPException(429, "Too many attempts. Try again in a minute.")
+    account_id, methods = verify_mfa_token(payload.challenge)
+    if "passkey" not in methods:
+        raise HTTPException(403, "This account does not allow a passkey as the second factor.")
+    account = db.get_account(account_id)
+    if not account:
+        raise HTTPException(401, "Account not found.")
+    if _row_get(account, "account_state", "active") != "active":
+        raise HTTPException(403, "This account is not active. Contact support.")
+    try:
+        passkeys.verify_authentication("account", account_id, payload.credential)
+    except passkeys.PasskeyError as e:
+        sc.record_failed(ip, "mfa_fail", account_id)
+        raise HTTPException(401, str(e))
+    sc.record_ok(ip, "login_ok", account_id)
+    return LoginOut(token=create_client_token(account_id), account=_account_to_out(account))
 
 
 @app.post("/api/v1/auth/forgot-password", response_model=dict)
@@ -1038,6 +1096,19 @@ def admin_mfa_verify(payload: AdminMFAVerifyIn, request: Request):
     )
 
 
+@app.post("/api/v1/admin/mfa-send-otp", response_model=dict)
+def admin_mfa_send_otp(request: Request):
+    """Resend the emailed one-time code for the admin second-factor step.
+    (Steward 2026-09-03: admin now has a real post-password MFA flow.)"""
+    ip = sc.client_ip(request)
+    if sc.check_rate(ip, "forgot"):
+        raise HTTPException(429, "Too many requests. Try again in a few minutes.")
+    enabled = account_security.admin_2fa_state()["methods"]
+    if not any(m["method"] == "email" for m in enabled):
+        raise HTTPException(409, "Email 2FA is not enabled for the admin.")
+    return account_security.admin_email_send_otp()
+
+
 @app.get("/api/v1/admin/security", dependencies=[Depends(verify_admin)])
 def admin_security_state():
     state = account_security.admin_2fa_state()
@@ -1106,6 +1177,46 @@ def admin_passkey_register_verify(payload: PasskeyVerifyIn):
 @app.get("/api/v1/admin/security/passkeys", dependencies=[Depends(verify_admin)])
 def admin_passkey_list():
     return {"passkeys": passkeys.list_passkeys_for("admin")}
+
+
+@app.post("/api/v1/admin/passkey/mfa/start", response_model=dict)
+def admin_passkey_mfa_start(payload: MFAPasskeyStartIn, request: Request):
+    """Admin passkey as a SECOND factor, after the password was accepted. The
+    MFA challenge (account_id 0) is required so a passkey alone cannot mint the
+    admin token. (Steward 2026-09-03: passkey is a 2FA option for the admin.)"""
+    ip = sc.client_ip(request)
+    if sc.is_banned(ip) or sc.check_rate(ip, "login"):
+        raise HTTPException(429, "Too many attempts. Try again in a minute.")
+    account_id, methods = verify_mfa_token(payload.challenge)
+    if account_id != 0 or "passkey" not in methods:
+        raise HTTPException(403, "This admin does not allow a passkey as the second factor.")
+    try:
+        return passkeys.authentication_options("admin", None)
+    except passkeys.PasskeyError:
+        raise HTTPException(401, "No admin passkey registered.")
+
+
+@app.post("/api/v1/admin/passkey/mfa/verify", response_model=AdminLoginOut)
+def admin_passkey_mfa_verify(payload: MFAPasskeyVerifyIn, request: Request):
+    """Finishes the admin second factor with a passkey. Requires the MFA
+    challenge (password already proven) + a valid assertion, then issues the
+    admin JWT."""
+    ip = sc.client_ip(request)
+    if sc.is_banned(ip):
+        raise HTTPException(403, "Access temporarily blocked. Contact support.")
+    if sc.check_rate(ip, "mfa"):
+        raise HTTPException(429, "Too many attempts. Try again in a minute.")
+    account_id, methods = verify_mfa_token(payload.challenge)
+    if account_id != 0 or "passkey" not in methods:
+        raise HTTPException(403, "This admin does not allow a passkey as the second factor.")
+    try:
+        passkeys.verify_authentication("admin", None, payload.credential)
+    except passkeys.PasskeyError as e:
+        sc.record_failed(ip, "mfa_fail", None)
+        raise HTTPException(401, str(e))
+    sc.record_ok(ip, "login_ok", None)
+    return AdminLoginOut(token=create_access_token("admin"),
+                         expires_hours=settings.jwt_expiry_hours)
 
 
 @app.delete("/api/v1/admin/security/passkeys/{credential_id}", dependencies=[Depends(verify_admin)])

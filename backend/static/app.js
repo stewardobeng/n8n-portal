@@ -26,6 +26,7 @@
     pollTimer: null,
     provisioningPw: null, // signup password held in-session for owner auto-create
     mfa: null,             // 2FA challenge in-flight (email, challenge, methods)
+    adminMfa: null,        // admin 2FA challenge in-flight (challenge, methods)
     security2fa: null,     // 2FA setup state (GET /me/security or /admin/security)
     adminInstances: [],    // admin: all instances (GET /admin/instances) for backup/update triggers
     adminInstancesLoaded: false
@@ -332,16 +333,38 @@ var ICONS = {
   function mfaPage() {
     var m = state.mfa;
     if (!m) { navigate("/entry"); return ""; }
-    var emailMethod = m.methods.some(function (x) { return x.method === "email"; });
+    var hasEmail = m.methods.some(function (x) { return x.method === "email"; });
+    var hasPasskey = m.methods.some(function (x) { return x.method === "passkey"; });
+    var labels = m.methods.map(function (x) { return x.label || x.method; });
+    var ex = labels.join(" or ");
     return authLayout(
       '<div class="eyebrow">Two-factor authentication</div><h1>Enter your code</h1>' +
-      '<p class="muted">Sign in as ' + esc(m.email) + '. Enter the code from your ' +
-      (m.methods.length === 1 ? (m.methods[0].method === "totp" ? "authenticator app" : "email") : "authenticator app or email") + '.</p>' +
+      '<p class="muted">Sign in as ' + esc(m.email) + '. Use your <b>' + esc(ex) + '</b> to continue.</p>' +
       '<form data-form="mfa"><div class="field"><label>Verification code</label>' +
       '<input id="mfa-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" required placeholder="123456" maxlength="10"></div>' +
       '<button class="button primary-wide" type="submit">Verify &amp; sign in</button></form>' +
-      (emailMethod ? '<p class="small muted" style="text-align:center;margin-top:14px"><a href="#" data-action="mfa-resend">Resend email code</a></p>' : "") +
+      (hasPasskey ? '<div style="text-align:center;margin-top:12px"><button class="button secondary" data-action="mfa-passkey">' + icon("fingerprint") + " Use a passkey</button></div>" : "") +
+      (hasEmail ? '<p class="small muted" style="text-align:center;margin-top:14px"><a href="#" data-action="mfa-resend">Resend email code</a></p>' : "") +
       '<p class="small muted" style="text-align:center;margin-top:12px"><a href="#/entry">Use a different email</a></p>'
+    );
+  }
+
+  function adminMfaPage() {
+    var m = state.adminMfa;
+    if (!m) { navigate("/admin/signin"); return ""; }
+    var hasEmail = m.methods.some(function (x) { return x.method === "email"; });
+    var hasPasskey = m.methods.some(function (x) { return x.method === "passkey"; });
+    var labels = m.methods.map(function (x) { return x.label || x.method; });
+    var ex = labels.join(" or ");
+    return authLayout(
+      '<div class="eyebrow">Staff verification</div><h1>Enter your code</h1>' +
+      '<p class="muted">Use your <b>' + esc(ex) + '</b> to finish signing in.</p>' +
+      '<form data-form="admin-mfa"><div class="field"><label>Verification code</label>' +
+      '<input id="admin-mfa-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" required placeholder="123456" maxlength="10"></div>' +
+      '<button class="button primary-wide" type="submit">Verify &amp; sign in</button></form>' +
+      (hasPasskey ? '<div style="text-align:center;margin-top:12px"><button class="button secondary" data-action="admin-mfa-passkey">' + icon("fingerprint") + " Use a passkey</button></div>" : "") +
+      (hasEmail ? '<p class="small muted" style="text-align:center;margin-top:14px"><a href="#" data-action="admin-mfa-resend">Resend email code</a></p>' : "") +
+      '<p class="small muted" style="text-align:center;margin-top:20px">Customer? <a href="#/entry">Return to customer portal</a></p>'
     );
   }
 
@@ -361,7 +384,6 @@ var ICONS = {
       '<input id="signin-password" name="password" type="password" required>' +
       '<button type="button" class="input-action" data-action="toggle-password" data-target="signin-password">' + icon("eye") + '</button></div></div>' +
       '<button class="button primary-wide" type="submit">Sign in</button></form>' +
-      '<div style="text-align:center;margin-top:12px"><button class="button secondary" data-action="signin-passkey">' + icon("fingerprint") + " Sign in with a passkey</button></div>" +
       '<p class="small muted" style="text-align:center;margin-top:14px"><a href="#/forgot">Forgot your portal password?</a></p>' +
       '<p class="small muted" style="text-align:center;margin-top:18px">No account yet? <a href="#/entry">Request access</a></p>'
     );
@@ -706,7 +728,6 @@ var ICONS = {
       '<input id="admin-password" name="password" type="password" required>' +
       '<button type="button" class="input-action" data-action="toggle-password" data-target="admin-password">' + icon("eye") + '</button></div></div>' +
       '<button class="button primary-wide" type="submit">Sign in</button></form>' +
-      '<div style="text-align:center;margin-top:12px"><button class="button secondary" data-action="admin-signin-passkey">' + icon("fingerprint") + " Sign in with a passkey</button></div>" +
       '<p class="small muted" style="text-align:center;margin-top:20px">Customer? <a href="#/entry">Return to customer portal</a></p>'
     );
   }
@@ -1138,6 +1159,7 @@ var ICONS = {
 
     /* ---- admin app ---- */
     else if (route === "/admin/signin") html = state.adminAuthed ? appLayout("admin", "Overview", "overview", '<main class="page"><p class="muted">Signed in.</p></main>') : adminSignin();
+    else if (route === "/admin/mfa") html = state.adminAuthed ? appLayout("admin", "Overview", "overview", '<main class="page"><p class="muted">Signed in.</p></main>') : adminMfaPage();
     else if (route === "/admin/overview") html = requireAdmin(function () { return adminOverview(); });
     else if (route === "/admin/requests") html = requireAdmin(function () { return adminRequests(); });
     else if (route === "/admin/accounts") html = requireAdmin(function () { return adminAccounts(); });
@@ -1608,18 +1630,19 @@ var ICONS = {
           act.innerHTML = icon(inp.type === "password" ? "eye" : "eyeoff");
         }
       }
-      else if (action === "signin-passkey" || action === "admin-signin-passkey") {
-        var isAdminPk = action === "admin-signin-passkey";
-        var pkStart = isAdminPk ? "/admin/passkey/login/start" : "/auth/passkey/login/start";
-        var pkVerify = isAdminPk ? "/admin/passkey/login/verify" : "/auth/passkey/login/verify";
-        var pkEmail = isAdminPk ? "" : (state.gateEmail || "");
+      else if (action === "mfa-passkey" || action === "admin-mfa-passkey") {
+        var isAdminMfa = action === "admin-mfa-passkey";
+        var mfaState = isAdminMfa ? state.adminMfa : state.mfa;
+        if (!mfaState) { navigate(isAdminMfa ? "/admin/signin" : "/entry"); return; }
+        var pkStart = isAdminMfa ? "/admin/passkey/mfa/start" : "/auth/passkey/mfa/start";
+        var pkVerify = isAdminMfa ? "/admin/passkey/mfa/verify" : "/auth/passkey/mfa/verify";
         if (!window.PublicKeyCredential) {
-          showToast("Passkeys not supported", "This browser does not support WebAuthn. Use a modern browser, or sign in with your password.");
+          showToast("Passkeys not supported", "This browser does not support WebAuthn. Use a modern browser, or enter a code.");
           return;
         }
-        showModal(modalHeader(isAdminPk ? "Admin passkey" : "Sign in with passkey") + '<div class="spinner"></div>');
-        var pkBody = pkEmail ? { email: pkEmail } : {};
-        api(pkStart, { method: "POST", body: pkBody }).then(function (opts) {
+        showModal(modalHeader(isAdminMfa ? "Admin passkey" : "Use a passkey") + '<div class="spinner"></div>');
+        // Second factor: require the MFA challenge (password already proven).
+        api(pkStart, { method: "POST", body: { challenge: mfaState.challenge } }).then(function (opts) {
           var raw = typeof opts === "string" ? JSON.parse(opts) : opts;
           var publicKey = Object.assign({}, raw);
           publicKey.challenge = _b64urlToBuf(raw.challenge);
@@ -1638,40 +1661,31 @@ var ICONS = {
                 userHandle: cred.response.userHandle ? _bufToB64url(cred.response.userHandle) : undefined,
               },
             };
-            return api(pkVerify, { method: "POST", body: { credential: credentialJson } });
+            return api(pkVerify, { method: "POST", body: { challenge: mfaState.challenge, credential: credentialJson } });
           });
         }).then(function (r) {
           closeModal();
           var tok = r && r.token;
-          if (isAdminPk) {
-            if (tok && tok !== "__mfa__") {
-              localStorage.setItem("admin_token", tok);
-              state.isAdmin = true;
-              navigate("/admin/overview");
-            } else {
-              // Admin 2FA is enabled; the frontend has no admin-MFA gate page yet
-              // (the password login has the same limitation). Keep the passkey
-              // flow honest: tell the admin to complete the second step.
-              showToast("Step 2 required", "This admin account has 2FA on. Sign in with your password to complete the second step.");
-              navigate("/admin/signin");
-            }
+          if (isAdminMfa) {
+            localStorage.setItem("admin_token", tok);
+            state.adminAuthed = true;
+            state.adminMfa = null;
+            refreshAdminData();
+            showToast("Welcome back", "Signed in to the admin portal.");
+            navigate("/admin/overview");
           } else {
-            if (tok && tok !== "__mfa__") {
-              localStorage.setItem("portal_token", tok);
-              state.session = { token: tok, account: r.account, instances: [] };
-              state.mfa = null;
-              loadPlans();
-              navigate("/customer/dashboard");
-            } else {
-              state.mfa = r && r.mfa ? Object.assign({ email: pkEmail }, r.mfa) : null;
-              navigate("/mfa");
-            }
+            localStorage.setItem("portal_token", tok);
+            state.session = { token: tok, account: r.account, instances: [] };
+            state.mfa = null;
+            loadPlans();
+            navigate("/customer/dashboard");
           }
         }).catch(function (err) {
+          closeModal();
           if (err && (err.name === "AbortError" || (err.message && err.message.indexOf("abort") !== -1))) {
-            closeModal(); showToast("Passkey sign-in cancelled", "");
+            showToast("Passkey cancelled", "");
           } else {
-            showToast("Passkey sign-in failed", err.message || String(err));
+            showToast("Passkey failed", err.message || String(err));
           }
         });
       }
@@ -1680,6 +1694,14 @@ var ICONS = {
         var ms = state.mfa;
         if (!ms) return;
         api("/auth/mfa-send-otp", { method: "POST", body: { email: ms.email } }).then(function () {
+          showToast("Code sent", "A new code has been emailed to you.");
+        }).catch(function (err) { showToast("Could not send", err.message); });
+      }
+      else if (action === "admin-mfa-resend") {
+        event.preventDefault();
+        var ams = state.adminMfa;
+        if (!ams) return;
+        api("/admin/mfa-send-otp", { method: "POST" }).then(function () {
           showToast("Code sent", "A new code has been emailed to you.");
         }).catch(function (err) { showToast("Could not send", err.message); });
       }
@@ -2364,6 +2386,12 @@ var ICONS = {
         var btnA = form.querySelector("button[type=submit]");
         if (btnA) btnA.disabled = true;
         api("/admin/login", { method: "POST", body: { password: pwA } }).then(function (r) {
+          if (r.mfa) {
+            // Admin second factor required (authenticator/email/passkey).
+            state.adminMfa = { challenge: r.mfa.challenge, methods: r.mfa.methods || [], codeSent: false };
+            navigate("/admin/mfa");
+            return;
+          }
           localStorage.setItem("admin_token", r.token);
           state.adminAuthed = true;
           refreshAdminData();
@@ -2372,6 +2400,24 @@ var ICONS = {
         }).catch(function (err) {
           showToast("Sign in failed", err.message);
           if (btnA) btnA.disabled = false;
+        });
+      }
+      else if (type === "admin-mfa") {
+        var am = state.adminMfa;
+        if (!am) { navigate("/admin/signin"); return; }
+        var acode = String(new FormData(form).get("code") || "").trim();
+        var abtn = form.querySelector("button[type=submit]");
+        if (abtn) abtn.disabled = true;
+        api("/admin/mfa-verify", { method: "POST", body: { challenge: am.challenge, code: acode } }).then(function (r) {
+          localStorage.setItem("admin_token", r.token);
+          state.adminAuthed = true;
+          state.adminMfa = null;
+          refreshAdminData();
+          showToast("Welcome back", "Signed in to the admin portal.");
+          navigate("/admin/overview");
+        }).catch(function (err) {
+          showToast("Code not accepted", err.message);
+          if (abtn) abtn.disabled = false;
         });
       }
     });
