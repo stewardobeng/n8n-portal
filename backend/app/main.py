@@ -163,6 +163,10 @@ class AdminMarkPaidIn(BaseModel):
     paid_from: Optional[int] = None  # epoch seconds (subscription start; backdating)
 
 
+class AdminExtendIn(BaseModel):
+    years: int = Field(..., ge=1, le=10)  # free renewal: +N years from current expiry
+
+
 class ProvisionOut(BaseModel):
     account_id: int
     instance_id: int
@@ -206,7 +210,10 @@ class InstanceStatusOut(BaseModel):
 
 
 class AdminSettingsIn(BaseModel):
-    landing_environments: str  # comma-separated env ids in fallback order, e.g. "8,4,9"
+    # comma-separated env ids in fallback order, e.g. "8,4,9"; optional so a
+    # caller can update ONLY the payments switch without touching placement.
+    landing_environments: Optional[str] = None
+    payments_open: Optional[bool] = None
 
 
 class AdminLoginIn(BaseModel):
@@ -1062,7 +1069,8 @@ def plans():
         "interval": "annually",
         "active": settings.plan_b_active,
     })
-    return {"plans": plans_out, "gateway": billing.gateway()}
+    return {"plans": plans_out, "gateway": billing.gateway(),
+            "payments_open": billing.payments_open()}
 
 
 @app.post("/api/v1/accounts/{account_id}/checkout", response_model=CheckoutOut)
@@ -1076,6 +1084,13 @@ def create_checkout(account_id: int,
         raise HTTPException(404, "Account not found.")
     if account["status"] == "provisioned" and account["subscription_status"] == "active":
         raise HTTPException(409, "Already subscribed and provisioned.")
+    # Payments master switch (Steward 2026-09-03): while onboarding users who
+    # must not pay, the admin holds payments and nobody can start a checkout.
+    if not billing.payments_open():
+        raise HTTPException(
+            403,
+            "Payments are currently on hold. Contact support to arrange a subscription.",
+        )
     try:
         return billing.create_checkout(account_id, account["email"])
     except Exception as e:
@@ -1398,16 +1413,28 @@ def admin_passkey_login_verify(payload: PasskeyVerifyIn, request: Request):
 
 @app.get("/api/v1/admin/settings", dependencies=[Depends(verify_admin)])
 def get_admin_settings():
-    return {"landing_environments": db.get_setting("landing_environments", default="8")}
+    return {
+        "landing_environments": db.get_setting("landing_environments", default="8"),
+        "payments_open": billing.payments_open(),
+    }
 
 
 @app.put("/api/v1/admin/settings", dependencies=[Depends(verify_admin)])
 def put_admin_settings(payload: AdminSettingsIn):
-    ids = [x.strip() for x in payload.landing_environments.split(",") if x.strip().isdigit()]
-    if not ids:
-        raise HTTPException(422, "Provide at least one environment id.")
-    db.set_setting("landing_environments", ",".join(ids))
-    return {"landing_environments": ",".join(ids)}
+    out = {}
+    if payload.landing_environments is not None:
+        ids = [x.strip() for x in payload.landing_environments.split(",")
+               if x.strip().isdigit()]
+        if not ids:
+            raise HTTPException(422, "Provide at least one environment id.")
+        db.set_setting("landing_environments", ",".join(ids))
+        out["landing_environments"] = ",".join(ids)
+    if payload.payments_open is not None:
+        billing.set_payments_open(payload.payments_open)
+        out["payments_open"] = billing.payments_open()
+    if not out:
+        raise HTTPException(422, "Nothing to update.")
+    return out
 
 
 @app.get("/api/v1/admin/accounts", dependencies=[Depends(verify_admin)])
@@ -1665,6 +1692,22 @@ def admin_mark_paid(account_id: int, payload: AdminMarkPaidIn):
         raise HTTPException(404, str(e))
     except Exception as e:
         raise HTTPException(502, f"Mark-paid failed: {e}")
+    return result
+
+
+@app.post("/api/v1/admin/accounts/{account_id}/extend", response_model=dict,
+          dependencies=[Depends(verify_admin)])
+def admin_extend_expiry(account_id: int, payload: AdminExtendIn):
+    """Free renewal (Steward 2026-09-03): extend an account's expiry by N
+    whole years from its current expiry (or from today when none/past),
+    mark active and resume a locked workspace. Works while payments are on
+    hold - this is the no-payment path for onboarding and renewals."""
+    try:
+        result = admin_ops.extend_expiry(account_id, payload.years)
+    except AdminOpsError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"Extend failed: {e}")
     return result
 
 

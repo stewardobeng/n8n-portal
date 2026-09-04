@@ -610,3 +610,34 @@ def _ensure_started(account_id: int) -> bool:
     if not inst["locked"]:
         return True
     return bool(_start_for_account(account_id))
+
+
+# ---------- free expiry extension (Steward 2026-09-03) ----------
+# For onboarding users who must not pay and for free renewals: the admin extends
+# an account's expiry by whole years from its CURRENT expiry (or from today when
+# there is none / it is past), marks it active and resumes a locked workspace.
+
+_YEAR_SECONDS = 365 * 24 * 3600
+
+
+def extend_expiry(account_id: int, years: int) -> dict:
+    account = db.get_account(account_id)
+    if not account:
+        raise AdminOpsError("Account not found.")
+    now = int(time.time())
+    current = int(account["paid_until"] or 0) if "paid_until" in account.keys() else 0
+    base = current if current > now else now
+    new_until = base + years * _YEAR_SECONDS
+    db.update_subscription_status(account_id, "active", paid_until=new_until)
+    db.set_account_status(account_id, "provisioned")
+    if _row_get(account, "account_state", "active") == "active":
+        _ensure_started(account_id)
+    log.info("account %s expiry extended +%d years -> %s (base %s)",
+             account_id, years, new_until, base)
+    return {
+        "account_id": account_id,
+        "subscription_status": "active",
+        "paid_from": account["paid_from"] if "paid_from" in account.keys() else None,
+        "paid_until": new_until,
+        "extended_years": years,
+    }
