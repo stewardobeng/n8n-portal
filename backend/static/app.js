@@ -13,6 +13,8 @@
     session: null,        // { token, account, instances } customer session
     adminAuthed: false,
     plans: [],
+    paymentsOpen: true,       // /plans -> master payments switch (admin hold)
+    adminPaymentsOpen: true,  // /admin/settings -> same switch, admin view
     gateEmail: null,
     gateToken: null,
     environmentList: [],  // [{id, name, status}] from GET /environments
@@ -448,6 +450,7 @@ var ICONS = {
     var acc = state.session ? state.session.account : null;
     var inst = state.session && state.session.instances ? state.session.instances[0] : null;
     var s = subscriptionState();
+    var openPay = state.paymentsOpen !== false;
     if (!acc) {
       return '<div class="hero-status info"><span class="big-icon">' + icon("shield") + "</span><div><h2>Welcome to the portal</h2><p>Create your account or sign in to manage your workspace.</p></div><a class=\"button\" href=\"#/entry\">Get started</a></div>";
     }
@@ -465,18 +468,27 @@ var ICONS = {
     }
     if (s === "pastdue") {
       return '<div class="hero-status warning"><span class="big-icon">' + icon("warning") + '</span><div><h2>Your renewal payment did not go through</h2><p>Renew before ' + esc(fmtDate(acc.paid_until)) + " to keep your workspace running.</p></div>" +
-        '<button class="button warning" data-action="pay-now">Renew now</button></div>';
+        (openPay ? '<button class="button warning" data-action="pay-now">Renew now</button>'
+                 : '<button class="button warning" disabled title="Renewals are paused by SteProTECH">Payments on hold</button>') + '</div>';
     }
     if (s === "cancelled") {
       return '<div class="hero-status warning"><span class="big-icon">' + icon("warning") + '</span><div><h2>Your subscription is cancelled</h2><p>Your workspace remains available until the paid period ends on ' + esc(fmtDate(acc.paid_until)) + ".</p></div>" +
         '<a class="button secondary" href="#/customer/billing">View billing</a></div>';
     }
     if (s === "expired") {
+      if (!openPay) {
+        return '<div class="hero-status info"><span class="big-icon">' + icon("lock") + '</span><div><h2>Your workspace is on hold</h2><p>Renewals are paused while SteProTECH sets up new users. Your work is safe; access will be restored by our team.</p></div>' +
+          '<a class="button secondary" href="mailto:support@steprotech.com">Contact support</a></div>';
+      }
       return '<div class="hero-status danger"><span class="big-icon">' + icon("lock") + "</span><div><h2>Your workspace is switched off</h2><p>Renew to switch it back on with all your work intact.</p></div>" +
         '<button class="button danger" data-action="pay-now">Renew now</button></div>';
     }
-    // subscription not active yet -> subscribe
+    // subscription not active yet -> subscribe (unless payments are on hold)
     var plan = state.plans.find(function (p) { return p.active; }) || state.plans[0];
+    if (!openPay) {
+      return '<div class="hero-status info"><span class="big-icon">' + icon("billing") + '</span><div><h2>Welcome to the portal</h2><p>Payments are temporarily on hold while SteProTECH sets up new users. Your workspace can be activated without payment - contact support.</p></div>' +
+        '<a class="button secondary" href="mailto:support@steprotech.com">Contact support</a></div>';
+    }
     return '<div class="hero-status info"><span class="big-icon">' + icon("billing") + '</span><div><h2>Choose a plan to get started</h2><p>Subscribe to the annual plan and your private workspace is created after payment.</p></div>' +
       '<button class="button" data-action="pay-now">' + (plan ? "Subscribe " + fmtMinor(plan.amount_minor, plan.currency) + "/yr" : "Subscribe") + "</button></div>";
   }
@@ -666,12 +678,15 @@ var ICONS = {
     // account), the call-to-action must be Renew, never Already subscribed.
     var subscribed = sub === "active" && s !== "expired" && s !== "pastdue" && s !== "cancelled";
     var due = s === "pastdue" || s === "expired" || s === "cancelled" || sub === "locked" || sub === "past_due" || sub === "unpaid";
+    var openPay = state.paymentsOpen !== false;
     var planCards = plans.map(function (p) {
       var activePlan = !!p.active;
       if (activePlan) {
         var cta;
         if (subscribed) {
           cta = '<span class="plan-already">' + icon("check") + " Already subscribed</span>";
+        } else if (!openPay) {
+          cta = '<button class="button' + (due ? " warning" : "") + '" disabled title="New payments are paused by SteProTECH">Payments on hold</button>';
         } else if (due) {
           cta = '<button class="button warning" data-action="pay-now">Renew subscription</button>';
         } else {
@@ -695,8 +710,12 @@ var ICONS = {
       : sub === "canceled" ? statusBadge("cancelled", "Cancelled") : statusBadge("pending", "No active subscription");
     var periodEnd = acc && acc.paid_until ? fmtDate(acc.paid_until) : "-";
 
+    var holdBanner = openPay ? "" :
+      '<div class="banner warning" style="margin-bottom:16px">' + icon("lock") +
+      '<div><strong>Payments are on hold</strong><br><span class="small">New subscriptions and renewals are paused right now. If you were onboarded as a free user, your access was arranged by SteProTECH - you do not need to pay.</span></div></div>';
     return appLayout("customer", "Plans & billing", "billing",
       '<main class="page">' + pageHead("Plans & billing", "Manage your annual subscription and understand what happens next.") +
+      holdBanner +
       '<div class="plan-grid">' + planCards + "</div>" +
       '<div class="grid cols-2" style="margin-top:20px">' +
         '<section class="card"><div class="card-head"><h2>Subscription details</h2>' + statusRow + "</div>" +
@@ -1051,6 +1070,7 @@ var ICONS = {
         lifecycleButtons +
         (acctState === "active" ? '<button class="button" data-action="admin-impersonate" data-id="' + a.id + '">' + icon("eye") + " Login as user</button> " +
         '<button class="button secondary" data-action="admin-mark-paid" data-id="' + a.id + '">' + icon("check") + " Mark paid</button>" +
+        '<button class="button secondary" data-action="admin-extend-expiry" data-id="' + a.id + '">' + icon("clock") + " Extend expiry</button>" +
         '<button class="button secondary" data-action="admin-attach" data-id="' + a.id + '">' + icon("workspace") + " Attach workspace</button>" +
         '<button class="button secondary" data-action="quota" data-id="' + a.id + '">Change quota</button>' +
         '<button class="button secondary" data-action="admin-backup-toggle" data-id="' + a.id + '" data-on="' + (a.backup_enabled ? "1" : "0") + '">' + icon("archive") + (a.backup_enabled ? " Revoke backup access" : " Allow backup") + "</button>" +
@@ -1172,7 +1192,8 @@ var ICONS = {
         '<span class="small muted">' + e.running_n8n + " running, " + esc(fmtBytes(e.storage_bytes)) + "</span></label>";
     }).join("") || '<div class="empty-state" style="min-height:160px"><div><h3>No environments found</h3><p class="muted">The n8n servers could not be listed right now.</p></div></div>';
     return appLayout("admin", "Settings", "settings",
-      '<main class="page">' + pageHead("Server environments", "Choose where new customer workspaces are created.", '<button class="button" data-action="save-servers">' + icon("check") + " Save selection</button>") +
+      '<main class="page">' + pageHead("Portal settings", "Choose where new customer workspaces are created and whether customers can pay.", '<button class="button" data-action="save-servers">' + icon("check") + " Save selection</button>") +
+      paymentsCard() +
       '<div class="grid cols-3"><section class="card span-2"><div class="card-head"><div><h2>Available servers</h2><p class="muted small" style="margin:4px 0 0">Only the n8n servers are listed here. The local control host is never used for customer workspaces.</p></div></div>' +
       '<div class="server-list env-check-list">' + rows + "</div></section>" +
       '<aside class="card"><h2>Placement rule</h2>' +
@@ -1182,6 +1203,25 @@ var ICONS = {
       '<div><strong>Several servers selected</strong><br><span class="small">The system auto-selects the least loaded healthy server for each new workspace.</span></div></div>' +
       '<p class="small muted" style="margin-top:18px">Saved ids: <strong>' + esc(order.join(", ") || "(none)") + "</strong></p>" +
       '<p class="small muted">Running counts and storage refresh each time this page loads.</p></aside></div></main>');
+  }
+
+  /* Payments master switch card (Steward 2026-09-03): hold/open customer
+   * payments from the admin Settings page while onboarding users who must
+   * not pay. Enforced server-side at checkout; existing subscriptions and
+   * free renewals (extend expiry) are unaffected. */
+  function paymentsCard() {
+    var open = state.adminPaymentsOpen !== false;
+    return '<section class="card" style="margin-bottom:18px"><div class="card-head">' +
+      '<div><h2>Payments &amp; subscriptions</h2><p class="muted small" style="margin:4px 0 0">Master switch for customer subscriptions. Use it while you onboard users who do not pay.</p></div>' +
+      '<span class="badge-stack">' + (open ? statusBadge("active", "Accepting payments") : statusBadge("suspended", "Payments on hold")) + '</span></div>' +
+      (open
+        ? '<div class="banner" style="margin:14px 0">' + icon("check") +
+          '<div><strong>Customers can subscribe and renew normally</strong><br><span class="small">Switch this off while you bring on board users who must not pay. While it is off, nobody can start a checkout; existing subscriptions keep running and you can still grant free access per account.</span></div></div>' +
+          '<div class="actions end"><button class="button warning" data-action="payments-toggle" data-open="0">' + icon("pause") + " Hold payments</button></div>"
+        : '<div class="banner warning" style="margin:14px 0">' + icon("lock") +
+          '<div><strong>No customer can pay or subscribe right now</strong><br><span class="small">New checkouts are refused. Give each onboarded user free access with <strong>Extend expiry</strong> on their account (works while payments are held), then open payments again when paid onboarding starts.</span></div></div>' +
+          '<div class="actions end"><button class="button" data-action="payments-toggle" data-open="1">' + icon("check") + " Open payments</button></div>") +
+      "</section>";
   }
 
   /* ================= router ================= */
@@ -1312,7 +1352,8 @@ var ICONS = {
     var route = (location.hash || "").slice(1);
     var m = route.match(/^\/admin\/account\/(\d+)$/);
     var d = m && state.accountCache[m[1]] ? JSON.stringify(state.accountCache[m[1]]) : "";
-    return c + "|" + a + "|" + ar + "|" + r + "|" + e + "|" + p + "|" + d + "|" + ev + "|" + ul + "|" + sec + "|" + bk + "|" + abk;
+    return c + "|" + a + "|" + ar + "|" + r + "|" + e + "|" + p + "|" + d + "|" + ev + "|" + ul + "|" + sec + "|" + bk + "|" + abk +
+      "|" + (state.paymentsOpen ? "po1" : "po0") + (state.adminPaymentsOpen ? "apo1" : "apo0");
   }
 
   async function refreshSession() {
@@ -1361,6 +1402,7 @@ var ICONS = {
       }
       var settings = await api("/admin/settings");
       state.envOrder = String(settings.landing_environments || "").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+      state.adminPaymentsOpen = settings.payments_open !== false;
       if (!state.environmentList.length) {
         try { state.environmentList = await api("/environments"); } catch (e) { state.environmentList = []; }
       }
@@ -1378,7 +1420,11 @@ var ICONS = {
   }
 
   async function loadPlans() {
-    try { state.plans = (await api("/plans")).plans || []; } catch (e) { state.plans = []; }
+    try {
+      var d = await api("/plans");
+      state.plans = d.plans || [];
+      state.paymentsOpen = d.payments_open !== false;
+    } catch (e) { state.plans = []; }
   }
 
   /* ================= modals / toasts ================= */
@@ -1506,6 +1552,44 @@ var ICONS = {
     } else {
       build();
     }
+  }
+
+  /* Free renewal (Steward 2026-09-03): +N whole years from the current expiry
+   * (or from today when the account has none / it is past). No payment is
+   * involved - used to onboard users who must not pay and to renew select
+   * users for free. Works while payments are on hold. */
+  function extendExpiryModal(accountId) {
+    var a = (state.adminAccounts || []).find(function (x) { return x.id === Number(accountId); });
+    var name = a ? (a.display_name || a.username) : "this customer";
+    function addYears(ts, y) {
+      var d = ts ? new Date(Number(ts) * 1000) : new Date();
+      var base = d.getTime() > Date.now() ? d : new Date();
+      return new Date(base.getTime() + y * 365 * 86400000);
+    }
+    function fmt(d) {
+      return d.toDateString();
+    }
+    function target(y) { return fmt(addYears(a && a.paid_until ? a.paid_until : 0, Number(y))); }
+    function build() {
+      showModal(modalHeader("Extend " + esc(name) + "'s expiry for free") +
+        '<p class="muted">Adds whole years to the current expiry date (or from today when there is no subscription yet). The account is marked active and a switched-off workspace is turned back on.</p>' +
+        '<div class="banner" style="margin:4px 0 14px">' + icon("clock") + "<div><strong>Free renewal - no payment</strong><br><span class=\"small\">Use this to onboard users who do not pay or to renew selected customers on you.</span></div></div>" +
+        '<div class="field"><label for="extend-years">Add</label><select id="extend-years">' +
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(function (y) {
+          return '<option value="' + y + '"' + (y === 2 ? " selected" : "") + ">" + y + (y === 1 ? " year" : " years") + "</option>";
+        }).join("") + "</select></div>" +
+        '<p class="small muted" id="extend-preview">New expiry: <strong>' + esc(target(2)) + "</strong></p>" +
+        '<div class="actions end" style="margin-top:18px"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+        '<button class="button" data-confirm-extend="' + accountId + '">' + icon("check") + " Extend expiry</button></div>");
+      var sel = document.getElementById("extend-years");
+      if (sel) {
+        sel.addEventListener("change", function () {
+          var pv = document.getElementById("extend-preview");
+          if (pv) pv.innerHTML = "New expiry: <strong>" + esc(target(sel.value)) + "</strong>";
+        });
+      }
+    }
+    build();
   }
 
   function attachModal(accountId) {
@@ -2324,6 +2408,18 @@ var ICONS = {
       }
       else if (action === "admin-add-user") { adminAddUserModal(); }
       else if (action === "admin-mark-paid") { markPaidModal(act.dataset.id); }
+      else if (action === "admin-extend-expiry") { extendExpiryModal(act.dataset.id); }
+      else if (action === "payments-toggle") {
+        var openTo = act.dataset.open === "1";
+        var label = openTo ? "Open payments for customers?" : "Hold payments?";
+        showModal(modalHeader(label) +
+          (openTo
+            ? '<div class="consequence safe"><strong>What happens</strong><ul><li>Customers can subscribe and renew again</li><li>New checkouts are enabled immediately</li></ul></div>'
+            : '<div class="consequence"><strong>What happens</strong><ul><li>Nobody can start a subscription or renewal checkout</li><li>Existing subscriptions keep running untouched</li><li>Free access is still granted per account with Extend expiry</li><li>You can open payments again any time</li></ul></div>') +
+          '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+          '<button class="button' + (openTo ? "" : " danger") + '" data-confirm-payments="1" data-open="' + (openTo ? "1" : "0") + '">' +
+          (openTo ? icon("check") + " Open payments" : icon("pause") + " Hold payments") + "</button></div>");
+      }
       else if (action === "admin-attach") {
         var attId = act.dataset.id;
         (async function () {
@@ -2607,6 +2703,34 @@ var ICONS = {
           showToast(bktEnabled ? "Backup access granted" : "Backup access revoked", bktEnabled
             ? "The customer can now create and download backups from their portal."
             : "The customer no longer sees a backup option.");
+          refreshAdminData();
+          render();
+        }).catch(function (err) { showToast("Update failed", err.message); });
+      }
+      var cExtend = event.target.closest("[data-confirm-extend]");
+      if (cExtend) {
+        var exId = cExtend.dataset.confirmExtend;
+        var exSel = document.getElementById("extend-years");
+        var years = exSel ? Number(exSel.value) : 1;
+        if (!years || years < 1 || years > 10) { showToast("Extend failed", "Pick between 1 and 10 years."); return; }
+        closeModal();
+        (async function () {
+          try {
+            var data = await api("/admin/accounts/" + exId + "/extend", { method: "POST", body: { years: years } });
+            var newDate = data.paid_until ? fmtDate(data.paid_until) : "the new date";
+            showToast("Expiry extended", "Free renewal: account active until " + newDate + ".");
+            refreshAdminData();
+          } catch (err) { showToast("Extend failed", err.message); }
+        })();
+      }
+      var cPays = event.target.closest("[data-confirm-payments]");
+      if (cPays) {
+        var openNow = cPays.dataset.open === "1";
+        closeModal();
+        api("/admin/settings", { method: "PUT", body: { payments_open: openNow } }).then(function (d) {
+          state.adminPaymentsOpen = d.payments_open !== false;
+          showToast(openNow ? "Payments opened" : "Payments on hold",
+            openNow ? "Customers can subscribe and renew again." : "New subscriptions and renewals are refused. Extend expiry to onboard users for free.");
           refreshAdminData();
           render();
         }).catch(function (err) { showToast("Update failed", err.message); });

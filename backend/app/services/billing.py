@@ -53,6 +53,17 @@ def gateway() -> str:
     return settings.payment_gateway.lower()
 
 
+def payments_open() -> bool:
+    """Master switch (Steward 2026-09-03): when OFF nobody can subscribe or pay
+    (checkout is refused). Admin onboarding/free renewals (mark-paid, extend)
+    are unaffected. Stored in the settings table, defaults to open."""
+    return db.get_setting("payments_open", default="1") == "1"
+
+
+def set_payments_open(open_: bool) -> None:
+    db.set_setting("payments_open", "1" if open_ else "0")
+
+
 def is_live() -> bool:
     return gateway() in ("paystack", "stripe")
 
