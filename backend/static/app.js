@@ -966,9 +966,10 @@ var ICONS = {
             "<td>" + badge + (stateBadge ? " " + stateBadge : "") + "</td>" +
             "<td>" + esc(fmtDate(a.paid_until)) + "</td>" +
             "<td>" + (a.quota || 1) + "</td>" +
-            "<td>" + bkBadge + ' <button class="button secondary small-btn" data-action="admin-backup-toggle" data-id="' + a.id + '" data-on="' + (a.backup_enabled ? "1" : "0") + '">' + (a.backup_enabled ? "Revoke" : "Allow") + " backup</button></td>" +
-            '<td>' + (a.account_state === "active" ? '<button class="button secondary small-btn" data-action="admin-impersonate" data-id="' + a.id + '">' + icon("eye") + " Login as user</button> " : "") +
-            '<button class="button secondary small-btn" data-route="/admin/account/' + a.id + '">View account</button></td></tr>';
+            '<td class="cell-actions-td"><div class="cell-actions fill">' + bkBadge +
+            '<button class="button secondary small-btn" data-action="admin-backup-toggle" data-id="' + a.id + '" data-on="' + (a.backup_enabled ? "1" : "0") + '">' + (a.backup_enabled ? "Revoke" : "Allow") + " backup</button></div></td>" +
+            '<td class="cell-actions-td"><div class="cell-actions">' + (a.account_state === "active" ? '<button class="button secondary small-btn" data-action="admin-impersonate" data-id="' + a.id + '">' + icon("eye") + " Login as user</button>" : "") +
+            '<button class="button secondary small-btn" data-route="/admin/account/' + a.id + '">View account</button></div></td></tr>';
         }).join("") : '<tr><td colspan="7"><div class="empty-state" style="min-height:240px"><div><h3>No customer accounts yet</h3><p class="muted">Accounts appear here after registration.</p></div></div></td></tr>') +
       "</tbody></table></div></section></main>");
   }
