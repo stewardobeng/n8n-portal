@@ -102,6 +102,46 @@ def ensure_unique_username(username: str | None, email: str) -> str:
                 raise ProvisionError("Could not allocate a unique username.")
 
 
+# NPM proxy-host list is cached briefly so the live username check stays cheap.
+_NPM_HOSTS_CACHE: dict = {"at": 0.0, "hosts": None}
+_NPM_CACHE_TTL = 30
+
+
+def _npm_proxy_hosts() -> list[dict]:
+    import time as _t
+    now = _t.time()
+    if _NPM_HOSTS_CACHE["hosts"] is not None and now - _NPM_HOSTS_CACHE["at"] < _NPM_CACHE_TTL:
+        return _NPM_HOSTS_CACHE["hosts"]
+    hosts = NPMClient().list_proxy_hosts()
+    _NPM_HOSTS_CACHE.update(at=now, hosts=hosts)
+    return hosts
+
+
+def username_available(username: str) -> tuple[bool, str]:
+    """True + '' when the username (and its <name>.<base> domain) is free for a
+    NEW workspace. Checks format, reserved list, portal accounts, portal stack
+    names, and existing NPM proxy domains (catches legacy fleet addresses that
+    predate the portal). NPM being unreachable degrades to DB-only checks."""
+    username = (username or "").strip().lower()
+    if not USERNAME_RE.match(username):
+        return False, "Use lowercase letters, numbers and hyphens only (2-62 chars, no leading or trailing hyphen)."
+    if username in RESERVED_USERNAMES:
+        return False, f"'{username}' is reserved."
+    if db.get_account_by_username(username):
+        return False, f"'{username}' is already taken."
+    if db.get_instance_by_stack_name(username):
+        return False, f"'{username}' is already used by another workspace."
+    domain = f"{username}.{settings.base_domain}"
+    try:
+        for h in _npm_proxy_hosts():
+            names = [str(n).strip().lower().rstrip("/") for n in (h.get("domain_names") or [])]
+            if domain in names:
+                return False, f"'{domain}' already exists. Pick a different username."
+    except Exception:
+        pass  # NPM unreachable: DB uniqueness remains the authoritative gate
+    return True, ""
+
+
 # ---------- port allocation ----------
 
 def used_ports_all_sources(pc: PortainerClient, npm: NPMClient, endpoint_id: int,
@@ -435,7 +475,8 @@ def validate_password_policy(password: str) -> None:
         raise ProvisionError("Password must contain at least one digit.")
 
 
-def provision_account(account_id: int, password: str | None = None) -> dict:
+def provision_account(account_id: int, password: str | None = None,
+                      workspace: dict | None = None) -> dict:
     account = db.get_account(account_id)
     if not account:
         raise ProvisionError("Account not found.")
@@ -460,13 +501,29 @@ def provision_account(account_id: int, password: str | None = None) -> dict:
         raise ProvisionError("Account already provisioned.")
 
     email = account["email"]
-    username = account["username"]
-    # Multi-instance accounts (quota > 1): suffix subsequent workspaces
-    # username-2, username-3 ... so stack_name/domain stay unique.
-    if live_count > 0:
-        username = f"{username}-{live_count + 1}"
-    first_name = account["first_name"] or username
-    last_name = account["last_name"] or "User"
+    ws = workspace or {}
+    # Per-workspace identity (Steward 2026-09-03): an extra workspace may carry
+    # its OWN unique username (=> stack name + domain), owner email and owner
+    # name, chosen through the same form used for the first workspace. Without
+    # a profile (admin quick-provision), keep the legacy auto-suffix.
+    owner_email = (ws.get("owner_email") or email).lower()
+    if ws.get("username"):
+        username = ws["username"].strip().lower()
+        if db.get_instance_by_stack_name(username):
+            raise ProvisionError(f"Username '{username}' is already provisioned.")
+    else:
+        username = account["username"]
+        # Multi-instance accounts (quota > 1): suffix subsequent workspaces
+        # username-2, username-3 ... so stack_name/domain stay unique.
+        if live_count > 0:
+            n = live_count + 1
+            candidate = f"{username}-{n}"
+            while db.get_instance_by_stack_name(candidate):
+                n += 1
+                candidate = f"{username}-{n}"
+            username = candidate
+    first_name = ws.get("first_name") or account["first_name"] or username
+    last_name = ws.get("last_name") or account["last_name"] or "User"
 
     # The client-chosen password (passed in-memory from the API, never stored
     # plaintext). Fall back to a generated one only if not provided.
@@ -487,7 +544,7 @@ def provision_account(account_id: int, password: str | None = None) -> dict:
 
     # 2. credentials / keys
     encryption_key = db.new_key(prefix="", nbytes=32)  # 64 hex chars, unique
-    basic_auth_user = email
+    basic_auth_user = owner_email  # n8n owner login for THIS workspace
 
     # 3. persist instance row FIRST (so we can roll back + track)
     domain = f"{username}.{settings.base_domain}"

@@ -1591,13 +1591,169 @@ var ICONS = {
       '<button class="button danger" data-action="maintenance-run">Run maintenance</button></div>');
   }
 
+  /* ---- extra workspace form (Steward 2026-09-03) ----
+   * When an account is granted more quota, adding a workspace reuses the same
+   * form as the first one: owner email, first/last name, a UNIQUE username
+   * (which becomes the workspace address) and a password. The username is
+   * checked live and the customer is alerted the instant it is not available. */
+  function baseDomainFor() { return window.__baseDomain || "steprotech.com"; }
+
+  function workspacePwError(pw) {
+    if (!pw || pw.length < 8) return "Password needs at least 8 characters.";
+    if (!/[A-Z]/.test(pw)) return "Password needs one uppercase letter.";
+    if (!/[a-z]/.test(pw)) return "Password needs one lowercase letter.";
+    if (!/[0-9]/.test(pw)) return "Password needs one number.";
+    return "";
+  }
+
   function addWorkspaceModal() {
     var acc = state.session ? state.session.account : null;
-    showModal(modalHeader("Provision another workspace") +
-      '<p class="muted">Your account can currently own up to ' + ((acc && acc.quota) || 1) + " workspace(s).</p>" +
-      '<div class="consequence safe"><strong>How this works</strong><ul><li>Provisioning uses the password you chose at signup</li><li>Your new workspace gets a fresh address and encryption key</li><li>You will be emailed the access details when it is ready</li></ul></div>' +
+    if (!acc) return;
+    var email = acc.email || "";
+    showModal(modalHeader("Add another workspace") +
+      '<p class="muted">Your account can own up to ' + ((acc && acc.quota) || 1) + ' workspaces. Each workspace gets its own owner, its own password, and a unique address from the username you choose.</p>' +
+      '<div class="form-grid">' +
+        '<div class="field full"><label>Owner email</label>' +
+        '<input id="ws-email" type="email" value="' + esc(email) + '" autocomplete="off" spellcheck="false">' +
+        '<span class="hint">Login details for the new workspace are emailed to this address.</span></div>' +
+        '<div class="field"><label>First name</label><input id="ws-first" type="text" maxlength="50" placeholder="Owner first name"></div>' +
+        '<div class="field"><label>Last name</label><input id="ws-last" type="text" maxlength="50" placeholder="Owner last name"></div>' +
+        '<div class="field full"><label>Username <span class="muted" id="ws-username-state"></span></label>' +
+        '<input id="ws-username" type="text" pattern="[a-z0-9-]+" maxlength="62" placeholder="lowercase letters, numbers, hyphens" autocomplete="off" spellcheck="false" autocapitalize="none">' +
+        '<span class="hint" id="ws-username-hint">Becomes your workspace address: <strong id="ws-preview"></strong></span>' +
+        '<span class="uname-check" id="ws-availability" style="display:none"></span></div>' +
+        '<div class="field full"><label>Password</label><div class="input-row">' +
+        '<input id="ws-pass" type="password" autocomplete="new-password" minlength="8" maxlength="128">' +
+        '<button type="button" class="input-action" data-action="toggle-password" data-target="ws-pass" aria-label="Show password">' + icon("eye") + '</button></div></div>' +
+        '<div class="field full"><label>Confirm password</label><div class="input-row">' +
+        '<input id="ws-pass2" type="password" autocomplete="new-password">' +
+        '<button type="button" class="input-action" data-action="toggle-password" data-target="ws-pass2" aria-label="Show password">' + icon("eye") + '</button></div></div>' +
+        '<div class="checks full" id="ws-pw-msg" style="display:none"><span class="check"></span></div>' +
+      '</div>' +
       '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
-      '<button class="button" data-action="provision-now">Provision workspace</button></div>');
+      '<button class="button" data-action="add-workspace-submit">' + icon("plus") + " Create workspace</button></div>");
+    bindWorkspaceForm();
+  }
+
+  function bindWorkspaceForm() {
+    var u = document.getElementById("ws-username");
+    var stateEl = document.getElementById("ws-username-state");
+    var hintEl = document.getElementById("ws-availability");
+    var prevEl = document.getElementById("ws-preview");
+    var okFlag = { ok: false, busy: false, value: "" };
+    u.dataset.ok = "0";
+    function showAvailability(res) {
+      okFlag.ok = res.available;
+      okFlag.busy = false;
+      u.dataset.ok = res.available ? "1" : "0";
+      if (!hintEl) return;
+      hintEl.style.display = "";
+      hintEl.className = "uname-check " + (res.available ? "ok" : "bad");
+      hintEl.textContent = res.available
+        ? ("Available: https://" + res.username + "." + baseDomainFor() + "/")
+        : (res.message || "That username is not available.");
+    }
+    var timer = null;
+    if (u) u.addEventListener("input", function () {
+      var v = u.value.toLowerCase().replace(/[^a-z0-9-]/g, "");
+      if (v !== u.value) u.value = v;
+      var preview = (v || "your-username") + "." + baseDomainFor();
+      if (prevEl) prevEl.textContent = "https://" + preview + "/";
+      if (stateEl) stateEl.textContent = "";
+      u.dataset.ok = "0";
+      if (hintEl) { hintEl.style.display = "none"; }
+      clearTimeout(timer);
+      if (!v) return;
+      okFlag.busy = true;
+      timer = setTimeout(function () {
+        api("/username-available?username=" + encodeURIComponent(v)).then(showAvailability)
+          .catch(function () { okFlag.busy = false; });
+      }, 350);
+    });
+    var p1 = document.getElementById("ws-pass");
+    var p2 = document.getElementById("ws-pass2");
+    var msg = document.getElementById("ws-pw-msg");
+    function pwUpdate() {
+      if (!msg) return;
+      var e1 = p1 ? workspacePwError(p1.value) : "Password is required.";
+      var mismatch = p1 && p2 && p1.value !== p2.value;
+      if (p1 && p1.value && !e1 && mismatch) e1 = "Passwords do not match.";
+      if (!p1 || !p1.value) { msg.style.display = "none"; return; }
+      msg.style.display = "";
+      msg.firstChild.className = "check " + (e1 ? "bad" : "ok");
+      msg.firstChild.textContent = e1 || "Password meets the requirements.";
+    }
+    if (p1) p1.addEventListener("input", pwUpdate);
+    if (p2) p2.addEventListener("input", pwUpdate);
+    if (prevEl) prevEl.textContent = "your-username." + baseDomainFor();
+  }
+
+  async function submitWorkspaceProvision() {
+    var acc = state.session ? state.session.account : null;
+    if (!acc) return;
+    var email = String((document.getElementById("ws-email") || {}).value || "").trim();
+    var first = String((document.getElementById("ws-first") || {}).value || "").trim();
+    var last = String((document.getElementById("ws-last") || {}).value || "").trim();
+    var username = String((document.getElementById("ws-username") || {}).value || "").trim().toLowerCase();
+    var pw = (document.getElementById("ws-pass") || {}).value || "";
+    var pw2 = (document.getElementById("ws-pass2") || {}).value || "";
+    var uEl = document.getElementById("ws-username");
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { showToast("Email needed", "Enter a valid owner email for this workspace."); return; }
+    if (!first || !last) { showToast("Name needed", "Enter the owner first and last name."); return; }
+    if (!/^[a-z0-9]([a-z0-9-]{0,60}[a-z0-9])?$/.test(username)) { showToast("Username invalid", "Use lowercase letters, numbers and hyphens only, 2-62 characters."); return; }
+    var pwErr = workspacePwError(pw);
+    if (pwErr) { showToast("Password needs work", pwErr); return; }
+    if (pw !== pw2) { showToast("Passwords do not match", "Confirm the password again."); return; }
+    if (!uEl || uEl.dataset.ok !== "1") {
+      // Immediate availability alert: always re-confirm before submitting.
+      try {
+        var chk = await api("/username-available?username=" + encodeURIComponent(username));
+        uEl.dataset.ok = chk.available ? "1" : "0";
+        if (!chk.available) {
+          showToast("Username not available", chk.message || "Pick a different username.");
+          return;
+        }
+      } catch (e) {
+        showToast("Could not check username", e.message);
+        return;
+      }
+    }
+    var prevCount = (state.session.instances || []).filter(function (i) { return i.status !== "deleted"; }).length;
+    var btn = document.querySelector("[data-action=add-workspace-submit]");
+    if (btn) { btn.disabled = true; btn.textContent = "Creating workspace..."; }
+    try {
+      await api("/accounts/" + acc.id + "/provision", {
+        method: "POST",
+        body: { password: pw, username: username, owner_email: email,
+                first_name: first, last_name: last }
+      });
+      closeModal();
+      showToast("Workspace being created", "https://" + username + "." + baseDomainFor() + "/ will be ready in a few minutes. We will email the access details.");
+      navigate("/customer/workspaces");
+      startWorkspacePoll(prevCount);
+    } catch (err) {
+      showToast("Could not start workspace", err.message);
+      if (btn) { btn.disabled = false; btn.innerHTML = icon("plus") + " Create workspace"; }
+    }
+  }
+
+  function startWorkspacePoll(prevCount) {
+    stopPolling();
+    state.pollTimer = setInterval(function () {
+      refreshSession().then(function () {
+        var insts = state.session ? (state.session.instances || []).filter(function (i) { return i.status !== "deleted"; }) : [];
+        var provisioning = insts.some(function (i) { return i.status === "provisioning"; });
+        var failedNow = insts.length > prevCount && insts.some(function (i) { return i.status === "failed"; });
+        if (insts.length > prevCount && !provisioning) {
+          stopPolling();
+          render();
+          if (failedNow) { showToast("Workspace setup needs attention", "SteProTECH has been notified and will contact you."); }
+          else { showToast("Workspace ready", "Your new workspace is up. Check your email for the access details."); }
+        } else {
+          render();
+        }
+      });
+    }, 10000);
   }
 
   /* ================= actions / forms ================= */
@@ -2113,6 +2269,7 @@ var ICONS = {
         autoProvision();
       }
       else if (action === "add-workspace") addWorkspaceModal();
+      else if (action === "add-workspace-submit") { event.preventDefault(); submitWorkspaceProvision(); }
 
       /* admin */
       else if (action === "admin-impersonate") impersonateConfirm(act.dataset.id);

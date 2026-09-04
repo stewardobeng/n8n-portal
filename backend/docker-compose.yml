@@ -3,7 +3,7 @@
 
 services:
   n8n-portal-backend:
-    image: n8n-portal-backend:0.1.52
+    image: n8n-portal-backend:0.1.53
     restart: unless-stopped
     ports:
       - "127.0.0.1:8788:8000"   # loopback-only binding (2026-09-03): NPM reaches us over my-main-net; no public exposure
