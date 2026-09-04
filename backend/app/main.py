@@ -176,7 +176,16 @@ class ProvisionOut(BaseModel):
 
 
 class ProvisionRequest(BaseModel):
-    password: str = Field(..., min_length=8, max_length=128)
+    # password is only required when the caller chooses it; the admin quick-
+    # provision path (and owner fallback) can leave it out (generated instead).
+    password: Optional[str] = Field(default=None, min_length=8, max_length=128)
+    # Per-workspace identity for extra workspaces (Steward 2026-09-03): the
+    # customer fills the same form used for the first workspace, with a unique
+    # username that becomes the stack name + domain.
+    username: Optional[str] = Field(default=None, max_length=62)
+    owner_email: Optional[EmailStr] = None
+    first_name: Optional[str] = Field(default=None, max_length=50)
+    last_name: Optional[str] = Field(default=None, max_length=50)
 
 
 class InstanceStatusOut(BaseModel):
@@ -420,10 +429,12 @@ def _serve_backup(b):
     return FileResponse(p, media_type=media, filename=b["filename"])
 
 
-def _run_provision(account_id: int, password: str | None = None) -> None:
+def _run_provision(account_id: int, password: str | None = None,
+                   workspace: dict | None = None) -> None:
     """Background task wrapper — provisioning runs async so the API returns fast."""
     try:
-        result = provisioner.provision_account(account_id, password=password)
+        result = provisioner.provision_account(account_id, password=password,
+                                               workspace=workspace)
         try:
             send_welcome_credentials(
                 to=result["basic_auth_user"],
@@ -956,6 +967,29 @@ def provision(account_id: int, background: BackgroundTasks,
     account = db.get_account(account_id)
     if not account:
         raise HTTPException(404, "Account not found.")
+    # Per-workspace identity (extra workspace form): validate BEFORE the quota
+    # gate so a bad username/password never starts a job. The username must be
+    # globally unique (accounts + portal stacks); it becomes the stack + domain.
+    workspace = None
+    if payload and (payload.username or payload.owner_email
+                    or payload.first_name or payload.last_name):
+        workspace = {}
+        if payload.username:
+            try:
+                workspace["username"] = provisioner.validate_username(payload.username)
+            except provisioner.ProvisionError as e:
+                raise HTTPException(422, str(e))
+        if payload.owner_email:
+            workspace["owner_email"] = str(payload.owner_email).lower()
+        if payload.first_name and payload.first_name.strip():
+            workspace["first_name"] = payload.first_name.strip()
+        if payload.last_name and payload.last_name.strip():
+            workspace["last_name"] = payload.last_name.strip()
+        if payload.password:
+            try:
+                provisioner.validate_password_policy(payload.password)
+            except provisioner.ProvisionError as e:
+                raise HTTPException(422, str(e))
     # Quota gate: one instance per account unless the admin raised the quota
     # (provisioner enforces the same rule; this gives the API a fast 409).
     quota = account["quota"] if "quota" in account.keys() else settings.default_quota
@@ -967,7 +1001,7 @@ def provision(account_id: int, background: BackgroundTasks,
     if billing.gateway() in ("paystack", "stripe") and account["subscription_status"] != "active":
         raise HTTPException(402, "Payment required: subscribe before provisioning.")
     password = payload.password if payload else None
-    background.add_task(_run_provision, account_id, password)
+    background.add_task(_run_provision, account_id, password, workspace)
     return {"status": "provisioning_started", "account_id": account_id}
 
 
@@ -985,6 +1019,16 @@ def account_status(account_id: int,
         "account": _account_to_out(account).model_dump(),
         "instances": [_instance_to_out(i).model_dump() for i in instances],
     }
+
+
+@app.get("/api/v1/username-available", dependencies=[Depends(verify_client)])
+def check_username_available(username: str = ""):
+    """Live uniqueness check for a NEW workspace username (extra workspace
+    form). Returns immediately so the UI can alert the customer the moment the
+    username they typed is not available."""
+    uname = (username or "").strip().lower()
+    available, message = provisioner.username_available(uname)
+    return {"available": available, "username": uname, "message": message}
 
 
 # ---------- billing ----------
