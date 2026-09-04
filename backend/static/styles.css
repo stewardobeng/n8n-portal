@@ -237,6 +237,17 @@ th, td { padding: 14px 20px; border-bottom: 1px solid var(--slate-100); text-ali
 th { color: var(--slate-500); background: var(--surface-soft); font-size: .74rem; font-weight: 800; letter-spacing: .03em; text-transform: uppercase; }
 .table-wrap { padding: 0 4px; }
 td { font-size: .87rem; }
+/* /admin/accounts action cells (Steward 2026-09-04): uniform horizontal
+ * rhythm for the Off/On pill + Allow backup + Login as user + View account
+ * cluster, vertically centered. Cell side padding shrinks to 4px so the
+ * cross-cell gap also equals the 8px flex gap. */
+.cell-actions { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.cell-actions-td { padding: 14px 4px; }
+/* In the Backup column the toggle stretches to the column width so its right
+ * edge always meets the next cell at the same 8px boundary gap, whether the
+ * label reads Allow or Revoke. */
+.cell-actions.fill { width: 100%; }
+.cell-actions.fill > .button { flex: 1 1 auto; }
 tbody tr:hover { background: #fbfdfd; }
 .customer-cell { display: flex; align-items: center; gap: 12px; }
 .customer-cell .cell-text { display: block; min-width: 0; }
