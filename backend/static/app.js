@@ -192,11 +192,20 @@ var ICONS = {
 
   function profileChip() {
     var isAdmin = currentKind() === "admin";
-    var acc = state.session ? state.session.account : null;
+    var acc = state.session && state.session.account ? state.session.account : null;
     var name = isAdmin ? "Administrator" : (acc ? (acc.display_name || cap(acc.username)) : "Account");
     var sub = isAdmin ? "SteProTECH staff" : (acc ? acc.email : "");
     var initials = isAdmin ? "SO" : (acc ? initialsOf(acc.display_name || acc.username) : "?");
-    return '<div class="profile-chip"><span class="avatar">' + esc(initials) + "</span><span><strong>" + esc(name) + "</strong><small>" + esc(sub) + "</small></span></div>";
+    // Interactive account chip (Steward 2026-09-04): toggles a drop-up menu
+    // anchored above the chip. Log out reuses the existing signout-route flow
+    // (admin clears + goes to admin sign-in, customer confirms + goes to entry,
+    // impersonation exits first) so behavior stays identical to the topbar icon.
+    return '<div class="profile-chip" role="button" tabindex="0" aria-haspopup="menu" aria-expanded="false" aria-controls="profile-chip-menu" data-action="profile-menu" title="Account menu">' +
+      '<span class="avatar">' + esc(initials) + '</span><span><strong>' + esc(name) + '</strong><small>' + esc(sub) + '</small></span>' +
+      '<svg class="chip-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></div>' +
+      '<div class="chip-menu" id="profile-chip-menu" role="menu" aria-label="Account menu">' +
+        '<button class="chip-menu-item" role="menuitem" data-action="signout-route">' + icon("signout") + " Log out</button>" +
+      "</div>";
   }
   function initialsOf(name) {
     var words = String(name || "?").split(/[\s._-]+/).filter(function (w) { return w.length; });
@@ -1429,6 +1438,13 @@ var ICONS = {
 
   /* ================= modals / toasts ================= */
 
+  function closeProfileMenu() {
+    var chipEl = document.querySelector(".profile-chip");
+    var menuEl = document.querySelector(".chip-menu");
+    if (menuEl) menuEl.classList.remove("open");
+    if (chipEl) { chipEl.classList.remove("open"); chipEl.setAttribute("aria-expanded", "false"); }
+  }
+
   function showToast(title, message) {
     var el = document.createElement("div");
     el.className = "toast";
@@ -2100,12 +2116,46 @@ var ICONS = {
   }
 
   function eventHandlers() {
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") {
+        var wasOpen = document.querySelector(".chip-menu.open");
+        if (wasOpen) { e.preventDefault(); closeProfileMenu(); var ch = document.querySelector(".profile-chip"); if (ch) ch.focus(); }
+        return;
+      }
+      var t = e.target;
+      if ((e.key === "Enter" || e.key === " ") && t && t.classList && t.classList.contains("profile-chip")) {
+        e.preventDefault();
+        t.click();
+      }
+    });
+
     document.addEventListener("click", function (event) {
+      // profile-chip menu: any click outside the chip/menu dismisses it
+      if (!event.target.closest(".profile-chip, .chip-menu")) closeProfileMenu();
+
       var route = event.target.closest("[data-route]");
       if (route) { navigate(route.dataset.route); return; }
 
       var act = event.target.closest("[data-action]");
       var action = act && act.dataset.action;
+
+      if (action === "profile-menu") {
+        event.preventDefault();
+        var chipEl = document.querySelector(".profile-chip");
+        var menuEl = document.querySelector(".chip-menu");
+        if (!menuEl) return;
+        var willOpen = !menuEl.classList.contains("open");
+        closeProfileMenu();
+        if (willOpen && menuEl) {
+          menuEl.classList.add("open");
+          if (chipEl) { chipEl.classList.add("open"); chipEl.setAttribute("aria-expanded", "true"); }
+          if (event.detail === 0) { // keyboard activation -> move focus into the menu
+            var first = menuEl.querySelector(".chip-menu-item");
+            if (first) first.focus();
+          }
+        }
+        return;
+      }
 
       if (action === "menu") { state.menuOpen = !state.menuOpen; render(); }
       else if (action === "side-close") { if (state.menuOpen) { state.menuOpen = false; render(); } }
