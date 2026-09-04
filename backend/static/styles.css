@@ -338,6 +338,10 @@ tbody tr:hover { background: #fbfdfd; }
   .span-2 { grid-column: span 1; }
   .workspace-item { grid-template-columns:auto minmax(0,1fr) auto; }
   .workspace-item .button { grid-column:2 / -1; justify-self:start; }
+  /* /admin/overview bottom row: cards keep their own height when the row
+   * collapses, so the Quick actions card never shows stretch whitespace
+   * below its buttons (paddings stay symmetric top/bottom). */
+  .grid.overview-row > .card, .grid.overview-row > section, .grid.overview-row > aside { align-self: start; }
 }
 @media (max-width: 760px) {
   .auth-page { grid-template-columns:1fr; }

@@ -794,9 +794,6 @@ var ICONS = {
     var locked = accounts.filter(function (a) { return a.subscription_status === "locked" || a.subscription_status === "canceled"; }).length;
     var total = accounts.length;
 
-    var attentionRows = accounts.filter(function (a) {
-      return ["past_due", "locked", "canceled"].indexOf(a.subscription_status) !== -1;
-    }).slice(0, 6);
     var requestRows = requests.slice(0, 6);
 
     return appLayout("admin", "Overview", "overview",
@@ -812,8 +809,8 @@ var ICONS = {
           '<div class="metric-value">' + total + '</div><p class="muted">Total customer accounts</p><a href="#/admin/accounts">View accounts ' + icon("arrow") + '</a></article>' +
       "</div>" +
       envHealthCards() +
-      '<div class="grid cols-3" style="margin-top:18px">' +
-        '<section class="card flush span-2"><div class="card-head" style="padding:20px 20px 0"><h2>Access requests</h2><a class="button ghost small-btn" href="#/admin/requests">View all</a></div>' +
+      '<div class="grid cols-3 overview-row" style="margin-top:18px">' +
+        '<section class="card flush span-2" style="padding:0 0 20px"><div class="card-head" style="padding:20px 20px 0"><h2>Access requests</h2><a class="button ghost small-btn" href="#/admin/requests">View all</a></div>' +
           '<div class="table-wrap"><table><thead><tr><th>Email</th><th>Status</th><th>Requested</th></tr></thead><tbody>' +
           (requestRows.length ? requestRows.map(function (r) {
             return "<tr><td><strong>" + esc(r.email) + "</strong></td><td>" + requestStatusLabel(r.status) + "</td><td>" + esc(fmtDateTime(r.created_at)) + "</td></tr>";
@@ -825,9 +822,6 @@ var ICONS = {
           '<a class="button secondary" href="#/admin/maintenance">Run expiry maintenance</a>' +
           '<a class="button secondary" href="#/admin/backups">' + icon("archive") + " Backups &amp; updates</a>" +
         "</div>" +
-        (attentionRows.length ? '<div class="banner warning" style="margin-top:18px">' + icon("clock") +
-          "<div><strong>" + attentionRows.length + " account(s) need attention</strong><br><span class=\"small\">" +
-          esc(attentionRows.map(function (a) { return a.username; }).join(", ")) + "</span></div></div>" : "") +
         "</aside></div></main>");
   }
 
