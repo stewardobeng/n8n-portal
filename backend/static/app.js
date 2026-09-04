@@ -238,6 +238,7 @@ var ICONS = {
         "</nav>" +
         '<div class="sidebar-footer">' + profileChip() + "</div>" +
       "</aside>" +
+      '<div class="side-backdrop" data-action="side-close"></div>' +
       '<div class="main-area">' +
         (state.impersonation && !isAdmin ? impersonationStrip() : "") +
         '<header class="topbar"><div class="actions">' +
@@ -2023,6 +2024,7 @@ var ICONS = {
       var action = act && act.dataset.action;
 
       if (action === "menu") { state.menuOpen = !state.menuOpen; render(); }
+      else if (action === "side-close") { if (state.menuOpen) { state.menuOpen = false; render(); } }
       else if (action === "close-modal" &&
                (event.target === act || !act.classList.contains("modal-backdrop"))) closeModal();
       else if (action === "signout") {

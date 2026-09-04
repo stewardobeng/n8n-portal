@@ -421,3 +421,73 @@ input[readonly] { background:var(--bg-muted, #eef2f4); cursor:not-allowed; }
 .sec-qr { display:flex; justify-content:center; margin:8px 0 12px; padding:12px; background:#fff; border:1px solid var(--line, #e7ecef); border-radius:12px; }
 .sec-qr img { image-rendering:pixelated; }
 .sec-secret { font-weight:600; letter-spacing:1px; background:var(--bg-muted, #eef2f4); padding:10px; border-radius:8px; margin:6px 0 16px; }
+
+/* ---- mobile responsiveness pass (2026-09-03) ----
+ * The shell previously only became hamburger-style at <=760px, so tablets and
+ * phones in landscape (768-1024px) kept a fixed sidebar with no way to collapse
+ * it. The sidebar now becomes an off-canvas drawer with a tap-outside backdrop
+ * on every screen under 1024px, and content/tables/cards get compact spacing
+ * on small screens. Shared shell => applies to customer + admin pages alike. */
+.side-backdrop { display: none; }
+
+@media (max-width: 1023px) {
+  .app-shell { display: block; }
+  .sidebar {
+    position: fixed; z-index: 80; top: 0; left: -272px; width: 258px;
+    height: 100dvh; overflow-y: auto;
+    transition: left .22s ease;
+  }
+  .sidebar.open { left: 0; box-shadow: 0 24px 70px rgba(7,24,42,.35); }
+  .sidebar.open + .side-backdrop {
+    display: block; position: fixed; z-index: 79; inset: 0;
+    background: rgba(7,24,42,.45);
+  }
+  .mobile-menu { display: grid; }
+  .topbar { padding: 0 16px; }
+  .topbar h2 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .topbar .actions { min-width: 0; flex: 1 1 auto; }
+  .page { padding: 26px 16px 64px; }
+  .imp-strip { padding: 10px 16px; }
+  .modal { padding: 22px; }
+}
+
+@media (max-width: 760px) {
+  html { -webkit-text-size-adjust: 100%; }
+  .auth-page { grid-template-columns: 1fr; }
+  .auth-aside { min-height: 210px; padding: 24px 22px; }
+  .auth-copy { padding: 26px 0 10px; }
+  .auth-copy h1 { font-size: 1.8rem; }
+  .auth-aside .brand { font-size: 1.1rem; }
+  .auth-main { padding: 30px 18px; }
+  .grid.cols-2, .grid.cols-3, .grid.cols-4, .plan-grid { grid-template-columns: 1fr; }
+  .form-grid { grid-template-columns: 1fr; }
+  .form-grid .full { grid-column: auto; }
+  .card { padding: 16px; }
+  .page-head { flex-direction: column; align-items: flex-start; }
+  .page-head .actions { width: 100%; }
+  .workspace-item { grid-template-columns: auto 1fr; gap: 12px; }
+  .workspace-item .status, .workspace-item .badge-stack { grid-column: 2; justify-self: start; }
+  .workspace-item .button, .workspace-item a.button { grid-column: 1 / -1; width: 100%; }
+  .hero-status { flex-wrap: wrap; }
+  .hero-status .button { width: 100%; margin-left: 0; }
+  .env-stats { grid-template-columns: repeat(2, 1fr); }
+  .server { grid-template-columns: auto minmax(0,1fr); }
+  .env-check > span:nth-child(4) { display: none; }
+  .progress-steps { grid-template-columns: 1fr; gap: 14px; }
+  .step { display: flex; align-items: center; gap: 10px; text-align: left; }
+  .step::before { display: none; }
+  .step-dot { margin: 0; }
+  .modal { max-height: calc(100dvh - 24px); }
+  .table-tools { flex-direction: column; align-items: stretch; }
+  .tabs { padding: 0 12px; }
+  .toast-stack { top: 12px; right: 12px; left: 12px; width: auto; }
+  .imp-strip { align-items: flex-start; flex-direction: column; }
+  .imp-strip .imp-exit { margin-left: 0; }
+}
+
+@media (max-width: 420px) {
+  .page { padding: 20px 12px 56px; }
+  .modal-backdrop { padding: 10px; }
+  .workspace-item { padding: 13px; gap: 10px; }
+  .button.small-btn { padding: 0 9px; }
+}
