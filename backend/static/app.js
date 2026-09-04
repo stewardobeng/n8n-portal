@@ -930,12 +930,17 @@ var ICONS = {
       passkeyList +
       "</section>";
     var heading = isAdmin ? "Admin security" : "Account security";
+    // "How it works" lives in the second row as a real card (2x2 grid) so the
+    // page shows four evenly-spaced cards that look identical to their
+    // siblings - not a full-width banner under the grid.
+    var howCard =
+      '<section class="card"><div class="card-head"><h2>How it works</h2></div>' +
+      '<p class="muted">After entering your password, you will be asked for a code. Add at least one factor so you cannot be locked out if you lose a device.</p>' +
+      '<p class="muted" style="margin-top:6px">A passkey is a first-factor sign-in: when set up, you can sign in without a password.</p></section>';
     return appLayout(isAdmin ? "admin" : "customer", "Security", "security",
       '<main class="page">' + pageHead(heading, "Add a second factor to your sign-in. You can use any combination; a code from one of them is required at login.") +
       '<div class="grid cols-2" style="margin-top:10px">' + totpCard + emailCard + "</div>" +
-      '<div class="grid cols-2" style="margin-top:10px">' + passkeyCard + "</div>" +
-      '<div class="banner" style="margin-top:18px">' + icon("shield") +
-      "<div><strong>How it works</strong><br><span class=\"small\">After entering your password, you will be asked for a code. Add at least one factor so you cannot be locked out if you lose a device. A passkey is a first-factor sign-in: when set up, you can sign in without a password.</span></div></div>" +
+      '<div class="grid cols-2" style="margin-top:10px">' + passkeyCard + howCard + "</div>" +
       "</main>");
   }
 
