@@ -103,6 +103,17 @@ def test_availability_api_gates_and_shape(tmp_path, monkeypatch):
     assert r.json()["available"] is True
     r = client.get("/api/v1/username-available?username=availslot",
                    headers=_h(ctoken))
+    # own reserved name is claimable while no workspace exists (2026-09-05 flow)
+    assert r.status_code == 200 and r.json()["available"] is True
+    assert "reserved workspace name" in r.json()["message"]
+    # once a workspace exists the account name is no longer claimable as an extra
+    db.create_instance(account_id=aid, stack_name="firstbox", environment_id=8,
+                       environment_name="test", port=33101,
+                       domain="firstbox.steprotech.com",
+                       basic_auth_user="avail@steprotech.com",
+                       basic_auth_password="Str0ngPass1", n8n_encryption_key="e" * 32)
+    r = client.get("/api/v1/username-available?username=availslot",
+                   headers=_h(ctoken))
     assert r.status_code == 200 and r.json()["available"] is False
 
 
@@ -123,9 +134,16 @@ def test_provision_validates_profile_before_quota(tmp_path, monkeypatch):
     r = client.post(f"/api/v1/accounts/{aid}/provision", headers=h,
                     json={"password": "Str0ngPass", "username": "BAD_NAME!"})
     assert r.status_code == 422
-    # taken username
+    # own reserved username is exempt while no workspace exists yet
+    # (2026-09-05 onboarding flow): passes validation, hits the quota/payment gate
     r = client.post(f"/api/v1/accounts/{aid}/provision", headers=h,
                     json={"password": "Str0ngPass", "username": "pvmain"})
+    assert r.status_code == 402
+    # another account's username is still globally taken
+    db.create_account("other@steprotech.com", "otherbox", "Other",
+                      first_name="O", last_name="T")
+    r = client.post(f"/api/v1/accounts/{aid}/provision", headers=h,
+                    json={"password": "Str0ngPass", "username": "otherbox"})
     assert r.status_code == 422
     # weak password
     r = client.post(f"/api/v1/accounts/{aid}/provision", headers=h,

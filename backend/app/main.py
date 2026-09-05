@@ -989,7 +989,9 @@ def provision(account_id: int, background: BackgroundTasks,
         workspace = {}
         if payload.username:
             try:
-                workspace["username"] = provisioner.validate_username(payload.username)
+                workspace["username"] = provisioner.validate_username(
+                    payload.username,
+                    allow_account_id=account["id"] if db.count_instances(account["id"]) == 0 else None)
             except provisioner.ProvisionError as e:
                 raise HTTPException(422, str(e))
         if payload.owner_email:
@@ -1035,12 +1037,19 @@ def account_status(account_id: int,
 
 
 @app.get("/api/v1/username-available", dependencies=[Depends(verify_client)])
-def check_username_available(username: str = ""):
+def check_username_available(username: str = "", account_id: int = Depends(verify_client)):
     """Live uniqueness check for a NEW workspace username (extra workspace
-    form). Returns immediately so the UI can alert the customer the moment the
-    username they typed is not available."""
+    form). A username reserved on the caller's own account row (registration
+    placeholder) is reported available so it can be claimed at provisioning
+    time (2026-09-05 onboarding flow)."""
     uname = (username or "").strip().lower()
     available, message = provisioner.username_available(uname)
+    if not available:
+        own = db.get_account(account_id)
+        if own and db.count_instances(account_id) == 0 \
+                and str(db._row_get(own, "username", "") or "").lower() == uname:
+            return {"available": True, "username": uname,
+                    "message": "That is your reserved workspace name. You can use it when you create your workspace."}
     return {"available": available, "username": uname, "message": message}
 
 

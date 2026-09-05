@@ -302,12 +302,29 @@ var ICONS = {
   function codePage() {
     var email = state.gateEmail || "";
     return authLayout(
-      '<div class="eyebrow">Email approved</div><h1>Enter your access code</h1>' +
-      '<p class="muted">We sent an access code to <strong>' + esc(email) + '</strong>. It expires after 72 hours. The code looks like <span class="mono">K7FQ-2MXP</span>.</p>' +
-      '<form data-form="code"><div class="field"><label for="access-token">Access code</label>' +
-      '<input id="access-token" name="token" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXX-XXXX" maxlength="9" style="text-transform:uppercase;letter-spacing:.12em;font-family:ui-monospace,monospace;font-weight:700">' +
-      '<span class="hint" id="token-hint"></span></div>' +
-      '<button class="button primary-wide" type="submit">Verify code</button></form>' +
+      '<div class="eyebrow">Email approved</div><h1>Create your account</h1>' +
+      '<p class="muted">We sent an access code to <strong>' + esc(email) + '</strong> (expires after 72 hours). Enter it below and set your portal password. Your workspace is created after you choose a plan.</p>' +
+      '<form data-form="code"><div class="form-grid">' +
+        '<div class="field full"><label>Email address</label><input value="' + esc(email) + '" readonly><span class="hint">This email is already verified for you.</span></div>' +
+        '<div class="field full"><label for="access-token">Access code</label>' +
+        '<input id="access-token" name="token" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXX-XXXX" maxlength="9" style="text-transform:uppercase;letter-spacing:.12em;font-family:ui-monospace,monospace;font-weight:700">' +
+        '<span class="hint" id="token-hint">Looks like K7FQ-2MXP. Dashes optional.</span></div>' +
+        '<div class="field"><label>First name</label><input name="first_name" required maxlength="50"></div>' +
+        '<div class="field"><label>Last name</label><input name="last_name" required maxlength="50"></div>' +
+        '<div class="field"><label>Password</label><div class="input-row">' +
+        '<input id="reg-password" name="password" type="password" required minlength="8" maxlength="128">' +
+        '<button type="button" class="input-action" data-action="toggle-password" data-target="reg-password" aria-label="Show password">' + icon("eye") + '</button></div></div>' +
+        '<div class="field"><label>Confirm password</label><div class="input-row">' +
+        '<input id="reg-confirm" type="password" required>' +
+        '<button type="button" class="input-action" data-action="toggle-password" data-target="reg-confirm" aria-label="Show password">' + icon("eye") + '</button></div></div>' +
+        '<div class="checks full" id="pw-checks">' +
+        '<span class="check" data-check="len" data-label="At least 8 characters">At least 8 characters</span>' +
+        '<span class="check" data-check="upper" data-label="One uppercase letter">One uppercase letter</span>' +
+        '<span class="check" data-check="lower" data-label="One lowercase letter">One lowercase letter</span>' +
+        '<span class="check" data-check="digit" data-label="One digit">One digit</span>' +
+        '<span class="check" data-check="match" data-label="Passwords match">Passwords match</span></div>' +
+      '</div>' +
+      '<button class="button primary-wide" type="submit">Create account &amp; continue</button></form>' +
       '<p class="small muted" style="text-align:center;margin-top:18px">Havent received it? <a href="#/entry">Use a different email</a> or contact support@steprotech.com</p>'
     );
   }
@@ -2945,14 +2962,35 @@ var ICONS = {
         }).catch(function (err) { showToast("Could not continue", err.message); });
       }
       else if (type === "code") {
-        var token = String(new FormData(form).get("token") || "").trim().toUpperCase();
+        var fd0 = new FormData(form);
+        var token = String(fd0.get("token") || "").trim().toUpperCase();
+        var first = String(fd0.get("first_name") || "").trim();
+        var last = String(fd0.get("last_name") || "").trim();
+        var pw2 = String(fd0.get("password") || "");
+        var conf = String((document.getElementById("reg-confirm") || {}).value || "");
         if (!token) { showToast("Enter the code", "Paste or type the code from your email."); return; }
-        api("/auth/verify-token", { method: "POST", body: { email: state.gateEmail, token: token } }).then(function () {
-          state.gateToken = token;
-          navigate("/register");
-        }).catch(function (err) { showToast("Code not accepted", err.message); });
+        if (!first || !last) { showToast("Missing details", "Enter your first and last name."); return; }
+        if (pw2 !== conf) { showToast("Passwords do not match", "Re-enter the same password in both fields."); return; }
+        if (!/^.*(?=.*[A-Z])(?=.*[a-z])(?=.*\d).{8,}$/.test(pw2)) { showToast("Password too weak", "Use 8+ characters with uppercase, lowercase, and a digit."); return; }
+        var btn0 = form.querySelector("button[type=submit]");
+        if (btn0) btn0.disabled = true;
+        api("/accounts", { method: "POST", body: {
+          email: state.gateEmail, username: null,
+          first_name: first, last_name: last,
+          password: pw2, access_token: token
+        } }).then(function (r) {
+          localStorage.setItem("portal_token", r.token);
+          state.provisioningPw = pw2;
+          localStorage.setItem("portal_pw", pw2);
+          state.session = { token: r.token, account: r.account, instances: [] };
+          showToast("Account created", "You are signed in. Choose a plan to create your workspace.");
+          navigate("/customer/billing");
+        }).catch(function (err) {
+          showToast("Could not create account", err.message);
+          if (btn0) btn0.disabled = false;
+        });
       }
-      else if (type === "register") {
+else if (type === "register") {
         var fd = new FormData(form);
         var first = String(fd.get("first_name") || "").trim();
         var last = String(fd.get("last_name") || "").trim();

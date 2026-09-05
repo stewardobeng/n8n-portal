@@ -69,7 +69,7 @@ def derive_username_from_email(email: str) -> str:
     return local[:60]
 
 
-def validate_username(username: str) -> str:
+def validate_username(username: str, *, allow_account_id: int | None = None) -> str:
     username = username.strip().lower()
     if not USERNAME_RE.match(username):
         raise ProvisionError(
@@ -77,7 +77,8 @@ def validate_username(username: str) -> str:
         )
     if username in RESERVED_USERNAMES:
         raise ProvisionError(f"Username '{username}' is reserved.")
-    if db.get_account_by_username(username):
+    owner = db.get_account_by_username(username)
+    if owner and not (allow_account_id and owner["id"] == allow_account_id):
         raise ProvisionError(f"Username '{username}' is already taken.")
     if db.get_instance_by_stack_name(username):
         raise ProvisionError(f"Username '{username}' is already provisioned.")
