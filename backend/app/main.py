@@ -136,6 +136,7 @@ class AccountOut(BaseModel):
     paid_from: Optional[int] = None
     account_state: str = "active"  # active | suspended | archived
     backup_enabled: bool = False   # customer may self-service backup (admin-set)
+    plan: str = "a"                 # subscribed tier: a = GHS 300, b = GHS 500 (Plus)
     created_at: int
     provisioned_at: Optional[int] = None
 
@@ -314,6 +315,10 @@ class AccessRequestOut(BaseModel):
     token_expires_at: Optional[int] = None
 
 
+class CheckoutIn(BaseModel):
+    plan: str = "a"  # a = GHS 300 tier, b = GHS 500 (Plus) tier
+
+
 class CheckoutOut(BaseModel):
     gateway: str
     url: str
@@ -348,6 +353,7 @@ def _account_to_out(a) -> AccountOut:
         paid_from=_row_get(a, "paid_from"),
         account_state=_row_get(a, "account_state", "active"),
         backup_enabled=bool(_row_get(a, "backup_enabled", 0)),
+        plan=_row_get(a, "plan", "a") or "a",
         created_at=a["created_at"], provisioned_at=a["provisioned_at"],
     )
 
@@ -1075,7 +1081,8 @@ def plans():
 
 @app.post("/api/v1/accounts/{account_id}/checkout", response_model=CheckoutOut)
 def create_checkout(account_id: int,
-                    authorization: str | None = Header(default=None, alias="Authorization")):
+                    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+                    payload: Optional[CheckoutIn] = None):
     """SECURITY FIX (2026-09-03): require owner-or-admin — previously any caller
     could start a checkout on an arbitrary account id."""
     authorize_owner_or_admin(authorization, account_id)
@@ -1091,8 +1098,14 @@ def create_checkout(account_id: int,
             403,
             "Payments are currently on hold. Contact support to arrange a subscription.",
         )
+    plan = (payload.plan if payload else "a")
+    if plan not in ("a", "b"):
+        raise HTTPException(400, "Unknown plan. Choose plan a or plan b.")
+    if plan == "b" and not settings.plan_b_active:
+        raise HTTPException(403, "That plan is not available yet.")
+    db.set_account_plan(account_id, plan)
     try:
-        return billing.create_checkout(account_id, account["email"])
+        return billing.create_checkout(account_id, account["email"], plan=plan)
     except Exception as e:
         raise HTTPException(502, str(e))
 

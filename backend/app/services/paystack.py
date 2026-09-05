@@ -90,20 +90,45 @@ def ensure_plan() -> str:
     return code
 
 
-def initialize_checkout(account_id: int, email: str) -> dict:
+def ensure_plan_b() -> str:
+    """Return the Plan B (GHS 500) annual plan code, creating it if needed."""
+    if settings.paystack_plan_code_b:
+        return settings.paystack_plan_code_b
+    try:
+        plans = _req("GET", "/plan?perPage=100")
+        for p in plans.get("data", []):
+            if (p.get("name") == settings.plan_b_name
+                    and p.get("interval") == "annually"
+                    and p.get("currency") == settings.plan_currency):
+                return p["plan_code"]
+    except PaystackError:
+        pass
+    created = _req("POST", "/plan", {
+        "name": settings.plan_b_name,
+        "amount": settings.plan_b_amount_minor,
+        "interval": "annually",
+        "currency": settings.plan_currency,
+    })
+    code = created["data"]["plan_code"]
+    log.info("Created Paystack annual plan %s (%s)", code, settings.plan_b_name)
+    return code
+
+
+def initialize_checkout(account_id: int, email: str, plan: str = "a") -> dict:
     """Create a Paystack transaction for the annual plan. Returns
     {authorization_url, reference, access_code} for the client redirect."""
-    plan_code = ensure_plan()
+    is_b = plan == "b"
+    plan_code = ensure_plan_b() if is_b else ensure_plan()
     payload = {
         "email": email,
-        "amount": settings.plan_amount_minor,
+        "amount": settings.plan_b_amount_minor if is_b else settings.plan_amount_minor,
         "currency": settings.plan_currency,
         "plan": plan_code,
         # `app` tags this transaction so the shared Paystack webhook router can
         # route it to the correct website (Steward 2026-09-03: one account, many
         # sites -> a single router fans events out by this tag).
         "metadata": {"account_id": str(account_id), "gateway": "paystack",
-                     "app": "n8n-portal"},
+                     "app": "n8n-portal", "plan": plan},
         "callback_url": settings.paystack_callback_url,
     }
     resp = _req("POST", "/transaction/initialize", payload)
@@ -171,6 +196,19 @@ def handle_event(event: dict) -> dict:
     return {"status": "ignored", "event": event_type}
 
 
+def _resolve_plan(data: dict) -> str:
+    """Which plan did this charge pay for? Plan B wins on its plan code or its
+    amount (only when Plan B is active); otherwise Plan A."""
+    plan_obj = data.get("plan") or {}
+    code = plan_obj.get("plan_code") or ""
+    if code and settings.paystack_plan_code_b and code == settings.paystack_plan_code_b:
+        return "b"
+    amount = data.get("amount")
+    if amount and settings.plan_b_active and int(amount) == settings.plan_b_amount_minor:
+        return "b"
+    return "a"
+
+
 def _account_from_data(data: dict):
     meta = data.get("metadata") or {}
     if meta.get("account_id"):
@@ -190,6 +228,12 @@ def _on_charge_success(data: dict) -> dict:
     account = _account_from_data(data)
     if not account:
         raise PaystackError("charge.success for unknown account.")
+    plan = _resolve_plan(data)
+    if plan == "b":
+        try:
+            db.set_account_plan(account["id"], "b")
+        except Exception as e:  # pragma: no cover - best-effort
+            log.warning("Could not store plan b for account %s: %s", account["id"], e)
     if billing._row_get(account, "account_state", "active") != "active":
         # Admin suspension/archive outranks payment: acknowledge the money but
         # do NOT reactivate or restart the workspace.

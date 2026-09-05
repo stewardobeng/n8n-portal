@@ -70,11 +70,11 @@ def is_live() -> bool:
 
 # ---------- checkout ----------
 
-def create_checkout(account_id: int, email: str) -> dict:
+def create_checkout(account_id: int, email: str, plan: str = "a") -> dict:
     g = gateway()
     if g == "paystack":
         from . import paystack
-        info = paystack.initialize_checkout(account_id, email)
+        info = paystack.initialize_checkout(account_id, email, plan=plan)
         return {"gateway": "paystack", "url": info["authorization_url"],
                 "reference": info["reference"]}
     if g == "stripe":

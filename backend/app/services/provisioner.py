@@ -235,8 +235,13 @@ def build_stack_env(username: str, port: int, encryption_key: str,
     ]
 
 
-def load_compose_template() -> str:
-    with open(settings.compose_template_path, "r") as f:
+def load_compose_template(plan: str = "a") -> str:
+    """Return the compose for the account's plan tier:
+    a = canonical template (GHS 300), b = Plus template (GHS 500,
+    chibz/bigcroc owner tier: 0.50 CPU / 1 GiB / heap 768)."""
+    path = (settings.plan_b_compose_template_path if plan == "b"
+            else settings.compose_template_path)
+    with open(path, "r") as f:
         return f.read()
 
 
@@ -480,6 +485,10 @@ def provision_account(account_id: int, password: str | None = None,
     account = db.get_account(account_id)
     if not account:
         raise ProvisionError("Account not found.")
+    try:
+        plan_tier = "b" if (account["plan"] or "a") == "b" else "a"
+    except (KeyError, IndexError, TypeError):
+        plan_tier = "a"
     # Retry safety: clear stale instance rows from earlier failed attempts FIRST,
     # so a failed/orphaned instance (stack + volume already rolled back) does not
     # count against the quota and block re-provisioning. Without this, a quota=1
@@ -571,7 +580,7 @@ def provision_account(account_id: int, password: str | None = None,
         stack = pc.create_standalone_stack_string(
             endpoint_id=env_id,
             name=username,
-            compose_content=load_compose_template(),
+            compose_content=load_compose_template(plan_tier),
             env_vars=env_vars,
         )
         stack_id = stack.get("Id")
