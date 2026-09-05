@@ -77,6 +77,10 @@ class Settings:
     plan_b_name: str = os.getenv("PLAN_B_NAME", "n8n Workspace Plus")
     plan_b_amount_minor: int = int(os.getenv("PLAN_B_AMOUNT_MINOR", "50000"))  # GHS 500 / year
     plan_b_active: bool = os.getenv("PLAN_B_ACTIVE", "false").lower() == "true"
+    # Plan B stack = chibz/bigcroc owner tier (0.50 CPU / 1 GiB / heap 768)
+    plan_b_compose_template_path: str = os.getenv(
+        "PLAN_B_COMPOSE_TEMPLATE_PATH", "/app/templates/n8n-stack-compose-plus.yml"
+    )
 
     # One account per user by default; admin can raise the instance quota
     default_quota: int = int(os.getenv("DEFAULT_QUOTA", "1"))
@@ -84,6 +88,7 @@ class Settings:
     # Paystack
     paystack_secret_key: str = os.getenv("PAYSTACK_SECRET_KEY", "")
     paystack_plan_code: str = os.getenv("PAYSTACK_PLAN_CODE", "")  # auto-created if empty
+    paystack_plan_code_b: str = os.getenv("PAYSTACK_PLAN_CODE_B", "")  # Plan B (500), auto-created if empty
     paystack_callback_url: str = os.getenv(
         "PAYSTACK_CALLBACK_URL", "https://portal.steprotech.com/?status=success"
     )

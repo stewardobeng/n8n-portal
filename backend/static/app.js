@@ -493,13 +493,15 @@ var ICONS = {
         '<button class="button danger" data-action="pay-now">Renew now</button></div>';
     }
     // subscription not active yet -> subscribe (unless payments are on hold)
-    var plan = state.plans.find(function (p) { return p.active; }) || state.plans[0];
+        var planA = state.plans.find(function (x) { return x.active && x.amount_minor !== 50000; });
+    var planB = state.plans.find(function (x) { return x.active && x.amount_minor === 50000; });
+    var primary = planA || planB || state.plans[0];
     if (!openPay) {
-      return '<div class="hero-status info"><span class="big-icon">' + icon("billing") + '</span><div><h2>Welcome to the portal</h2><p>Payments are temporarily on hold while SteProTECH sets up new users. Your workspace can be activated without payment - contact support.</p></div>' +
-        '<a class="button secondary" href="mailto:support@steprotech.com">Contact support</a></div>';
+      return '<div class="hero-status info"><span class="big-icon">' + icon("billing") + '</span><div><h2>Welcome to the portal</h2><p>Payments are temporarily on hold while SteProTECH sets up new users. Your workspace can be activated without payment - contact support.</p></div>' + '<a class="button secondary" href="mailto:support@steprotech.com">Contact support</a></div>';
     }
-    return '<div class="hero-status info"><span class="big-icon">' + icon("billing") + '</span><div><h2>Choose a plan to get started</h2><p>Subscribe to the annual plan and your private workspace is created after payment.</p></div>' +
-      '<button class="button" data-action="pay-now">' + (plan ? "Subscribe " + fmtMinor(plan.amount_minor, plan.currency) + "/yr" : "Subscribe") + "</button></div>";
+    var btns = '<button class="button" data-action="pay-now" data-plan="' + (primary && primary.amount_minor === 50000 ? "b" : "a") + '">' + (primary ? "Subscribe " + fmtMinor(primary.amount_minor, primary.currency) + "/yr" : "Subscribe") + "</button>";
+    if (planA && planB) { btns += ' <button class="button secondary" data-action="pay-now" data-plan="b">Subscribe Plus ' + fmtMinor(planB.amount_minor, planB.currency) + '/yr</button>'; }
+    return '<div class="hero-status info"><span class="big-icon">' + icon("billing") + '</span><div><h2>Choose a plan to get started</h2><p>Subscribe to the annual plan and your private workspace is created after payment.</p></div><div class="actions" style="margin-top:14px">' + btns + "</div></div>";
   }
 
   function subBadgeFor(stateKey) {
@@ -697,9 +699,9 @@ var ICONS = {
         } else if (!openPay) {
           cta = '<button class="button' + (due ? " warning" : "") + '" disabled title="New payments are paused by SteProTECH">Payments on hold</button>';
         } else if (due) {
-          cta = '<button class="button warning" data-action="pay-now">Renew subscription</button>';
+          cta = '<button class="button warning" data-action="pay-now" data-plan="' + (p.amount_minor === 50000 ? "b" : "a") + '">Renew subscription</button>';
         } else {
-          cta = '<button class="button" data-action="pay-now">Subscribe</button>';
+          cta = '<button class="button" data-action="pay-now" data-plan="' + (p.amount_minor === 50000 ? "b" : "a") + '">Subscribe</button>';
         }
         return '<article class="plan-card featured"><div class="eyebrow">Available now</div><h2>' + esc(p.name) + "</h2>" +
           '<div class="plan-price">' + esc(fmtMinor(p.amount_minor, p.currency)) + ' <span>per year</span></div>' +
@@ -1857,6 +1859,8 @@ var ICONS = {
     }, 10000);
   }
 
+  var chosenPlan = "a";  // plan picked at subscribe time: a (300) or b (500 Plus)
+
   /* ================= actions / forms ================= */
 
   async function doPayment() {
@@ -1864,7 +1868,7 @@ var ICONS = {
     if (!acc) { navigate("/signin"); return; }
     var id = acc.id;
     try {
-      var data = await api("/accounts/" + id + "/checkout", { method: "POST" });
+      var data = await api("/accounts/" + id + "/checkout", { method: "POST", body: { plan: chosenPlan || "a" } });
       if (data.gateway === "mock") {
         // E2E mock mode: simulate the charge.success webhook, exactly like the
         // backend E2E scripts do; then provision with the stored password.
@@ -2259,7 +2263,7 @@ var ICONS = {
         }).catch(function (err) { showToast("Could not send", err.message); });
       }
       else if (action === "payment-continue") { doPayment(); }
-      else if (action === "pay-now") paymentModal();
+      else if (action === "pay-now") { chosenPlan = (act.dataset && act.dataset.plan) || "a"; paymentModal(); }
       else if (action === "provision-now") { autoProvision(); }
       else if (action === "backup-run") {
         event.preventDefault();

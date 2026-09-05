@@ -117,6 +117,10 @@ def init_db(db_path: str | None = None) -> None:
         for c in ("first_name", "last_name", "password_hash"):
             if c not in cols:
                 cur.execute(f'ALTER TABLE accounts ADD COLUMN {c} TEXT DEFAULT ""')
+        # Migration: Plan B (GHS 500) — subscribed tier: a = 300 canonical,
+        # b = 500 Plus (chibz/bigcroc owner-tier compose). Default a.
+        if "plan" not in cols:
+            cur.execute("ALTER TABLE accounts ADD COLUMN plan TEXT DEFAULT 'a'")
         # Migration: instances gained basic_auth_password (reset needs the current value)
         icols = [r[1] for r in cur.execute("PRAGMA table_info(instances)")]
         if "basic_auth_password" not in icols:
@@ -424,6 +428,15 @@ def count_instances(account_id: int) -> int:
 
 
 # ---- billing (stripe) ----
+
+def set_account_plan(account_id: int, plan: str = "a") -> None:
+    conn = get_conn()
+    try:
+        conn.execute("UPDATE accounts SET plan=? WHERE id=?", (plan, account_id))
+        conn.commit()
+    finally:
+        conn.close()
+
 
 def set_subscription(account_id: int, stripe_customer_id: str = "",
                      subscription_id: str = "", status: str = "none",
