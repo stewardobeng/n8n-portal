@@ -32,6 +32,7 @@
     security2fa: null,     // 2FA setup state (GET /me/security or /admin/security)
     adminInstances: [],    // admin: all instances (GET /admin/instances) for backup/update triggers
     adminInstancesLoaded: false,
+    adminAccountsLoaded: false,
     impersonation: null,     // admin login-as: {id, label} while viewing a customer
     impTtlMinutes: 60,       // lifetime of the impersonation session (server-set)
     n8nLatestTag: "",        // latest n8n release tag seen (admin update watch)
@@ -1067,6 +1068,14 @@ var ICONS = {
   function adminAccountPage(id) {
     var a = (state.adminAccounts || []).find(function (x) { return x.id === Number(id); });
     var detail = state.accountCache[id];
+    // Fresh page load: the accounts list is still being fetched. Show a loading
+    // state, never the error screen (a blank list on boot is NOT "removed" —
+    // it produced a full second of "Account not found" on every refresh).
+    if (!a && !state.adminAccountsLoaded) {
+      return appLayout("admin", "Account details", "accounts",
+        '<main class="page"><div class="center-state"><div class="spinner"></div>' +
+        '<p class="muted">Loading account...</p></div></main>');
+    }
     if (!a) return appLayout("admin", "Account details", "accounts", "<main class=\"page\">" + pageHead("Account not found", "This account may have been removed.") + "</main>");
     var instances = (detail && detail.instances) || [];
     var sub = a.subscription_status || "none";
@@ -1416,6 +1425,7 @@ var ICONS = {
     try {
       var accts = await api("/admin/accounts");
       state.adminAccounts = accts || [];
+      state.adminAccountsLoaded = true;
       var arch = await api("/admin/accounts?include_archived=1");
       state.adminArchived = (arch || []).filter(function (a) { return a.account_state === "archived"; });
       var reqs = await api("/admin/access-requests");
@@ -2251,7 +2261,7 @@ var ICONS = {
       else if (action === "signout-route") {
         if (currentKind() === "admin") {
           localStorage.removeItem("admin_token"); state.adminAuthed = false;
-          state.adminAccounts = []; state.adminArchived = []; state.requests = []; state.accountCache = {}; state.adminInstances = []; state.adminInstancesLoaded = false;
+          state.adminAccounts = []; state.adminAccountsLoaded = false; state.adminArchived = []; state.requests = []; state.accountCache = {}; state.adminInstances = []; state.adminInstancesLoaded = false;
           showToast("Signed out", "Admin session ended."); navigate("/admin/signin");
         } else if (state.impersonation) {
           exitImpersonation();
