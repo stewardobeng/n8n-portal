@@ -262,8 +262,8 @@ var ICONS = {
       "</div></div>";
   }
 
-  function pageHead(title, description, actions) {
-    return '<div class="page-head"><div><h1>' + esc(title) + '</h1><p class="muted">' + esc(description || "") + "</p></div>" + (actions || "") + "</div>";
+  function pageHead(title, description, actions, headCls) {
+    return '<div class="page-head' + (headCls ? " " + headCls : "") + '"><div><h1>' + esc(title) + '</h1><p class="muted">' + esc(description || "") + "</p></div>" + (actions || "") + "</div>";
   }
 
   /* ================= customer pages ================= */
@@ -1104,7 +1104,7 @@ var ICONS = {
     var quota = a.quota || 1;
 
     return appLayout("admin", "Account details", "accounts",
-      '<main class="page">' + pageHead(a.display_name || cap(a.username), esc(a.email) + " · " + esc(a.username), '<div class="actions">' +
+      '<main class="page">' + pageHead(a.display_name || cap(a.username), esc(a.email) + " · " + esc(a.username), '<div class="actions grid-actions">' +
         lifecycleButtons +
         (acctState === "active" ? '<button class="button" data-action="admin-impersonate" data-id="' + a.id + '">' + icon("eye") + " Login as user</button> " +
         '<button class="button secondary" data-action="admin-mark-paid" data-id="' + a.id + '">' + icon("check") + " Mark paid</button>" +
@@ -1114,7 +1114,7 @@ var ICONS = {
         '<button class="button secondary" data-action="admin-backup-toggle" data-id="' + a.id + '" data-on="' + (a.backup_enabled ? "1" : "0") + '">' + icon("archive") + (a.backup_enabled ? " Revoke backup access" : " Allow backup") + "</button>" +
         (sub === "locked" ? '<button class="button" data-action="admin-unlock" data-id="' + a.id + '">' + icon("check") + " Switch workspace on</button>"
                           : '<button class="button secondary" data-action="admin-lock" data-id="' + a.id + '">' + icon("warning") + " Switch workspace off</button>") : "") +
-        "</div>") +
+        "</div>", "wrap") +
       '<div class="grid cols-3">' +
         '<section class="card"><div class="card-head"><h2>Customer profile</h2><span class="badge-stack">' + subBadge + stateBadge + "</span></div>" +
           '<dl class="info-list"><div class="info-row"><dt>Username</dt><dd>' + esc(a.username) + "</dd></div>" +
