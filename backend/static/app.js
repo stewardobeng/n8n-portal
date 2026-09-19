@@ -1148,9 +1148,11 @@ var ICONS = {
           return '<article class="workspace-item"><span class="workspace-logo">' + icon("workspace") + "</span>" +
             "<div><h3>" + esc(titleCase(i.stack_name)) + " workspace" + attachedTag + updBadge(i) + updateChip(i) + runnerBadge(i) + "</h3><p>" + esc(i.domain) + "<br>Env " + esc(i.environment_name || i.environment_id) + " · Port " + esc(i.port) + (i.managed === 0 ? " · password unchanged" : "") + "</p></div>" +
             badge + '<button class="button secondary small-btn" data-action="workspace-actions" data-id="' + i.id + '" data-name="' + esc(i.stack_name) + '">Actions</button>' +
+              '<div class="wi-actions">' +
               '<button class="button secondary small-btn" data-action="admin-backup" data-id="' + i.id + '">' + icon("archive") + " Back up</button>" +
               '<button class="button secondary small-btn" data-action="admin-update-image" data-id="' + i.id + '"' + updDisabled(i) + '>' + icon("refresh") + (state.instUpdating[i.id] ? " Updating..." : " Update n8n") + "</button>" +
-              '<button class="button secondary small-btn" data-action="runner-toggle" data-id="' + i.id + '"' + runDisabled(i) + '>' + icon(i.python_runner ? "close" : "spark") + (state.runnerBusy[i.id] ? (i.python_runner ? " Removing..." : " Attaching...") : (i.python_runner ? " Remove Python" : " Attach Python")) + "</button>" + '</article>';
+              '<button class="button secondary small-btn" data-action="runner-toggle" data-id="' + i.id + '"' + runDisabled(i) + '>' + icon(i.python_runner ? "close" : "spark") + (state.runnerBusy[i.id] ? (i.python_runner ? " Removing..." : " Attaching...") : (i.python_runner ? " Remove Python" : " Attach Python")) + "</button>" +
+              "</div></article>";
         }).join("") : '<div class="empty-state" style="min-height:200px"><div><h3>No workspaces yet</h3><p class="muted">The customer has not provisioned a workspace.</p></div></div>') +
         "</div></section>" +
         '<section class="card"><h2>Subscription timeline</h2><div class="timeline">' +

@@ -219,6 +219,11 @@ h3 { font-size: 1rem; line-height: 1.3; }
 .workspace-logo .icon-svg { width: 20px; height: 20px; }
 .workspace-item h3 { margin: 0 0 3px; }
 .workspace-item p { margin: 0; color: var(--slate-500); font-size: .82rem; }
+/* Workspace-card action toolbar (admin account page): the three operations
+ * form their own full-width row under the info, right-aligned, natural button
+ * widths. Grouping also keeps the raw buttons OUT of the card's 4-column
+ * grid (they used to auto-place and stretch to column widths). */
+.wi-actions { display: flex; align-items: center; gap: 8px; grid-column: 1 / -1; justify-content: flex-end; }
 .empty-state { display: grid; place-items: center; min-height: 390px; padding: 40px; text-align: center; }
 .empty-art { display: grid; place-items: center; width: 110px; height: 90px; margin-bottom: 22px; border-radius: 30px; color: var(--teal-700); background: linear-gradient(145deg,var(--teal-100),var(--blue-100)); }
 .empty-art .icon-svg { width: 40px; height: 40px; }
@@ -349,6 +354,7 @@ tbody tr:hover { background: #fbfdfd; }
   .span-2 { grid-column: span 1; }
   .workspace-item { grid-template-columns:auto minmax(0,1fr) auto; }
   .workspace-item .button { grid-column:2 / -1; justify-self:start; }
+  .wi-actions { justify-content: flex-start; }
   /* /admin/overview bottom row: cards keep their own height when the row
    * collapses, so the Quick actions card never shows stretch whitespace
    * below its buttons (paddings stay symmetric top/bottom). */
