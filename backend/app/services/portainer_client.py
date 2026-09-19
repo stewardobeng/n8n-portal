@@ -113,6 +113,12 @@ class PortainerClient:
         # still PUT + pull. Only raise when the image line is not present at all.
         new_content, n_subs = re.subn(r"(image:\s*n8nio/n8n:)[^\s]+",
                                       r"\g<1>" + tag, content)
+        if n_subs:
+            # Keep an attached Python-runner sidecar version-locked to n8n
+            # (n8n requires the runners image tag to match). Absent line = no
+            # sidecar on this stack; the substitution simply does not fire.
+            from .python_runner import sync_runner_image
+            new_content = sync_runner_image(new_content)
         if n_subs == 0:
             raise RuntimeError(f"Image '{image}' not found in stack {stack_id} compose.")
         detail = self.get_stack(stack_id)
@@ -207,6 +213,22 @@ class PortainerClient:
         }
         self._req(
             "PUT", f"/stacks/{stack_id}?endpointId={endpoint_id}", json=payload
+        )
+
+    def update_stack_file(self, stack_id: int, endpoint_id: int,
+                          stack_file_content: str, env_vars: list[dict],
+                          prune: bool = False, timeout: float = 600.0) -> None:
+        """PUT a fully-composed stack file + env (the python-runner attach/
+        detach path). Long timeout: first deploy of n8nio/runners pulls the
+        image over the internet and can take minutes."""
+        payload = {
+            "env": env_vars,
+            "prune": prune,
+            "stackFileContent": stack_file_content,
+        }
+        self._req(
+            "PUT", f"/stacks/{stack_id}?endpointId={endpoint_id}",
+            json=payload, timeout=timeout,
         )
 
     def delete_stack(self, stack_id: int, endpoint_id: int) -> None:

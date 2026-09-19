@@ -23,7 +23,7 @@ from pydantic import BaseModel, EmailStr, Field
 from .config import settings
 from . import db
 from .services import provisioner, billing, access_gate, admin_ops, backup_ops
-from .services import account_security, passkeys, n8n_releases
+from .services import account_security, passkeys, n8n_releases, python_runner
 from .services import security_controls as sc
 from .services.admin_ops import AdminOpsError
 from .services.portainer_client import PortainerClient
@@ -206,6 +206,7 @@ class InstanceStatusOut(BaseModel):
     locked: int = 0
     managed: int = 1
     image: str = ""
+    python_runner: int = 0
     error: Optional[str]
     created_at: int
 
@@ -366,6 +367,7 @@ def _instance_to_out(i) -> InstanceStatusOut:
         status=i["status"], locked=_row_get(i, "locked", 0), error=i["error"],
         managed=_row_get(i, "managed", 1),
         image=_row_get(i, "image", ""),
+        python_runner=_row_get(i, "python_runner", 0),
         created_at=i["created_at"],
     )
 
@@ -1895,6 +1897,56 @@ def admin_current_image(instance_id: int):
     if not inst:
         raise HTTPException(404, "Instance not found.")
     return {"image": backup_ops.current_image(inst)}
+
+
+class RunnerAttachIn(BaseModel):
+    # Reserved for future policy options (stdlib scope, third-party packages);
+    # attach currently takes no input and always ships the safe default policy.
+    pass
+
+
+def _runner_instance_or_404(instance_id: int):
+    inst = db.get_instance(instance_id)
+    if not inst:
+        raise HTTPException(404, "Instance not found.")
+    return inst
+
+
+@app.post("/api/v1/admin/instances/{instance_id}/python-runner/attach",
+          dependencies=[Depends(verify_admin)])
+def admin_attach_python_runner(instance_id: int, payload: RunnerAttachIn = None):
+    """Attach the official n8n Python/JS task-runner sidecar to ONE workspace
+    (admin opt-in, one at a time). Recreates the stack (n8n restarts against
+    the same volume; workflows and credentials are preserved) and starts the
+    runners container alongside. Rollback = the detach endpoint."""
+    inst = _runner_instance_or_404(instance_id)
+    try:
+        result = python_runner.attach_runner(inst)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except Exception as e:
+        log.error("runner attach %s: %s", instance_id, e)
+        raise HTTPException(502, f"Python runner attach failed: {e}")
+    return {"ok": True, "instance_id": instance_id,
+            "runners_tag": result.get("tag"),
+            "runner_container_seen": result.get("runner_container_seen", False)}
+
+
+@app.post("/api/v1/admin/instances/{instance_id}/python-runner/detach",
+          dependencies=[Depends(verify_admin)])
+def admin_detach_python_runner(instance_id: int):
+    """Remove the task-runner sidecar from a workspace (the rollback path for
+    attach). The stack is recreated without the runners service; the DB flag
+    flips off. Data is untouched."""
+    inst = _runner_instance_or_404(instance_id)
+    try:
+        python_runner.detach_runner(inst)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except Exception as e:
+        log.error("runner detach %s: %s", instance_id, e)
+        raise HTTPException(502, f"Python runner detach failed: {e}")
+    return {"ok": True, "instance_id": instance_id}
 
 
 @app.get("/api/v1/admin/instances", dependencies=[Depends(verify_admin)])

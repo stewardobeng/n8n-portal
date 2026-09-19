@@ -167,6 +167,13 @@ def init_db(db_path: str | None = None) -> None:
         ic2 = [r[1] for r in cur.execute("PRAGMA table_info(instances)")]
         if "image" not in ic2:
             cur.execute('ALTER TABLE instances ADD COLUMN image TEXT DEFAULT "n8nio/n8n:latest"')
+        # Migration: instances track an attached Python task-runner sidecar
+        # (admin one-click feature, 0.1.63): 0 = none, 1 = attached. The flag is
+        # the UI state + the detach authority; the stack file itself is the truth
+        # for what actually runs.
+        ic3 = [r[1] for r in cur.execute("PRAGMA table_info(instances)")]
+        if "python_runner" not in ic3:
+            cur.execute("ALTER TABLE instances ADD COLUMN python_runner INTEGER NOT NULL DEFAULT 0")
         # Migration: 2FA columns (authenticator TOTP + email OTP) + reset/otp tables
         acols4 = [r[1] for r in cur.execute("PRAGMA table_info(accounts)")]
         for c, ddl in (

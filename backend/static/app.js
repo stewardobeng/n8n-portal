@@ -36,6 +36,7 @@
     impTtlMinutes: 60,       // lifetime of the impersonation session (server-set)
     n8nLatestTag: "",        // latest n8n release tag seen (admin update watch)
     instUpdating: {},        // instanceId -> target tag while an n8n update runs
+    runnerBusy: {},          // instanceId -> "attach"|"detach" while a python-runner change runs
     busyModal: false         // true while a long-running action modal is open (render must not wipe it)
   };
 
@@ -1136,10 +1137,11 @@ var ICONS = {
             : i.status === "failed" ? statusBadge("failed", "Setup failed") : statusBadge("neutral", cap(i.status));
           var attachedTag = i.managed === 0 ? ' <span class=\"status info\">Attached</span>' : "";
           return '<article class="workspace-item"><span class="workspace-logo">' + icon("workspace") + "</span>" +
-            "<div><h3>" + esc(titleCase(i.stack_name)) + " workspace" + attachedTag + updBadge(i) + updateChip(i) + "</h3><p>" + esc(i.domain) + "<br>Env " + esc(i.environment_name || i.environment_id) + " · Port " + esc(i.port) + (i.managed === 0 ? " · password unchanged" : "") + "</p></div>" +
+            "<div><h3>" + esc(titleCase(i.stack_name)) + " workspace" + attachedTag + updBadge(i) + updateChip(i) + runnerBadge(i) + "</h3><p>" + esc(i.domain) + "<br>Env " + esc(i.environment_name || i.environment_id) + " · Port " + esc(i.port) + (i.managed === 0 ? " · password unchanged" : "") + "</p></div>" +
             badge + '<button class="button secondary small-btn" data-action="workspace-actions" data-id="' + i.id + '" data-name="' + esc(i.stack_name) + '">Actions</button>' +
               '<button class="button secondary small-btn" data-action="admin-backup" data-id="' + i.id + '">' + icon("archive") + " Back up</button>" +
-              '<button class="button secondary small-btn" data-action="admin-update-image" data-id="' + i.id + '"' + updDisabled(i) + '>' + icon("refresh") + (state.instUpdating[i.id] ? " Updating..." : " Update n8n") + "</button>" + '</article>';
+              '<button class="button secondary small-btn" data-action="admin-update-image" data-id="' + i.id + '"' + updDisabled(i) + '>' + icon("refresh") + (state.instUpdating[i.id] ? " Updating..." : " Update n8n") + "</button>" +
+              '<button class="button secondary small-btn" data-action="runner-toggle" data-id="' + i.id + '"' + runDisabled(i) + '>' + icon(i.python_runner ? "close" : "spark") + (state.runnerBusy[i.id] ? (i.python_runner ? " Removing..." : " Attaching...") : (i.python_runner ? " Remove Python" : " Attach Python")) + "</button>" + '</article>';
         }).join("") : '<div class="empty-state" style="min-height:200px"><div><h3>No workspaces yet</h3><p class="muted">The customer has not provisioned a workspace.</p></div></div>') +
         "</div></section>" +
         '<section class="card"><h2>Subscription timeline</h2><div class="timeline">' +
@@ -1669,6 +1671,7 @@ var ICONS = {
         : '<button class="button secondary" data-action="reset-password" data-id="' + inst.id + '">' + icon("lock") + " Reset workspace password</button>") +
       '<button class="button secondary" data-action="admin-backup" data-id="' + inst.id + '">' + icon("archive") + " Back up</button>" +
       (inst ? '<button class="button secondary" data-action="admin-update-image" data-id="' + inst.id + '"' + updDisabled(inst) + '>' + icon("refresh") + (state.instUpdating[inst.id] ? " Updating..." : " Update n8n") + "</button>" : "") +
+      (inst ? '<button class="button secondary" data-action="runner-toggle" data-id="' + inst.id + '"' + runDisabled(inst) + '>' + icon(inst.python_runner ? "close" : "spark") + (inst.python_runner ? " Remove Python runner" : " Attach Python runner") + "</button>" : "") +
       "</div>");
   }
 
@@ -2071,6 +2074,65 @@ var ICONS = {
   }
   function updDisabled(inst) {
     return (inst && state.instUpdating[inst.id]) ? " disabled" : "";
+  }
+  function runDisabled(inst) {
+    // Two stack mutations must never race: block runner changes while an n8n
+    // image update runs on the same workspace, and vice versa.
+    return (inst && (state.runnerBusy[inst.id] || state.instUpdating[inst.id])) ? " disabled" : "";
+  }
+  function runnerBadge(inst) {
+    return (inst && inst.python_runner && !state.runnerBusy[inst.id]) ? ' <span class="status info">Python attached</span>' : "";
+  }
+  function confirmAttachRunner(instanceId) {
+    var inst = (state.adminInstances || []).find(function (x) { return x.id === Number(instanceId); }) ||
+               findInstanceById(instanceId);
+    var wname = inst ? titleCase(inst.stack_name) : "this workspace";
+    showModal(modalHeader("Attach Python runner?") +
+      "<p>This adds n8n\u2019s official Python helper container to " + esc(wname) + " only. No other workspace is affected.</p>" +
+      '<div class="consequence"><strong>This action will:</strong><ul>' +
+      "<li>Install the runner beside this workspace (official n8n image, matched to its version)</li>" +
+      "<li>Restart the workspace; it is back in a few minutes and all workflows and data are preserved</li>" +
+      "<li>Make Python available in the Code node, with the standard library included</li>" +
+      "<li>Keep third-party Python packages (pandas, numpy and similar) unavailable for now</li>" +
+      "<li>Stay removable at any time from this same menu</li></ul></div>" +
+      '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+      '<button class="button" data-confirm-runner-attach="' + instanceId + '">Attach Python</button></div>');
+  }
+  function confirmDetachRunner(instanceId) {
+    var inst = (state.adminInstances || []).find(function (x) { return x.id === Number(instanceId); }) ||
+               findInstanceById(instanceId);
+    var wname = inst ? titleCase(inst.stack_name) : "this workspace";
+    showModal(modalHeader("Remove Python runner?") +
+      "<p>The Python helper container is removed from " + esc(wname) + ".</p>" +
+      '<div class="consequence" style="background:var(--amber-100)"><strong>This action will:</strong><ul>' +
+      "<li>Restart the workspace; data is preserved</li>" +
+      "<li>Stop Python Code nodes from running; workflows that use them will fail until re-attached</li>" +
+      "<li>Leave JavaScript Code nodes working exactly as before</li></ul></div>" +
+      '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+      '<button class="button danger" data-confirm-runner-detach="' + instanceId + '">Remove Python</button></div>');
+  }
+  function runRunnerToggle(instanceId, mode) {
+    var attaching = mode === "attach";
+    state.runnerBusy[instanceId] = attaching ? "attach" : "detach";
+    state.busyModal = true;
+    render();
+    showModal(modalHeader(attaching ? "Attaching Python runner" : "Removing Python runner") + '<div class="spinner"></div>' +
+      '<p class="muted">Recreating the workspace with' + (attaching ? "" : "out") + " the Python helper container. This can take a few minutes; the window updates when it finishes.</p>");
+    api("/admin/instances/" + instanceId + "/python-runner/" + mode, { method: "POST" }).then(function () {
+      state.busyModal = false;
+      delete state.runnerBusy[instanceId];
+      closeModal();
+      showToast(attaching ? "Python attached" : "Python runner removed",
+        attaching ? "Python is now available in this workspace\u2019s Code node. Third-party packages stay unavailable for now."
+                  : "The workspace no longer has a Python runner. Python Code nodes will fail until you attach one again.");
+      refreshAdminData().then(function () { render(); });
+    }).catch(function (err) {
+      state.busyModal = false;
+      delete state.runnerBusy[instanceId];
+      closeModal();
+      showToast(attaching ? "Attach failed" : "Remove failed", err.message);
+      refreshAdminData().then(function () { render(); });
+    });
   }
   function updateImageModal(uInst) {
     var wname = titleCase(uInst.stack_name);
@@ -2570,6 +2632,12 @@ var ICONS = {
         if (!act.dataset.tag) { showToast("Current version unknown", "Re-open the update dialog and try again."); return; }
         runImageUpdate(act.dataset.id, act.dataset.tag);
       }
+      else if (action === "runner-toggle") {
+        var rInst = (state.adminInstances || []).find(function (x) { return x.id === Number(act.dataset.id); }) ||
+                    findInstanceById(act.dataset.id);
+        if (!rInst) { showToast("Not found", "Could not resolve this workspace."); return; }
+        if (rInst.python_runner) confirmDetachRunner(rInst.id); else confirmAttachRunner(rInst.id);
+      }
       else if (action === "update-image-now") {
         event.preventDefault();
         if (!act.dataset.tag) { showToast("Update n8n", "No target version."); return; }
@@ -2733,6 +2801,18 @@ var ICONS = {
         else {
           adminAction("/admin/accounts/" + unlockAid + "/unlock", "Workspace switched on", "Access and automations have been restored.").then(function () { refreshAdminData(); });
         }
+      }
+
+      var cRAttach = event.target.closest("[data-confirm-runner-attach]");
+      if (cRAttach) {
+        closeModal();
+        runRunnerToggle(Number(cRAttach.dataset.confirmRunnerAttach), "attach");
+      }
+
+      var cRDetach = event.target.closest("[data-confirm-runner-detach]");
+      if (cRDetach) {
+        closeModal();
+        runRunnerToggle(Number(cRDetach.dataset.confirmRunnerDetach), "detach");
       }
 
       var cImp = event.target.closest("[data-confirm-impersonate]");
