@@ -18,6 +18,11 @@ def hash_password(password: str) -> str:
     return hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 100_000).hex()
 
 
+def _constant_time_eq(a: str, b: str) -> bool:
+    import hmac as _hmac
+    return _hmac.compare_digest(a.encode(), b.encode())
+
+
 def verify_admin_password(password: str) -> bool:
     expected = settings.admin_password_hash
     if not expected:

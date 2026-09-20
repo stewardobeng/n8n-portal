@@ -162,7 +162,11 @@ def handle_event(event: dict) -> dict:
     ROUTER GUARD (2026-09-03, Steward): the portal shares one Paystack account
     with other websites via a webhook router. Events are tagged with `metadata.app`.
     Ignore any event not tagged for this portal so a misrouted event can never
-    touch portal billing state."""
+    touch portal billing state.
+
+    IDEMPOTENCY (0.1.67): charge.success is claimed by (gateway, event, reference)
+    before any state change; a duplicate delivery is a recorded no-op, so a
+    router re-drive or replay can never extend a subscription twice."""
     from . import billing
 
     event_type = event.get("event", "")
@@ -175,6 +179,17 @@ def handle_event(event: dict) -> dict:
         return {"status": "ignored", "event": event_type}
 
     if event_type == "charge.success":
+        reference = data.get("reference") or ""
+        if not db.claim_event("paystack", event_type, reference):
+            log.warning("Duplicate Paystack charge.success ref=%s; ignoring "
+                        "(already processed)", reference)
+            return {"status": "duplicate_ignored", "reference": reference}
+        amount_error = _check_amount(data)
+        if amount_error:
+            log.error("Paystack charge.success ref=%s rejected: %s",
+                      reference, amount_error)
+            return {"status": "amount_mismatch", "reference": reference,
+                    "error": amount_error}
         return _on_charge_success(data)
     if event_type == "invoice.payment_failed":
         return _on_payment_failed(data)
@@ -194,6 +209,29 @@ def handle_event(event: dict) -> dict:
             )
         return {"status": "subscription_created"}
     return {"status": "ignored", "event": event_type}
+
+
+def _check_amount(data: dict) -> str:
+    """Reject a charge whose amount does not match either plan price when
+    expectations are configured. Returns '' when acceptable, else a reason."""
+    amount = data.get("amount")
+    if not amount:
+        return ""
+    try:
+        amount = int(amount)
+    except (TypeError, ValueError):
+        return "event amount is not an integer"
+    exp_a = settings.paystack_expected_amount_a
+    exp_b = settings.paystack_expected_amount_b
+    allowed = set()
+    if exp_a:
+        allowed.add(int(exp_a))
+    if exp_b and settings.plan_b_active:
+        allowed.add(int(exp_b))
+    if allowed and amount not in allowed:
+        return (f"amount {amount} does not match any plan price "
+                f"({sorted(allowed)})")
+    return ""
 
 
 def _resolve_plan(data: dict) -> str:

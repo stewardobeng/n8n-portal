@@ -88,6 +88,14 @@ class Settings:
     # Paystack
     paystack_secret_key: str = os.getenv("PAYSTACK_SECRET_KEY", "")
     paystack_plan_code: str = os.getenv("PAYSTACK_PLAN_CODE", "")  # auto-created if empty
+    # Webhook router shared secret (0.1.67): when set, /webhook/paystack ALSO
+    # requires x-router-secret to match, so only OUR router can deliver events
+    # (a stolen Paystack signature alone is not enough). Empty = feature off.
+    paystack_router_secret: str = os.getenv("PAYSTACK_ROUTER_SECRET", "")
+    # Amount enforcement (minor units): charge.success must match the plan
+    # price. Empty amount = check disabled (not recommended).
+    paystack_expected_amount_a: str = os.getenv("PAYSTACK_EXPECTED_AMOUNT_A", "")
+    paystack_expected_amount_b: str = os.getenv("PAYSTACK_EXPECTED_AMOUNT_B", "")
     paystack_plan_code_b: str = os.getenv("PAYSTACK_PLAN_CODE_B", "")  # Plan B (500), auto-created if empty
     paystack_callback_url: str = os.getenv(
         "PAYSTACK_CALLBACK_URL", "https://portal.steprotech.com/?status=success"

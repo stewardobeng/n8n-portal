@@ -1122,10 +1122,20 @@ def create_checkout(account_id: int,
 
 
 @app.post("/api/v1/webhook/paystack")
-async def paystack_webhook(request: Request):
-    """Paystack webhook endpoint. Signature: x-paystack-signature (HMAC-SHA512)."""
+async def paystack_webhook(request: Request,
+                           x_router_secret: Optional[str] = Header(default=None)):
+    """Paystack webhook endpoint (normally delivered via our webhook router).
+    Signature: x-paystack-signature (HMAC-SHA512). When PAYSTACK_ROUTER_SECRET
+    is configured, the x-router-secret header must ALSO match, so only our
+    router can deliver events even if the Paystack signature is replayed."""
     payload = await request.body()
     signature = request.headers.get("x-paystack-signature")
+    expected_rs = settings.paystack_router_secret
+    if expected_rs:
+        from .security import _constant_time_eq
+        if not x_router_secret or not _constant_time_eq(x_router_secret, expected_rs):
+            log.warning("Rejected Paystack webhook without valid router secret")
+            raise HTTPException(401, "Invalid router secret.")
     try:
         result = billing.handle_webhook("paystack", payload, signature)
     except Exception as e:

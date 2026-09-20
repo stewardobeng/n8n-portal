@@ -171,6 +171,20 @@ def init_db(db_path: str | None = None) -> None:
         # (admin one-click feature, 0.1.63): 0 = none, 1 = attached. The flag is
         # the UI state + the detach authority; the stack file itself is the truth
         # for what actually runs.
+        # Idempotency ledger (0.1.67): one row per processed gateway event
+        # reference; a duplicate delivery becomes a recorded no-op instead of a
+        # second subscription extension.
+        cur.executescript("""
+        CREATE TABLE IF NOT EXISTS processed_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            gateway TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            reference TEXT NOT NULL,
+            processed_at INTEGER NOT NULL,
+            note TEXT DEFAULT '',
+            UNIQUE(gateway, event_type, reference)
+        );
+        """)
         ic3 = [r[1] for r in cur.execute("PRAGMA table_info(instances)")]
         if "python_runner" not in ic3:
             cur.execute("ALTER TABLE instances ADD COLUMN python_runner INTEGER NOT NULL DEFAULT 0")
@@ -553,6 +567,26 @@ def get_active_instance(account_id: int) -> sqlite3.Row | None:
             "ORDER BY id DESC LIMIT 1",
             (account_id,),
         ).fetchone()
+    finally:
+        conn.close()
+
+
+def claim_event(gateway: str, event_type: str, reference: str) -> bool:
+    """True = this event was never processed before and is now claimed.
+    False = duplicate delivery; the caller must treat it as a no-op."""
+    if not reference:
+        return True  # nothing to dedupe on (should not happen for charge events)
+    conn = get_conn()
+    try:
+        try:
+            conn.execute(
+                "INSERT INTO processed_events (gateway, event_type, reference, processed_at) "
+                "VALUES (?,?,?,?)",
+                (gateway, event_type, reference, now()))
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
     finally:
         conn.close()
 
