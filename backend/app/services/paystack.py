@@ -291,6 +291,20 @@ def _on_charge_success(data: dict) -> dict:
         paid_until=paid_until,
     )
     billing.unlock_instance(account["id"])
+    # AUTO-PROVISION (0.1.71, Steward): a paid customer with NO workspace yet
+    # gets one created immediately from their signup details (name, username,
+    # password already on the account) - no extra click needed. Existing
+    # workspaces are untouched; extra workspaces still go through the admin /
+    # explicit request flow.
+    try:
+        if db.count_instances(account["id"]) == 0:
+            from . import provisioner as _prov
+            _prov.provision_account(account["id"])
+            log.info("Auto-provisioned first workspace for account %s after payment",
+                     account["id"])
+    except Exception as e:
+        log.error("Auto-provision after payment failed for account %s: %s",
+                  account["id"], e)
     log.info("Paystack charge success; account %s active until %s",
              account["id"], paid_until)
     return {"status": "active", "account_id": account["id"], "paid_until": paid_until}

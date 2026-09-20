@@ -731,6 +731,36 @@ var ICONS = {
     ];
   }
 
+  function subscriptionsList(acc, instances) {
+    // One row per package the customer actually holds (0.1.71): account plan +
+    // any workspace whose package differs shows as its own subscription line
+    // with its own renewal date. Annual interval, Paystack - same for all.
+    var live = (instances || []).filter(function (i) { return i.status !== "deleted"; });
+    var accPlan = (acc && acc.plan) === "b" ? "b" : "a";
+    var periodEnd = acc && acc.paid_until ? fmtDate(acc.paid_until) : "not set";
+    var seen = {};
+    var rows = [];
+    function row(planKey, label, note) {
+      if (seen[planKey]) return;
+      seen[planKey] = true;
+      rows.push('<div class="info-row"><dt>' + esc(label) + '</dt><dd>' + esc(note) +
+        '<br><span class="small muted">Annually - renews ' + esc(periodEnd) + ' - Paystack</span></dd></div>');
+    }
+    var accLabel = accPlan === "b" ? "n8n Workspace Plus subscription (GHS 500/yr)" : "n8n Workspace subscription (GHS 300/yr)";
+    row(accPlan, accLabel, "Account package");
+    live.forEach(function (i) {
+      var wp = i.plan === "b" ? "b" : "a";
+      if (wp !== accPlan) {
+        row(wp, wp === "b" ? "n8n Workspace Plus subscription (GHS 500/yr)" : "n8n Workspace subscription (GHS 300/yr)",
+            "Workspace: " + (i.stack_name || "workspace"));
+      }
+    });
+    if (!rows.length) {
+      rows.push('<div class="info-row"><dt>Plan</dt><dd>No active subscription</dd></div>');
+    }
+    return '<dl class="info-list">' + rows.join("") + "</dl>";
+  }
+
   function customerBilling() {
     var acc = state.session ? state.session.account : null;
     var s = subscriptionState();
@@ -782,10 +812,7 @@ var ICONS = {
       '<div class="plan-grid">' + planCards + "</div>" +
       '<div class="grid cols-2" style="margin-top:20px">' +
         '<section class="card"><div class="card-head"><h2>Subscription details</h2>' + statusRow + "</div>" +
-          '<dl class="info-list"><div class="info-row"><dt>Plan</dt><dd>' + esc(planName(acc)) + "</dd></div>" +
-          '<div class="info-row"><dt>Billing interval</dt><dd>Annually</dd></div>' +
-          '<div class="info-row"><dt>Current period end</dt><dd>' + esc(periodEnd) + "</dd></div>" +
-          '<div class="info-row"><dt>Payment method</dt><dd>Paystack</dd></div></dl></section>' +
+          subscriptionsList(acc, state.session ? (state.session.instances || []) : []) + '</section>' +
         '<section class="card"><h2>How renewal works</h2><div class="timeline">' +
           '<div class="timeline-item"><h3>Your card is charged</h3><p>At the end of the 12-month paid period.</p></div>' +
           '<div class="timeline-item"><h3>You receive the result by email</h3><p>Successful renewal keeps everything running.</p></div>' +
@@ -3412,16 +3439,31 @@ else if (type === "register") {
     if (state.adminAuthed) {
       fetchN8nReleases().then(function (d) { if (d && d.latest) state.n8nLatestTag = d.latest.tag; });
     }
-    // handle payment return: ?status=success after Paystack redirect
+    // handle payment return: ?status=success after Paystack redirect (0.1.71):
+    // the webhook can land a second or two AFTER the browser returns, so poll
+    // /me briefly until the subscription flips active, then auto-provision.
+    // If this browser has no portal token (customer paid elsewhere), the
+    // server-side sweep still provisions; nothing is lost.
     var params = new URLSearchParams(location.search);
     if (params.get("status") === "success" && portalToken) {
       history.replaceState(null, "", location.pathname + location.hash);
       if (params.get("checkout") !== "mock") {
-        refreshSession().then(function () {
-          showToast("Payment received", "Your subscription is active. Preparing your workspace...");
-          autoProvision();
-          navigate("/customer/dashboard");
-        });
+        (async function () {
+          var sess = null;
+          for (var attempt = 0; attempt < 10; attempt++) {
+            sess = await refreshSession();
+            if (sess && sess.account && sess.account.subscription_status === "active") break;
+            await new Promise(function (res) { setTimeout(res, 2000); });
+          }
+          if (sess && sess.account && sess.account.subscription_status === "active") {
+            showToast("Payment received", "Your subscription is active. Preparing your workspace...");
+            autoProvision();
+            navigate("/customer/dashboard");
+          } else {
+            showToast("Payment received", "We are confirming your payment; your workspace will be prepared automatically.");
+            navigate("/customer/billing");
+          }
+        })();
       }
     }
     eventHandlers();
