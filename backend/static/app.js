@@ -698,6 +698,35 @@ var ICONS = {
     return (n >= 10 ? Math.round(n) : n.toFixed(1)) + " " + u[i];
   }
 
+  // Package copy (0.1.69): distinct contents per package, keyed by price so it
+  // works whichever Paystack plan id comes back.
+  function isPlusPlan(p) { return !!p && p.amount_minor === 50000; }
+  function planBlurbFor(p) {
+    return isPlusPlan(p)
+      ? '<p class="muted">Everything in n8n Workspace, plus Python and hands-on AI assistant setup help.</p>'
+      : '<p class="muted">A private, managed n8n environment for your business automations.</p>';
+  }
+  function planFeaturesFor(p) {
+    if (isPlusPlan(p)) {
+      return [
+        "Everything in n8n Workspace",
+        "Python code node - managed Python environment attached by our team",
+        "AI assistant setup - guided configuration of your n8n AI Assistant with hands-on help from SteProTECH",
+        "Priority email support",
+        "Automatic annual renewal"
+      ];
+    }
+    return [
+      "Your own private n8n workspace",
+      "Your own secure address (https)",
+      "Full workflow builder - unlimited workflows",
+      "400+ app integrations and AI model nodes",
+      "JavaScript code node",
+      "Email support",
+      "Automatic annual renewal"
+    ];
+  }
+
   function customerBilling() {
     var acc = state.session ? state.session.account : null;
     var s = subscriptionState();
@@ -724,8 +753,8 @@ var ICONS = {
         }
         return '<article class="plan-card featured"><div class="eyebrow">Available now</div><h2>' + esc(p.name) + "</h2>" +
           '<div class="plan-price">' + esc(fmtMinor(p.amount_minor, p.currency)) + ' <span>per year</span></div>' +
-          '<p class="muted">A private, managed n8n environment for your business automations.</p>' +
-          '<ul class="feature-list">' + ["Your own private workspace", "Your own secure address", "Email support", "Automatic annual renewal"].map(function (f) { return "<li>" + icon("check") + "<span>" + esc(f) + "</span></li>"; }).join("") + "</ul>" +
+          planBlurbFor(p) +
+          '<ul class="feature-list">' + planFeaturesFor(p).map(function (f) { return "<li>" + icon("check") + "<span>" + esc(f) + "</span></li>"; }).join("") + "</ul>" +
           cta + "</article>";
       }
       return '<article class="plan-card disabled"><span class="ribbon">Coming soon</span><div class="eyebrow">Future plan</div><h2>' + esc(p.name) + "</h2>" +
@@ -1497,10 +1526,19 @@ var ICONS = {
   }
 
   function paymentModal() {
-    var plan = state.plans.find(function (p) { return p.active; }) || {};
+    // Plan-aware banner (0.1.69): the modal must show the package the user
+    // actually clicked, not the first active plan. chosenPlan is set by the
+    // pay-now button (data-plan) before this modal opens.
+    var plan = state.plans.find(function (p) {
+      return p.active && ((chosenPlan === "b") === (p.amount_minor === 50000));
+    }) || state.plans.find(function (p) { return p.active; }) || {};
+    var isPlus = chosenPlan === "b";
+    var pkgLine = isPlus
+      ? esc(plan.name || "n8n Workspace Plus") + " - includes Python code node and AI assistant setup support"
+      : esc(plan.name || "n8n Workspace");
     showModal(modalHeader("Continue to secure payment") +
       '<p class="muted">You will leave the SteProTECH portal and complete payment securely on the payment provider.</p>' +
-      '<div class="banner">' + icon("shield") + "<div><strong>" + esc(fmtMinor(plan.amount_minor, plan.currency)) + " per year</strong><br><span class=\"small\">Your workspace will start being prepared after payment is confirmed.</span></div></div>" +
+      '<div class="banner">' + icon("shield") + "<div><strong>" + esc(fmtMinor(plan.amount_minor, plan.currency)) + " per year</strong><br><span class=\"small\">" + pkgLine + "</span></div></div>" +
       '<div class="actions end" style="margin-top:24px"><button class="button secondary" data-action="close-modal">Cancel</button>' +
       '<button class="button" data-action="payment-continue">Continue to payment ' + icon("external") + "</button></div>");
   }
