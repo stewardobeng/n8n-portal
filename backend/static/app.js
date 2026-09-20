@@ -596,7 +596,7 @@ var ICONS = {
         statusBadge("off", "Not created") + "</article>";
     }
     return '<article class="workspace-item"><span class="workspace-logo">' + icon("workspace") + "</span>" +
-      "<div><h3>" + esc(titleCase(inst.stack_name)) + " workspace</h3><p>" + esc(inst.domain || "") + "</p></div>" +
+      "<div><h3>" + esc(titleCase(inst.stack_name)) + " workspace" + wsPlanTag(inst) + "</h3><p>" + esc(inst.domain || "") + "</p></div>" +
       (badgeHtml || "") + (actionHtml || "") + "</article>";
   }
 
@@ -634,7 +634,7 @@ var ICONS = {
         ? '<a class="button small-btn" href="https://' + esc(i.domain) + '/" target="_blank" rel="noopener">Open ' + icon("external") + "</a>"
         : '<button class="button secondary small-btn" data-action="workspace-detail" data-id="' + i.id + '">Details</button>';
       return '<article class="workspace-item"><span class="workspace-logo">' + icon("workspace") + "</span>" +
-        "<div><h3>" + esc(titleCase(i.stack_name)) + " workspace</h3><p>https://" + esc(i.domain) + "<br>Created " + esc(fmtDate(i.created_at)) + "</p></div>" +
+        "<div><h3>" + esc(titleCase(i.stack_name)) + " workspace" + wsPlanTag(i) + "</h3><p>https://" + esc(i.domain) + "<br>Created " + esc(fmtDate(i.created_at)) + "</p></div>" +
         badge + action + "</article>";
     }).join("")
       : '<div class="empty-state" style="min-height:240px"><div><h3>No workspaces yet</h3><p class="muted">' + esc(emptyCopy) + "</p></div></div>";
@@ -701,6 +701,10 @@ var ICONS = {
   // Package copy (0.1.69): distinct contents per package, keyed by price so it
   // works whichever Paystack plan id comes back.
   function isPlusPlan(p) { return !!p && p.amount_minor === 50000; }
+  function wsPlanTag(i) {
+    // Package chip for a workspace row (0.1.70): each workspace carries its own package.
+    return i && i.plan === "b" ? ' <span class="status info">Plus</span>' : ' <span class="status neutral">GHS 300</span>';
+  }
   function planBlurbFor(p) {
     return isPlusPlan(p)
       ? '<p class="muted">Everything in n8n Workspace, plus Python and hands-on AI assistant setup help.</p>'
@@ -1175,8 +1179,9 @@ var ICONS = {
             : i.status === "provisioning" ? statusBadge("provisioning", "Being set up")
             : i.status === "failed" ? statusBadge("failed", "Setup failed") : statusBadge("neutral", cap(i.status));
           var attachedTag = i.managed === 0 ? ' <span class=\"status info\">Attached</span>' : "";
+          var planTag = i.plan === "b" ? ' <span class=\"status info\">Plus</span>' : ' <span class=\"status neutral\">GHS 300</span>';
           return '<article class="workspace-item"><span class="workspace-logo">' + icon("workspace") + "</span>" +
-            "<div><h3>" + esc(titleCase(i.stack_name)) + " workspace" + attachedTag + updBadge(i) + updateChip(i) + runnerBadge(i) + "</h3><p>" + esc(i.domain) + "<br>Env " + esc(i.environment_name || i.environment_id) + " · Port " + esc(i.port) + (i.managed === 0 ? " · password unchanged" : "") + "</p></div>" +
+            "<div><h3>" + esc(titleCase(i.stack_name)) + " workspace" + attachedTag + planTag + updBadge(i) + updateChip(i) + runnerBadge(i) + "</h3><p>" + esc(i.domain) + "<br>Env " + esc(i.environment_name || i.environment_id) + " · Port " + esc(i.port) + (i.managed === 0 ? " · password unchanged" : "") + "</p></div>" +
             badge + '<button class="button secondary small-btn" data-action="workspace-actions" data-id="' + i.id + '" data-name="' + esc(i.stack_name) + '">Actions</button>' +
               '<div class="wi-actions">' +
               '<button class="button secondary small-btn" data-action="admin-backup" data-id="' + i.id + '">' + icon("archive") + " Back up</button>" +
@@ -2717,9 +2722,26 @@ var ICONS = {
       else if (action === "unlock-workspace") confirmUnlock(act.dataset.id);
       else if (action === "reset-password") resetPasswordModal(act.dataset.id);
       else if (action === "admin-add-workspace") {
-        showModal(modalHeader("Add workspace for customer") + "<p>Provision another workspace for this customer. Access details are emailed to them.</p>" +
+        var awId = act.dataset.id;
+        var awAcc = (state.adminAccounts || []).find(function (x) { return x.id === Number(awId); });
+        var curPlan = (awAcc && awAcc.plan) === "b" ? "b" : "a";
+        var planName = function (v) { return v === "b" ? "Workspace Plus (GHS 500)" : "Workspace (GHS 300)"; };
+        function awCard(val) {
+          var on = val === curPlan;
+          return '<label style="display:flex;gap:10px;align-items:flex-start;border:1px solid var(--line);border-radius:10px;padding:12px;cursor:pointer;margin:0">' +
+            '<input type="radio" name="aw-plan" value="' + val + '"' + (on ? " checked" : "") + ' style="margin-top:3px">' +
+            "<div><strong>" + esc(planName(val)) + "</strong><br><span class=\"small muted\">" +
+            (val === "b"
+              ? "Plus package: Python code node + AI assistant setup support."
+              : "Standard package.") +
+            (on ? " <strong>(customer\u2019s current package)</strong>" : " <em>(moving the subscription to this package)</em>") + "</span></div></label>";
+        }
+        showModal(modalHeader("Add workspace for " + esc(awAcc ? (awAcc.display_name || awAcc.username) : "customer")) +
+          '<div class="banner" style="margin-bottom:14px">' + icon("info") + "<div><strong>Current package: " + esc(planName(curPlan)) + "</strong><br><span class=\"small\">Pick which package this new workspace should be. Choosing the other package also moves the customer\u2019s subscription to it.</span></div></div>" +
+          '<div class="field"><label>Workspace package</label><div class="grid cols-2" style="gap:10px" id="aw-plan-picker">' + awCard("a") + awCard("b") + "</div></div>" +
+          "<p>Access details are emailed to the customer.</p>" +
           '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
-          '<button class="button" data-confirm-admin-provision="' + act.dataset.id + '">Provision workspace</button></div>');
+          '<button class="button" data-confirm-admin-provision="' + awId + '">Provision workspace</button></div>');
       }
       else if (action === "workspace-detail") {
         var i = findInstanceById(act.dataset.id);
@@ -3010,11 +3032,13 @@ var ICONS = {
       }
       var cAdminProv = event.target.closest("[data-confirm-admin-provision]");
       if (cAdminProv) {
+        var awRadio = document.querySelector('input[name="aw-plan"]:checked');
+        var awPlan = awRadio ? awRadio.value : "";
         closeModal();
         (async function () {
           try {
-            await api("/accounts/" + cAdminProv.dataset.confirmAdminProvision + "/provision", { method: "POST", body: {} });
-            showToast("Provisioning queued", "The customer will receive an email when the workspace is ready.");
+            await api("/accounts/" + cAdminProv.dataset.confirmAdminProvision + "/provision", { method: "POST", body: awPlan ? { plan: awPlan } : {} });
+            showToast("Provisioning queued", awPlan === "b" ? "Workspace Plus (GHS 500) is being prepared." : awPlan === "a" ? "Workspace (GHS 300) is being prepared." : "The customer will receive an email when the workspace is ready.");
             refreshAdminData();
           } catch (err) { showToast("Provisioning failed", err.message); }
         })();

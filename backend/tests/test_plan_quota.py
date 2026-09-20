@@ -57,7 +57,7 @@ def test_provision_gate_counts_plan_own_allowance(pq_db, monkeypatch):
         account_id=aid, stack_name="one", environment_id=4,
         environment_name="n8n Server 1", port=32768, domain="one.x.test",
         basic_auth_user="", basic_auth_password="", n8n_encryption_key="k",
-        status="healthy")
+        status="healthy", plan="b")  # the existing workspace is a Plus workspace (0.1.70)
     a = db.get_account(aid)
     with pytest.raises(provisioner.ProvisionError, match="quota reached"):
         # provision_account needs a full Portainer/NPM environment; the quota

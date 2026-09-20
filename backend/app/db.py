@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS instances (
     lock_secret TEXT DEFAULT '',                -- random owner pw while locked (for unlock)
     container_id TEXT DEFAULT '',               -- fallback for admin-attached stacks w/o stack record
     managed INTEGER NOT NULL DEFAULT 1,         -- 1 = portal-provisioned; 0 = admin-attached pre-existing
+    plan TEXT NOT NULL DEFAULT 'a',             -- workspace package: 'a' GHS 300 | 'b' GHS 500 Plus (0.1.70)
     error TEXT,
     created_at INTEGER NOT NULL,
     FOREIGN KEY (account_id) REFERENCES accounts(id)
@@ -190,6 +191,10 @@ def init_db(db_path: str | None = None) -> None:
         ic3 = [r[1] for r in cur.execute("PRAGMA table_info(instances)")]
         if "python_runner" not in ic3:
             cur.execute("ALTER TABLE instances ADD COLUMN python_runner INTEGER NOT NULL DEFAULT 0")
+        try:
+            cur.execute("ALTER TABLE instances ADD COLUMN plan TEXT NOT NULL DEFAULT 'a'")
+        except sqlite3.OperationalError:
+            pass  # column already exists
         # Migration: per-plan workspace quotas (0.1.68, Steward: quota is per
         # package). `quota` stays the LEGACY single number (fallback); quota_a
         # seeds from it, quota_b starts at its own 1.
@@ -459,6 +464,28 @@ def count_instances(account_id: int) -> int:
         conn.close()
 
 
+def count_instances_by_plan(account_id: int, plan: str | None = None) -> dict:
+    """Live instance counts per package for an account (0.1.70). Rows with a
+    NULL/missing plan (pre-0.1.70) count toward plan 'a'."""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT COALESCE(NULLIF(plan, ''), 'a') AS p, COUNT(*) AS n "
+            "FROM instances WHERE account_id = ? AND status NOT IN ('deleted', 'failed') "
+            "GROUP BY p",
+            (account_id,),
+        ).fetchall()
+        counts = {"a": 0, "b": 0}
+        for r in rows:
+            p = r["p"] if r["p"] in ("a", "b") else "a"
+            counts[p] = int(r["n"])
+        if plan is None:
+            return counts
+        return counts.get(plan if plan in ("a", "b") else "a", 0)
+    finally:
+        conn.close()
+
+
 # ---- billing (stripe) ----
 
 def set_account_plan(account_id: int, plan: str = "a") -> None:
@@ -521,17 +548,18 @@ def create_instance(
     container_id: str = "",
     managed: int = 1,
     status: str = "provisioning",
+    plan: str = "a",
 ) -> int:
     conn = get_conn()
     try:
         cur = conn.execute(
             "INSERT INTO instances (account_id, stack_name, environment_id, environment_name, "
             "port, domain, basic_auth_user, basic_auth_password, n8n_encryption_key, "
-            "stack_id, container_id, managed, status, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "stack_id, container_id, managed, status, plan, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (account_id, stack_name, environment_id, environment_name, port, domain,
              basic_auth_user, basic_auth_password, n8n_encryption_key,
-             stack_id, container_id, managed, status, now()),
+             stack_id, container_id, managed, status, plan, now()),
         )
         conn.commit()
         return cur.lastrowid

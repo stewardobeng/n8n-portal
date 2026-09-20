@@ -22,6 +22,14 @@ from pydantic import BaseModel, EmailStr, Field
 
 from .config import settings
 from . import db
+from .security import _decode_subject as _sec_decode_subject
+
+
+def _decode_subject_is_admin(authorization: str | None) -> bool:
+    try:
+        return _sec_decode_subject(authorization) == "admin"
+    except Exception:
+        return False
 from .services import provisioner, billing, access_gate, admin_ops, backup_ops
 from .services import account_security, passkeys, n8n_releases, python_runner
 from .services import security_controls as sc
@@ -194,6 +202,11 @@ class ProvisionRequest(BaseModel):
     owner_email: Optional[EmailStr] = None
     first_name: Optional[str] = Field(default=None, max_length=50)
     last_name: Optional[str] = Field(default=None, max_length=50)
+    # Which package this workspace is provisioned as (0.1.70, Steward):
+    # 'a' GHS 300 | 'b' GHS 500 Plus. Omit = the account's subscription tier
+    # (the customer self-service flow always omits this; provisioning follows
+    # the paid package automatically). Admin-only: enforced in the route.
+    plan: Optional[str] = Field(default=None, pattern="^[ab]$")
 
 
 class InstanceStatusOut(BaseModel):
@@ -210,6 +223,7 @@ class InstanceStatusOut(BaseModel):
     managed: int = 1
     image: str = ""
     python_runner: int = 0
+    plan: str = "a"   # this workspace's package: a GHS 300 | b GHS 500 Plus (0.1.70)
     error: Optional[str]
     created_at: int
 
@@ -373,6 +387,7 @@ def _instance_to_out(i) -> InstanceStatusOut:
         managed=_row_get(i, "managed", 1),
         image=_row_get(i, "image", ""),
         python_runner=_row_get(i, "python_runner", 0),
+        plan=_row_get(i, "plan", "a") or "a",
         created_at=i["created_at"],
     )
 
@@ -450,11 +465,12 @@ def _serve_backup(b):
 
 
 def _run_provision(account_id: int, password: str | None = None,
-                   workspace: dict | None = None) -> None:
+                   workspace: dict | None = None,
+                   plan: str | None = None) -> None:
     """Background task wrapper — provisioning runs async so the API returns fast."""
     try:
         result = provisioner.provision_account(account_id, password=password,
-                                               workspace=workspace)
+                                               workspace=workspace, plan=plan)
         try:
             send_welcome_credentials(
                 to=result["basic_auth_user"],
@@ -1022,8 +1038,22 @@ def provision(account_id: int, background: BackgroundTasks,
     # active (webhook sets subscription_status=active on charge.success).
     if billing.gateway() in ("paystack", "stripe") and account["subscription_status"] != "active":
         raise HTTPException(402, "Payment required: subscribe before provisioning.")
+    # ADMIN PACKAGE CHOICE (0.1.70, Steward): an admin may pick which package
+    # the workspace is provisioned as. Choosing a DIFFERENT package than the
+    # account's subscription moves the subscription to that package (the two
+    # must never disagree). Customers cannot pass this field.
+    plan_override = None
+    if payload and payload.plan:
+        _is_admin = _decode_subject_is_admin(authorization)
+        if not _is_admin:
+            raise HTTPException(403, "Only an administrator can choose the package.")
+        current = (account["plan"] or "a") if "plan" in account.keys() else "a"
+        if payload.plan != current:
+            db.set_account_plan(account_id, payload.plan)
+            log.info("Account %s subscription moved %s -> %s by admin (workspace provision)", account_id, current, payload.plan)
+        plan_override = payload.plan
     password = payload.password if payload else None
-    background.add_task(_run_provision, account_id, password, workspace)
+    background.add_task(_run_provision, account_id, password, workspace, plan_override)
     return {"status": "provisioning_started", "account_id": account_id}
 
 

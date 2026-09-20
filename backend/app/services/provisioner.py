@@ -482,14 +482,21 @@ def validate_password_policy(password: str) -> None:
 
 
 def provision_account(account_id: int, password: str | None = None,
-                      workspace: dict | None = None) -> dict:
+                      workspace: dict | None = None,
+                      plan: str | None = None) -> dict:
     account = db.get_account(account_id)
     if not account:
         raise ProvisionError("Account not found.")
-    try:
-        plan_tier = "b" if (account["plan"] or "a") == "b" else "a"
-    except (KeyError, IndexError, TypeError):
-        plan_tier = "a"
+    # Workspace package (0.1.70, Steward): the admin may pick which package this
+    # workspace is provisioned as; the customer's own flow always uses the
+    # account's subscription tier.
+    if plan in ("a", "b"):
+        plan_tier = plan
+    else:
+        try:
+            plan_tier = "b" if (account["plan"] or "a") == "b" else "a"
+        except (KeyError, IndexError, TypeError):
+            plan_tier = "a"
     # Retry safety: clear stale instance rows from earlier failed attempts FIRST,
     # so a failed/orphaned instance (stack + volume already rolled back) does not
     # count against the quota and block re-provisioning. Without this, a quota=1
@@ -503,14 +510,14 @@ def provision_account(account_id: int, password: str | None = None,
     # Quota is PER PLAN (0.1.68): the workspace being provisioned counts
     # against its own plan's allowance.
     quota = db.account_quota_for(account, plan_tier)
-    live_count = db.count_instances(account_id)
+    live_count = db.count_instances_by_plan(account_id, plan_tier)
     if live_count >= quota:
         raise ProvisionError(
             f"Instance quota reached ({live_count}/{quota}). "
             "Contact an administrator to increase your quota."
         )
     if account["status"] == "provisioned" and live_count > 0 and quota == 1:
-        raise ProvisionError("Account already provisioned.")
+        raise ProvisionError("Account already has a workspace on this package.")
 
     email = account["email"]
     ws = workspace or {}
@@ -570,6 +577,7 @@ def provision_account(account_id: int, password: str | None = None,
         basic_auth_user=basic_auth_user,
         basic_auth_password=basic_auth_password,
         n8n_encryption_key=encryption_key,
+        plan=plan_tier,
     )
 
     stack_id: int | None = None
