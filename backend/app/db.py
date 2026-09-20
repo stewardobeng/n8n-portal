@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS accounts (
     password_hash TEXT DEFAULT '',   -- PBKDF2 hash (never plaintext)
     status TEXT NOT NULL DEFAULT 'pending',   -- pending | provisioned | failed | disabled
     quota INTEGER NOT NULL DEFAULT 1,         -- max n8n instances for this account (admin-raisable)
+    quota_a INTEGER NOT NULL DEFAULT 1,       -- per-plan allowance: package A (GHS 300)
+    quota_b INTEGER NOT NULL DEFAULT 1,       -- per-plan allowance: package B (GHS 500)
     -- Stripe billing
     stripe_customer_id TEXT DEFAULT '',
     subscription_id TEXT DEFAULT '',
@@ -188,6 +190,15 @@ def init_db(db_path: str | None = None) -> None:
         ic3 = [r[1] for r in cur.execute("PRAGMA table_info(instances)")]
         if "python_runner" not in ic3:
             cur.execute("ALTER TABLE instances ADD COLUMN python_runner INTEGER NOT NULL DEFAULT 0")
+        # Migration: per-plan workspace quotas (0.1.68, Steward: quota is per
+        # package). `quota` stays the LEGACY single number (fallback); quota_a
+        # seeds from it, quota_b starts at its own 1.
+        acols_q = [r[1] for r in cur.execute("PRAGMA table_info(accounts)")]
+        if "quota_a" not in acols_q:
+            cur.execute("ALTER TABLE accounts ADD COLUMN quota_a INTEGER NOT NULL DEFAULT 1")
+            cur.execute("UPDATE accounts SET quota_a = COALESCE(quota, 1)")
+        if "quota_b" not in acols_q:
+            cur.execute("ALTER TABLE accounts ADD COLUMN quota_b INTEGER NOT NULL DEFAULT 1")
         # Migration: 2FA columns (authenticator TOTP + email OTP) + reset/otp tables
         acols4 = [r[1] for r in cur.execute("PRAGMA table_info(accounts)")]
         for c, ddl in (
@@ -567,6 +578,39 @@ def get_active_instance(account_id: int) -> sqlite3.Row | None:
             "ORDER BY id DESC LIMIT 1",
             (account_id,),
         ).fetchone()
+    finally:
+        conn.close()
+
+
+def account_quota_for(account, plan: str | None = None) -> int:
+    """The account's workspace allowance for a plan ('a'|'b'). Falls back to
+    the legacy single quota when the per-plan value is missing."""
+    if plan is None:
+        try:
+            plan = account["plan"] or "a"
+        except (KeyError, IndexError):
+            plan = "a"
+    col = "quota_b" if plan == "b" else "quota_a"
+    try:
+        v = account[col]
+        if v:
+            return int(v)
+    except (KeyError, IndexError):
+        pass
+    try:
+        return int(account["quota"] or 1)
+    except (KeyError, IndexError):
+        return 1
+
+
+def set_account_quota_for(account_id: int, plan: str, quota: int) -> None:
+    """Set the per-plan workspace allowance ('a'|'b')."""
+    col = "quota_b" if plan == "b" else "quota_a"
+    conn = get_conn()
+    try:
+        conn.execute(f"UPDATE accounts SET {col} = ? WHERE id = ?",
+                     (max(1, quota), account_id))
+        conn.commit()
     finally:
         conn.close()
 

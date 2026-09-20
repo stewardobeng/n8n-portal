@@ -500,7 +500,9 @@ def provision_account(account_id: int, password: str | None = None,
             db.delete_instance(old["id"])
     # Quota gate (Steward 2026-09-01): one instance per account by default; the
     # admin can raise the quota. count live instances vs the account's quota.
-    quota = account["quota"] if "quota" in account.keys() else settings.default_quota
+    # Quota is PER PLAN (0.1.68): the workspace being provisioned counts
+    # against its own plan's allowance.
+    quota = db.account_quota_for(account, plan_tier)
     live_count = db.count_instances(account_id)
     if live_count >= quota:
         raise ProvisionError(

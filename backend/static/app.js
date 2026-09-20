@@ -1128,7 +1128,8 @@ var ICONS = {
           '<div class="info-row"><dt>Renewal</dt><dd>Automatic</dd></div></dl></section>' +
         '<section class="card"><div class="card-head"><h2>Quota</h2><strong>' + used + " / " + quota + "</strong></div>" +
           '<div class="quota"><div class="bar"><span style="width:' + Math.min(100, quota ? Math.round(used / quota * 100) : 0) + '%"></span></div></div>' +
-          '<p class="small muted" style="margin-top:20px">' + (used < quota ? "The customer may provision another workspace." : "Quota fully used.") + "</p>" +
+          '<p class="small muted" style="margin-top:14px">Package allowances: ' + (a.quota_a || 1) + " × Workspace (GHS 300), " + (a.quota_b || 1) + " × Workspace Plus (GHS 500). Each workspace counts against its own package.</p>" +
+          '<p class="small muted" style="margin-top:8px">' + (used < quota ? "The customer may provision another workspace." : "Quota fully used.") + "</p>" +
           '<button class="button secondary small-btn" data-action="quota" data-id="' + a.id + '">Change allowance</button></section>' +
       "</div>" +
       '<section class="card" style="margin-top:18px"><div class="card-head"><h2>Backup access</h2>' + (a.backup_enabled ? statusBadge("active", "Enabled for customer") : statusBadge("off", "Disabled")) + "</div>" +
@@ -1577,8 +1578,19 @@ var ICONS = {
       var note = anchorUsed
         ? '<div class="banner" id="markpaid-anchor" style="margin:14px 0 0">' + icon("clock") + "<div><strong>Dates loaded from Nginx Proxy Manager</strong><br><span class=\"small\">The workspace proxy was created on the loaded start date, so expiry is exactly one year after it.</span></div></div>"
         : "";
+      var curPlan = (a && a.plan) || "a";
+      function planCard(val, title, sub) {
+        var on = curPlan === val;
+        return '<label class="field" style="display:flex;align-items:flex-start;gap:10px;border:1px solid ' + (on ? "var(--teal-700)" : "var(--line)") + ';border-radius:10px;padding:12px;cursor:pointer;margin:0">' +
+          '<input type="radio" name="paid-plan" value="' + val + '"' + (on ? " checked" : "") + ' style="margin-top:3px">' +
+          "<div><strong>" + esc(title) + "</strong><br><span class=\"small muted\">" + esc(sub) + "</span></div></label>";
+      }
       showModal(modalHeader("Mark " + esc(name) + " as paid") +
         '<p class="muted">Record that this customer has paid, with the exact subscription dates. You can backdate the start when the customer already paid before being added here.</p>' +
+        '<div class="field"><label>Package paid for</label><div class="grid cols-2" style="gap:10px">' +
+        planCard("a", "Workspace (GHS 300)", "Standard package. Sets this account\u2019s package and its Workspace allowance.") +
+        planCard("b", "Workspace Plus (GHS 500)", "Plus package with more resources for every workspace.") +
+        "</div></div>" +
         '<div class="grid cols-2">' +
         '<div class="field"><label>Subscription start</label><input id="paid-from" type="date" value="' + d(defFrom) + '"></div>' +
         '<div class="field"><label>Expiry date</label><input id="paid-until" type="date" value="' + d(defUntil) + '"></div></div>' +
@@ -1710,12 +1722,20 @@ var ICONS = {
   }
   function quotaModal(accountId) {
     var a = (state.adminAccounts || []).find(function (x) { return x.id === Number(accountId); });
-    showModal(modalHeader("Change workspace quota") +
-      '<p class="muted">Set how many workspaces this customer may own (1 to 50).</p>' +
-      '<div class="field"><label>Workspaces allowed</label><input id="quota-input" type="number" min="1" max="50" value="' + ((a && a.quota) || 1) + '">' +
-      '<span class="hint">Raising the quota lets the customer provision more workspaces. Reducing it does not delete existing workspaces.</span></div>' +
+    var qa = (a && a.quota_a) || 1;
+    var qb = (a && a.quota_b) || 1;
+    showModal(modalHeader("Workspace allowances") +
+      '<p class="muted">Set how many workspaces this customer may own, per package. A workspace counts against the allowance of its own package.</p>' +
+      '<div class="grid cols-2" style="gap:12px">' +
+      '<div class="field" style="border:1px solid var(--line);border-radius:10px;padding:14px;margin:0"><label>Workspace (GHS 300)</label>' +
+      '<input id="quota-input-a" type="number" min="1" max="50" value="' + qa + '">' +
+      '<span class="hint">Allowance for workspaces on the standard package.</span></div>' +
+      '<div class="field" style="border:1px solid var(--line);border-radius:10px;padding:14px;margin:0"><label>Workspace Plus (GHS 500)</label>' +
+      '<input id="quota-input-b" type="number" min="1" max="50" value="' + qb + '">' +
+      '<span class="hint">Allowance for workspaces on the Plus package.</span></div></div>' +
+      '<span class="hint">Raising an allowance lets the customer provision more workspaces of that package. Reducing it does not delete existing workspaces.</span>' +
       '<div class="actions end" style="margin-top:22px"><button class="button secondary" data-action="close-modal">Cancel</button>' +
-      '<button class="button" data-confirm-quota="' + accountId + '">Update quota</button></div>');
+      '<button class="button" data-confirm-quota="' + accountId + '">Update allowances</button></div>');
   }
 
   function maintenanceModal() {
@@ -2846,15 +2866,18 @@ var ICONS = {
       // (n8n image updates moved to the updateImageModal flow + actions, 0.1.50)
       var cQuota = event.target.closest("[data-confirm-quota]");
       if (cQuota) {
-        var quotaVal = parseInt(($("#quota-input") || {}).value || "1", 10);
-        if (!quotaVal || quotaVal < 1 || quotaVal > 50) { showToast("Invalid quota", "Quota must be 1 to 50."); return; }
+        var qaVal = parseInt(($("#quota-input-a") || {}).value || "1", 10);
+        var qbVal = parseInt(($("#quota-input-b") || {}).value || "1", 10);
+        if ((!qaVal || qaVal < 1 || qaVal > 50) || (!qbVal || qbVal < 1 || qbVal > 50)) { showToast("Invalid allowance", "Allowances must be 1 to 50."); return; }
         closeModal();
         (async function () {
+          var id = cQuota.dataset.confirmQuota;
           try {
-            await api("/admin/accounts/" + cQuota.dataset.confirmQuota + "/quota", { method: "PUT", body: { quota: quotaVal } });
-            showToast("Quota updated", "The customer may now own " + quotaVal + " workspace(s).");
+            await api("/admin/accounts/" + id + "/quota", { method: "PUT", body: { quota: qaVal, plan: "a" } });
+            await api("/admin/accounts/" + id + "/quota", { method: "PUT", body: { quota: qbVal, plan: "b" } });
+            showToast("Allowances updated", qaVal + " Workspace (GHS 300) and " + qbVal + " Workspace Plus (GHS 500).");
             refreshAdminData();
-          } catch (err) { showToast("Quota update failed", err.message); }
+          } catch (err) { showToast("Allowance update failed", err.message); }
         })();
       }
       var cBackupToggle = event.target.closest("[data-confirm-admin-backup-toggle]");
@@ -2903,16 +2926,19 @@ var ICONS = {
         var mpId = cMarkPaid.dataset.confirmMarkPaid;
         var paidFrom = (document.getElementById("paid-from") || {}).value;
         var paidUntil = (document.getElementById("paid-until") || {}).value;
+        var planSel = document.querySelector('input[name="paid-plan"]:checked');
+        var planVal = planSel ? planSel.value : "";
         function toEpoch(dateStr) { var d = new Date(dateStr + "T23:59:59"); return Math.floor(d.getTime() / 1000); }
         if (!paidFrom || !paidUntil) { showToast("Dates required", "Pick both the start and expiry dates."); return; }
+        if (!planVal) { showToast("Package required", "Choose which package was paid for."); return; }
         var until = toEpoch(paidUntil);
         var from = toEpoch(paidFrom);
         closeModal();
         (async function () {
           try {
-            var data = await api("/admin/accounts/" + mpId + "/mark-paid", { method: "POST", body: { paid_until: until, paid_from: from } });
+            var data = await api("/admin/accounts/" + mpId + "/mark-paid", { method: "POST", body: { paid_until: until, paid_from: from, plan: planVal } });
             showToast(data.subscription_status === "active" ? "Marked as paid" : "Recorded as expired",
-              data.subscription_status === "active" ? "Subscription active until " + fmtDate(until) + "." : "Expiry was in the past; the workspace stays off.");
+              data.subscription_status === "active" ? "Subscription active until " + fmtDate(until) + " on the " + (planVal === "b" ? "Plus (GHS 500)" : "Workspace (GHS 300)") + " package." : "Expiry was in the past; the workspace stays off.");
             refreshAdminData();
           } catch (err) { showToast("Mark-paid failed", err.message); }
         })();

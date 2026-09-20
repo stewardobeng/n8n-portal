@@ -131,6 +131,8 @@ class AccountOut(BaseModel):
     display_name: str
     status: str
     quota: int = 1
+    quota_a: int = 1   # per-plan workspace allowances (0.1.68)
+    quota_b: int = 1
     subscription_status: str = "none"
     paid_until: Optional[int] = None
     paid_from: Optional[int] = None
@@ -162,6 +164,7 @@ class AdminAttachIn(BaseModel):
 class AdminMarkPaidIn(BaseModel):
     paid_until: Optional[int] = None  # epoch seconds (expiry date); omit to auto-anchor on NPM created_on
     paid_from: Optional[int] = None  # epoch seconds (subscription start; backdating)
+    plan: Optional[str] = None  # 'a' | 'b': which package was paid for (0.1.68)
 
 
 class AdminExtendIn(BaseModel):
@@ -349,6 +352,8 @@ def _account_to_out(a) -> AccountOut:
         id=a["id"], email=a["email"], username=a["username"],
         display_name=a["display_name"], status=a["status"],
         quota=_row_get(a, "quota", 1),
+        quota_a=db.account_quota_for(a, "a"),
+        quota_b=db.account_quota_for(a, "b"),
         subscription_status=_row_get(a, "subscription_status", "none"),
         paid_until=_row_get(a, "paid_until"),
         paid_from=_row_get(a, "paid_from"),
@@ -1575,15 +1580,36 @@ def admin_unlock(account_id: int):
 
 class QuotaIn(BaseModel):
     quota: int = Field(..., ge=1, le=50)
+    plan: Optional[str] = None  # 'a' | 'b': which package's allowance (0.1.68); omit = legacy single quota
 
 
 @app.put("/api/v1/admin/accounts/{account_id}/quota", dependencies=[Depends(verify_admin)])
 def admin_set_quota(account_id: int, payload: QuotaIn):
-    """Admin raises/lowers how many n8n instances this account may provision."""
+    """Admin raises/lowers how many n8n instances this account may provision.
+    0.1.68: payload.plan targets a specific package's allowance (a|b); without
+    it the LEGACY single quota is set (kept for API compatibility)."""
     if not db.get_account(account_id):
         raise HTTPException(404, "Account not found.")
+    plan = (payload.plan or "").strip().lower()
+    if plan:
+        if plan not in ("a", "b"):
+            raise HTTPException(422, "Plan must be 'a' or 'b'.")
+        db.set_account_quota_for(account_id, plan, payload.quota)
+        return {"account_id": account_id, "plan": plan, "quota": payload.quota}
     db.set_account_quota(account_id, payload.quota)
     return {"account_id": account_id, "quota": payload.quota}
+
+
+@app.get("/api/v1/admin/accounts/{account_id}/quotas", dependencies=[Depends(verify_admin)])
+def admin_get_quotas(account_id: int):
+    """Per-plan workspace allowances for the quota editor."""
+    a = db.get_account(account_id)
+    if not a:
+        raise HTTPException(404, "Account not found.")
+    return {"account_id": account_id,
+            "plan": db._row_get(a, "plan", "a") or "a",
+            "quota_a": db.account_quota_for(a, "a"),
+            "quota_b": db.account_quota_for(a, "b")}
 
 
 class BackupIn(BaseModel):
@@ -1718,10 +1744,19 @@ def admin_attach(account_id: int, payload: AdminAttachIn):
 def admin_mark_paid(account_id: int, payload: AdminMarkPaidIn):
     """Admin records a subscription with custom dates (no payment gateway).
     Future expiry -> active + instance started if stopped; past expiry ->
-    unpaid + instance stopped (backdated already-expired accounts)."""
+    unpaid + instance stopped (backdated already-expired accounts).
+    0.1.68: payload.plan selects WHICH package was paid for (a|b) and is
+    stored on the account, so provisioning uses that plan's template + quota."""
+    plan = (payload.plan or "").strip().lower()
+    if plan and plan not in ("a", "b"):
+        raise HTTPException(422, "Plan must be 'a' or 'b'.")
     try:
         result = admin_ops.mark_paid(account_id, payload.paid_until or 0,
                                      payload.paid_from)
+        if plan:
+            from . import db as _db
+            _db.set_account_plan(account_id, plan)
+            result["plan"] = plan
     except AdminOpsError as e:
         raise HTTPException(404, str(e))
     except Exception as e:

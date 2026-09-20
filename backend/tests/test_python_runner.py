@@ -303,3 +303,57 @@ def test_full_cycle_through_routes(runner_db, fake_pc, monkeypatch):
                headers=hdr)
     assert r.status_code == 200, r.text
     assert db.get_instance(inst["id"])["python_runner"] == 0
+
+
+# ---------- legacy stack files (no N8N_RUNNERS_ENABLED line) ----------
+
+LEGACY = """services:
+  n8n:
+    image: n8nio/n8n:2.40.3
+    restart: unless-stopped
+    cpus: "0.50"
+    mem_limit: "1g"
+    mem_reservation: "512m"
+
+    ports:
+      - "${N8N_PORT}:5678"
+
+    environment:
+      # Database (SQLite stored in volume)
+      - DB_TYPE=sqlite
+      - DB_SQLITE_VACUUM_ON_STARTUP=true
+
+      # Encryption (unique per tenant)
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+
+      # Timezone
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
+
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+volumes:
+  n8n_data:
+"""
+
+
+def test_attach_on_legacy_stack_without_runners_line(runner_db, monkeypatch):
+    from app.services import python_runner as pr
+    from app.services.portainer_client import PortainerClient
+    pc = FakePC(LEGACY)
+    monkeypatch.setattr(PortainerClient, "__new__", lambda cls, *a, **k: pc)
+    aid = _account("legacy@steprotech.com")
+    inst = _instance(aid)
+    pr.attach_runner(inst)
+    content = pc.puts[0]["content"]
+    # runners flag + block injected, exactly once
+    assert content.count("- N8N_RUNNERS_ENABLED=true") == 1
+    assert "portal-runner:env-start" in content
+    # runners service sits inside services: (before top-level volumes:)
+    assert content.find("runners:") < content.find("\nvolumes:")
+    assert db.get_instance(inst["id"])["python_runner"] == 1
+    # and detach restores byte-equivalence
+    pr.detach_runner(db.get_instance(inst["id"]))
+    after = pc.stack_file
+    norm = lambda s: re.sub(r"[ \t]+\n", "\n", re.sub(r"\n{3,}", "\n\n", s)).strip()
+    assert norm(after) == norm(LEGACY)

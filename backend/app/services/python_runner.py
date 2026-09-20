@@ -175,14 +175,35 @@ def attach_runner(instance) -> dict:
     env.append({"name": "N8N_RUNNERS_AUTH_TOKEN",
                 "value": db.new_key(prefix="", nbytes=24)})
 
-    # 1. runner env lines go right after the existing N8N_RUNNERS_ENABLED line
+    # 1. runner env lines go right after the existing N8N_RUNNERS_ENABLED line.
+    #    LEGACY STACKS (first-generation files, e.g. the chibz plus stack built
+    #    before that env existed) have NO such line: add it together with our
+    #    block right after the n8n service's "environment:" line instead.
     anchor = "- N8N_RUNNERS_ENABLED=true"
     n_anchors = content.count(anchor)
-    if n_anchors != 1:
+    if n_anchors == 1:
+        content = content.replace(anchor, anchor + "\n" + _env_block(), 1)
+    elif n_anchors == 0:
+        m_env = re.search(r"^    environment:\s*$", content, flags=re.M)
+        if not m_env:
+            raise ValueError(
+                "Could not locate the n8n service environment block in the "
+                "stack file; attach aborted (stack file unchanged).")
+        # LEGACY (no runners flag yet): the flag line rides INSIDE the marker
+        # block (6-space indent, same as the template's sequence items) and no
+        # extra newline is added, so detach's line-boundary cut restores the
+        # file byte-exactly.
+        legacy_block = _env_block().replace(
+            f"      # >>> {MARK}:env-start\n",
+            f"      # >>> {MARK}:env-start\n"
+            "      - N8N_RUNNERS_ENABLED=true\n",
+            1,
+        )
+        content = content[: m_env.end()] + "\n" + legacy_block + content[m_env.end():]
+    else:
         raise ValueError(
-            f"Expected exactly one N8N_RUNNERS_ENABLED line in the stack file, "
+            f"Expected at most one N8N_RUNNERS_ENABLED line in the stack file, "
             f"found {n_anchors}; attach aborted (stack file unchanged).")
-    content = content.replace(anchor, anchor + "\n" + _env_block(), 1)
 
     # 2. runners service goes INSIDE the existing services: mapping — inserted
     #    immediately before the top-level volumes: line. Appending it at the end
@@ -243,6 +264,9 @@ def detach_runner(instance) -> None:
     content = _cut(content, f"  # >>> {MARK}:service-start", f"  # >>> {MARK}:service-end")
     content = _cut(content, f"# >>> {MARK}:configs-start", f"# >>> {MARK}:configs-end")
     content = re.sub(r"\n{3,}", "\n\n", content)
+    # drop whitespace-only lines the cuts can leave behind (legacy insertion
+    # boundary); keeps the restore byte-close to pre-attach
+    content = re.sub(r"^[ \t]+\n", "\n", content, flags=re.M)
 
     pc.update_stack_file(stack_id, env_id, content, env)
     db.update_instance(instance["id"], python_runner=0)
