@@ -362,9 +362,14 @@ def _row_get(row, key, default=None):
 
 
 def _account_to_out(a) -> AccountOut:
+    dn = (a["display_name"] or "").strip()
+    if not dn:
+        # 0.1.72: legacy accounts signed up before display names were defaulted
+        # still render the person's real name, not the email-derived username.
+        dn = f"{_row_get(a, 'first_name', '') or ''} {_row_get(a, 'last_name', '') or ''}".strip()
     return AccountOut(
         id=a["id"], email=a["email"], username=a["username"],
-        display_name=a["display_name"], status=a["status"],
+        display_name=dn, status=a["status"],
         quota=_row_get(a, "quota", 1),
         quota_a=db.account_quota_for(a, "a"),
         quota_b=db.account_quota_for(a, "b"),
@@ -981,8 +986,13 @@ def create_account(payload: AccountCreate, request: Request):
         provisioner.validate_password_policy(payload.password)
     except provisioner.ProvisionError as e:
         raise HTTPException(422, str(e))
+    # Display name (0.1.72, Steward): the person's REAL name must be the
+    # account's main name - never the email-derived username. Default it from
+    # the signup name fields when the form did not send one.
+    display_name = (payload.display_name or "").strip() or \
+        f"{payload.first_name} {payload.last_name}".strip()
     account_id = db.create_account(
-        email, username, payload.display_name or "",
+        email, username, display_name,
         first_name=payload.first_name, last_name=payload.last_name,
         password_hash=hash_password(payload.password),
     )
