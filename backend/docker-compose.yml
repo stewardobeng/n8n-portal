@@ -34,6 +34,13 @@ services:
       - PLAN_CURRENCY=${PLAN_CURRENCY}
       - PLAN_AMOUNT_MINOR=${PLAN_AMOUNT_MINOR}
       - PAYSTACK_SECRET_KEY=${PAYSTACK_SECRET_KEY}
+      # live-money guards (2026-09-27 go-live): the router already sends
+      # x-router-secret, so setting the matching value here makes the second
+      # lock active, and the expected amounts reject any charge that is not
+      # exactly a plan price.
+      - PAYSTACK_ROUTER_SECRET=${PAYSTACK_ROUTER_SECRET}
+      - PAYSTACK_EXPECTED_AMOUNT_A=${PAYSTACK_EXPECTED_AMOUNT_A}
+      - PAYSTACK_EXPECTED_AMOUNT_B=${PAYSTACK_EXPECTED_AMOUNT_B}
       - PAYSTACK_PLAN_CODE=${PAYSTACK_PLAN_CODE}
       - PAYSTACK_PLAN_CODE_B=${PAYSTACK_PLAN_CODE_B}
       - PLAN_B_ACTIVE=${PLAN_B_ACTIVE}
