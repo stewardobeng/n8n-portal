@@ -538,7 +538,7 @@ var ICONS = {
     var s = subscriptionState();
     var inst = state.session && state.session.instances ? state.session.instances[0] : null;
     var used = state.session ? (state.session.instances || []).filter(function (i) { return i.status !== "deleted"; }).length : 0;
-    var quota = acc ? (acc.quota || 1) : 1;
+    var quota = allowanceFor(acc, state.session ? state.session.instances : []);
     var name = acc ? cap(acc.display_name || acc.username) : "";
     var running = s === "active";
     var provisionState = inst && inst.status === "provisioning";
@@ -561,9 +561,7 @@ var ICONS = {
       dashboardStatus() +
       '<div class="grid cols-3" style="margin-top:18px">' +
         '<section class="card"><div class="card-head"><h3>Subscription</h3>' + subBadgeFor(s) + "</div>" +
-          '<dl class="info-list"><div class="info-row"><dt>Plan</dt><dd>' + esc(planName(acc)) + "</dd></div>" +
-          '<div class="info-row"><dt>Annual fee</dt><dd>' + esc(planFee()) + "</dd></div>" +
-          '<div class="info-row"><dt>Period end</dt><dd>' + esc(periodEnd) + "</dd></div></dl></section>" +
+          subscriptionsList(acc, state.session ? (state.session.instances || []) : []) + "</section>" +
         '<section class="card"><div class="card-head"><h3>Workspace quota</h3><span class="muted small">' + used + " of " + quota + " used</span></div>" +
           '<div class="quota"><div class="bar"><span style="width:' + Math.min(100, quota ? Math.round(used / quota * 100) : 0) + '%"></span></div><strong>' + Math.round(quota ? used / quota * 100 : 0) + "%</strong></div>" +
           '<p class="small muted" style="margin-top:20px">' + (used < quota ? "You can create another workspace." : "Contact support if your business needs a higher limit.") + "</p>" +
@@ -580,13 +578,73 @@ var ICONS = {
     );
   }
 
-  function planName(acc) {
-    var p = state.plans.find(function (x) { return x.active; }) || state.plans[0];
-    return p ? p.name : "n8n Workspace";
+  /* ---------- package identity (0.1.73) ----------
+     A package is identified by the API's own `key` ('a' | 'b'), never by "the
+     first active plan": that shortcut printed the wrong package on every screen
+     for a Plus customer. Older API responses without `key` fall back to price. */
+  function planKeyOf(x) {
+    var k = x && x.plan;
+    return k === "b" ? "b" : "a";
   }
-  function planFee() {
-    var p = state.plans.find(function (x) { return x.active; }) || state.plans[0];
+  function planByKey(key) {
+    var want = key === "b" ? "b" : "a";
+    var list = state.plans || [];
+    var byKey = list.find(function (p) { return p.key === want; });
+    if (byKey) return byKey;
+    var byPrice = list.find(function (p) {
+      return want === "b" ? p.amount_minor === 50000 : p.amount_minor !== 50000;
+    });
+    return byPrice || null;
+  }
+  function planName(x) {
+    var p = planByKey(planKeyOf(x));
+    return (p && p.name) || (planKeyOf(x) === "b" ? "n8n Workspace Plus" : "n8n Workspace");
+  }
+  function planFee(x) {
+    var p = planByKey(planKeyOf(x));
     return p ? fmtMinor(p.amount_minor, p.currency) + " / year" : "-";
+  }
+  // Which packages does this account HOLD? Its own package plus any package a
+  // live workspace sits on (each workspace carries its own package since 0.1.70).
+  function heldPackages(acc, instances) {
+    var held = { a: false, b: false };
+    if (acc) held[planKeyOf(acc)] = true;
+    (instances || []).forEach(function (i) {
+      if (!i || i.status === "deleted" || i.status === "failed") return;
+      held[planKeyOf(i)] = true;
+    });
+    return held;
+  }
+  function quotaOf(acc, key) {
+    var value = acc ? (key === "b" ? acc.quota_b : acc.quota_a) : null;
+    if (value === null || value === undefined) value = acc ? acc.quota : null;
+    return Number(value || 0) || 1;
+  }
+  // The allowance the customer really has = one allowance per package held (the
+  // provisioning gate is per package). The legacy single `quota` field
+  // understated this for anyone holding both packages.
+  function allowanceFor(acc, instances) {
+    var held = heldPackages(acc, instances);
+    var total = 0;
+    if (held.a) total += quotaOf(acc, "a");
+    if (held.b) total += quotaOf(acc, "b");
+    if (total > 0) return total;
+    return (acc && acc.quota) || 1;
+  }
+  // Per-package usage lines ("n8n Workspace: 1 of 1 used") for the workspace page.
+  function allowanceBreakdown(acc, instances) {
+    var held = heldPackages(acc, instances);
+    var counts = { a: 0, b: 0 };
+    (instances || []).forEach(function (i) {
+      if (!i || i.status === "deleted" || i.status === "failed") return;
+      counts[planKeyOf(i)] += 1;
+    });
+    var rows = [];
+    ["a", "b"].forEach(function (k) {
+      if (!held[k]) return;
+      rows.push(planName({ plan: k }) + ": " + counts[k] + " of " + quotaOf(acc, k) + " used");
+    });
+    return rows;
   }
 
   function workspaceItemHtml(inst, badgeHtml, actionHtml) {
@@ -605,7 +663,8 @@ var ICONS = {
     var acc = state.session ? state.session.account : null;
     var insts = state.session ? (state.session.instances || []).filter(function (i) { return i.status !== "deleted"; }) : [];
     var used = insts.length;
-    var quota = acc ? (acc.quota || 1) : 1;
+    var quota = allowanceFor(acc, insts);
+    var allowanceRows = allowanceBreakdown(acc, insts);
     var detail = "";
     if (s === "provisioning") {
       detail = '<section class="card" style="margin-top:18px"><div class="hero-status info"><span class="big-icon">' + icon("clock") + '</span><div><h2>Your workspace is being prepared</h2><p>You can close this page. We will email you the moment it is ready.</p></div></div>' +
@@ -644,6 +703,7 @@ var ICONS = {
       '<section class="card" style="margin-top:18px"><div class="card-head"><h3>Workspace allowance</h3><strong>' + used + " of " + quota + " used</strong></div>" +
         '<div class="quota"><div class="bar"><span style="width:' + Math.min(100, quota ? Math.round(used / quota * 100) : 0) + '%"></span></div>' +
         '<span>' + Math.max(0, quota - used) + " available</span></div>" +
+        (allowanceRows.length > 1 ? '<p class="small muted" style="margin:14px 0 0">' + esc(allowanceRows.join(" - ")) + "</p>" : "") +
         '<p class="small muted" style="margin:18px 0 0">Each workspace receives its own secure SteProTECH address. Contact support if you need more than your current allowance.</p></section>' +
       "</main>");
   }
@@ -700,7 +760,7 @@ var ICONS = {
 
   // Package copy (0.1.69): distinct contents per package, keyed by price so it
   // works whichever Paystack plan id comes back.
-  function isPlusPlan(p) { return !!p && p.amount_minor === 50000; }
+  function isPlusPlan(p) { return !!p && (p.key ? p.key === "b" : p.amount_minor === 50000); }
   function wsPlanTag(i) {
     // Package chip for a workspace row (0.1.70): each workspace carries its own package.
     return i && i.plan === "b" ? ' <span class="status info">Plus</span>' : ' <span class="status neutral">GHS 300</span>';
@@ -729,6 +789,20 @@ var ICONS = {
       "Email support",
       "Automatic annual renewal"
     ];
+  }
+
+  // Resource specs (0.1.73): rendered straight from the API `specs` list, which
+  // the backend derives from the real stack template - so the card can never
+  // advertise resources the workspace does not actually get.
+  function planSpecsBlock(p) {
+    var rows = (p && p.specs) || [];
+    if (!rows.length) return "";
+    return '<div>' +
+      '<p class="small muted" style="margin:24px 0 2px;font-weight:700">Resources included</p>' +
+      '<dl class="info-list">' + rows.map(function (r) {
+        return '<div class="info-row"><dt class="small">' + esc(r.label) + '</dt>' +
+          '<dd class="small" style="text-align:right;margin-left:auto">' + esc(r.value) + "</dd></div>";
+      }).join("") + "</dl></div>";
   }
 
   function subscriptionsList(acc, instances) {
@@ -772,23 +846,38 @@ var ICONS = {
     var subscribed = sub === "active" && s !== "expired" && s !== "pastdue" && s !== "cancelled";
     var due = s === "pastdue" || s === "expired" || s === "cancelled" || sub === "locked" || sub === "past_due" || sub === "unpaid";
     var openPay = state.paymentsOpen !== false;
+    var held = heldPackages(acc, state.session ? (state.session.instances || []) : []);
     var planCards = plans.map(function (p) {
+      var key = p.key || (p.amount_minor === 50000 ? "b" : "a");
+      var holdsThis = !!held[key];
       var activePlan = !!p.active;
       if (activePlan) {
+        // Only the package the customer actually holds may read "Already
+        // subscribed" (Steward 2026-09-27); the other one stays actionable so
+        // it can be added later as a second subscription.
         var cta;
-        if (subscribed) {
+        if (holdsThis && subscribed) {
           cta = '<span class="plan-already">' + icon("check") + " Already subscribed</span>";
+        } else if (holdsThis && due) {
+          cta = '<button class="button warning" data-action="pay-now" data-plan="' + key + '">Renew subscription</button>';
         } else if (!openPay) {
           cta = '<button class="button' + (due ? " warning" : "") + '" disabled title="New payments are paused by SteProTECH">Payments on hold</button>';
-        } else if (due) {
-          cta = '<button class="button warning" data-action="pay-now" data-plan="' + (p.amount_minor === 50000 ? "b" : "a") + '">Renew subscription</button>';
         } else {
-          cta = '<button class="button" data-action="pay-now" data-plan="' + (p.amount_minor === 50000 ? "b" : "a") + '">Subscribe</button>';
+          cta = '<button class="button" data-action="pay-now" data-plan="' + key + '">Subscribe</button>';
         }
-        return '<article class="plan-card featured"><div class="eyebrow">Available now</div><h2>' + esc(p.name) + "</h2>" +
+        // NB: read paid_until straight off the account - the page-level
+        // `periodEnd` below is declared later and would be undefined here.
+        var renewal = acc && acc.paid_until ? fmtDate(acc.paid_until) : "";
+        var stateLine = holdsThis
+          ? '<p class="small muted" style="margin:14px 0 0">Your package - ' +
+            (renewal ? "renews on " + esc(renewal) + " at " : "") +
+            esc(fmtMinor(p.amount_minor, p.currency)) + " per year.</p>"
+          : '<p class="small muted" style="margin:14px 0 0">Not subscribed yet - you can add it any time. Each package carries its own workspace allowance.</p>';
+        return '<article class="plan-card featured"><div class="eyebrow">' + (holdsThis ? "Your package" : "Available now") + "</div><h2>" + esc(p.name) + "</h2>" +
           '<div class="plan-price">' + esc(fmtMinor(p.amount_minor, p.currency)) + ' <span>per year</span></div>' +
-          planBlurbFor(p) +
+          planBlurbFor(p) + stateLine +
           '<ul class="feature-list">' + planFeaturesFor(p).map(function (f) { return "<li>" + icon("check") + "<span>" + esc(f) + "</span></li>"; }).join("") + "</ul>" +
+          planSpecsBlock(p) +
           cta + "</article>";
       }
       return '<article class="plan-card disabled"><span class="ribbon">Coming soon</span><div class="eyebrow">Future plan</div><h2>' + esc(p.name) + "</h2>" +
@@ -1836,7 +1925,7 @@ var ICONS = {
     if (!acc) return;
     var email = acc.email || "";
     showModal(modalHeader("Add another workspace") +
-      '<p class="muted">Your account can own up to ' + ((acc && acc.quota) || 1) + ' workspaces. Each workspace gets its own owner, its own password, and a unique address from the username you choose.</p>' +
+      '<p class="muted">Your account can own up to ' + allowanceFor(acc, state.session ? state.session.instances : []) + ' workspaces. Each workspace gets its own owner, its own password, and a unique address from the username you choose.</p>' +
       '<div class="form-grid">' +
         '<div class="field full"><label>Owner email</label>' +
         '<input id="ws-email" type="email" value="' + esc(email) + '" autocomplete="off" spellcheck="false">' +

@@ -32,6 +32,7 @@ def _decode_subject_is_admin(authorization: str | None) -> bool:
         return False
 from .services import provisioner, billing, access_gate, admin_ops, backup_ops
 from .services import account_security, passkeys, n8n_releases, python_runner
+from .services import plan_specs
 from .services import security_controls as sc
 from .services.admin_ops import AdminOpsError
 from .services.portainer_client import PortainerClient
@@ -1038,12 +1039,21 @@ def provision(account_id: int, background: BackgroundTasks,
                 provisioner.validate_password_policy(payload.password)
             except provisioner.ProvisionError as e:
                 raise HTTPException(422, str(e))
-    # Quota gate: one instance per account unless the admin raised the quota
-    # (provisioner enforces the same rule; this gives the API a fast 409).
-    quota = account["quota"] if "quota" in account.keys() else settings.default_quota
-    live = db.count_instances(account_id)
+    # Quota gate, PER PACKAGE (0.1.73): the fast 409 must count the workspace
+    # against the package it will actually be provisioned as. Reading the legacy
+    # single quota here blocked an account that holds BOTH packages from using
+    # its second allowance (the provisioner's own gate is per-package, so the
+    # route was the stricter, wrong one).
+    target_plan = "a"
+    if payload and payload.plan in ("a", "b"):
+        target_plan = payload.plan            # admin package choice (checked below)
+    elif "plan" in account.keys() and (account["plan"] or "a") == "b":
+        target_plan = "b"
+    quota = db.account_quota_for(account, target_plan)
+    live = db.count_instances_by_plan(account_id, target_plan)
     if live >= quota:
-        raise HTTPException(409, f"Instance quota reached ({live}/{quota}). Contact an administrator to increase your quota.")
+        package = "Plus" if target_plan == "b" else "standard"
+        raise HTTPException(409, f"Workspace quota reached on the {package} package ({live}/{quota}). Contact an administrator to increase your allowance.")
     # PAYMENT GATE: instances are only created after the annual subscription is
     # active (webhook sets subscription_status=active on charge.success).
     if billing.gateway() in ("paystack", "stripe") and account["subscription_status"] != "active":
@@ -1115,21 +1125,30 @@ def plan_info():
 
 @app.get("/api/v1/plans")
 def plans():
-    """Both annual plans (Steward 2026-09-01): GHS 300 active, GHS 500
-    inactive until the special compose is built. Kept in GHS for now."""
+    """Both annual packages (Steward 2026-09-01): GHS 300 and GHS 500 Plus.
+
+    Each entry carries `key` ('a' | 'b') so the UI labels a package from the API
+    rather than guessing off the price, plus `specs` (0.1.73) built by
+    plan_specs from the ACTUAL stack template, so the billing page shows the
+    resources a workspace really gets.
+    """
     plans_out = [{
+        "key": "a",
         "name": settings.plan_name,
         "currency": settings.plan_currency,
         "amount_minor": settings.plan_amount_minor,
         "interval": "annually",
         "active": True,
+        "specs": plan_specs.specs_for_plan("a"),
     }]
     plans_out.append({
+        "key": "b",
         "name": settings.plan_b_name,
         "currency": settings.plan_currency,
         "amount_minor": settings.plan_b_amount_minor,
         "interval": "annually",
         "active": settings.plan_b_active,
+        "specs": plan_specs.specs_for_plan("b"),
     })
     return {"plans": plans_out, "gateway": billing.gateway(),
             "payments_open": billing.payments_open()}
@@ -1636,8 +1655,13 @@ def admin_set_quota(account_id: int, payload: QuotaIn):
             raise HTTPException(422, "Plan must be 'a' or 'b'.")
         db.set_account_quota_for(account_id, plan, payload.quota)
         return {"account_id": account_id, "plan": plan, "quota": payload.quota}
+    # 0.1.73: db.set_account_quota also raises the account's CURRENT package
+    # allowance - the value the provisioning gate actually reads - so a legacy
+    # write can no longer raise a number nothing consults.
     db.set_account_quota(account_id, payload.quota)
-    return {"account_id": account_id, "quota": payload.quota}
+    current = db._row_get(db.get_account(account_id), "plan", "a") or "a"
+    return {"account_id": account_id, "quota": payload.quota,
+            "plan": "b" if current == "b" else "a"}
 
 
 @app.get("/api/v1/admin/accounts/{account_id}/quotas", dependencies=[Depends(verify_admin)])

@@ -395,12 +395,23 @@ def set_account_status(account_id: int, status: str) -> None:
 
 
 def set_account_quota(account_id: int, quota: int) -> None:
-    """Admin raises/lowers the max-instance quota for an account."""
+    """Admin raises/lowers the max-instance quota for an account.
+
+    0.1.73: the provisioning gate reads the PER-PACKAGE allowance, so a legacy
+    write also raises the allowance of the package the account currently holds.
+    Without this an admin could "raise the quota" on an account and still see the
+    next workspace refused, because only quota_a/quota_b are consulted. The
+    legacy column is kept in step for older callers and for the admin UI.
+    """
+    value = max(1, quota)
     conn = get_conn()
     try:
         conn.execute(
-            "UPDATE accounts SET quota = ? WHERE id = ?",
-            (max(1, quota), account_id),
+            "UPDATE accounts SET quota = ?, "
+            "quota_a = CASE WHEN COALESCE(plan, 'a') = 'b' THEN quota_a ELSE ? END, "
+            "quota_b = CASE WHEN COALESCE(plan, 'a') = 'b' THEN ? ELSE quota_b END "
+            "WHERE id = ?",
+            (value, value, value, account_id),
         )
         conn.commit()
     finally:
@@ -464,9 +475,13 @@ def count_instances(account_id: int) -> int:
         conn.close()
 
 
-def count_instances_by_plan(account_id: int, plan: str | None = None) -> dict:
+def count_instances_by_plan(account_id: int, plan: str | None = None) -> dict | int:
     """Live instance counts per package for an account (0.1.70). Rows with a
-    NULL/missing plan (pre-0.1.70) count toward plan 'a'."""
+    NULL/missing plan (pre-0.1.70) count toward plan 'a'.
+
+    Contract: returns the whole {"a": n, "b": n} mapping when `plan` is None,
+    and a single int for that package when a plan is given (the provisioning
+    gates rely on the int form)."""
     conn = get_conn()
     try:
         rows = conn.execute(
