@@ -147,7 +147,10 @@ def mock_handle_event(event: dict) -> dict:
                 "charge.success for %s account %s; NOT reactivating (admin state)",
                 _row_get(account, "account_state", "active"), account["id"])
             return {"status": "ignored_suspended", "account_id": account["id"]}
-        paid_until = int(time.time()) + 365 * 24 * 3600
+        # Annual term, EXTENDING the current one (0.1.75): a payment made while
+        # the subscription is still active adds a year rather than resetting it.
+        paid_until = max(int(time.time()), int(_row_get(account, "paid_until", 0) or 0)) \
+            + 365 * 24 * 3600
         db.set_subscription(account["id"], "mock_cus", "mock_sub",
                             "active", paid_until)
         unlock_instance(account["id"])

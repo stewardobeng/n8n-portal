@@ -115,15 +115,26 @@ def ensure_plan_b() -> str:
 
 
 def initialize_checkout(account_id: int, email: str, plan: str = "a") -> dict:
-    """Create a Paystack transaction for the annual plan. Returns
-    {authorization_url, reference, access_code} for the client redirect."""
+    """Create a Paystack transaction for the annual charge. Returns
+    {authorization_url, reference, access_code} for the client redirect.
+
+    NO PLAN OBJECT (0.1.75, Steward 2026-09-28): attaching a Paystack plan turns
+    the transaction into a SUBSCRIPTION, and a subscription checkout is card-only
+    (recurring charges cannot run on mobile money, so Paystack withholds that
+    channel). Without the plan this is a plain one-off annual charge, which
+    offers every channel the account has enabled: card, mobile money and bank
+    transfer. Renewal then belongs to the portal: the customer repays from the
+    billing page (or from a renewal link) and charge.success EXTENDS paid_until.
+
+    Package resolution is unaffected: `_resolve_plan` matches the plan code when
+    one is configured and otherwise falls back to the amount (50000 minor units
+    is package b), and `_check_amount` still gates live money.
+    """
     is_b = plan == "b"
-    plan_code = ensure_plan_b() if is_b else ensure_plan()
     payload = {
         "email": email,
         "amount": settings.plan_b_amount_minor if is_b else settings.plan_amount_minor,
         "currency": settings.plan_currency,
-        "plan": plan_code,
         # `app` tags this transaction so the shared Paystack webhook router can
         # route it to the correct website (Steward 2026-09-03: one account, many
         # sites -> a single router fans events out by this tag).
@@ -279,8 +290,14 @@ def _on_charge_success(data: dict) -> dict:
             "Paystack charge.success for %s account %s; NOT reactivating (admin state)",
             billing._row_get(account, "account_state", "active"), account["id"])
         return {"status": "ignored_suspended", "account_id": account["id"]}
-    # annual: paid_until = now + 1 year (Paystack renews yearly on the plan)
-    paid_until = int(time.time()) + 365 * 24 * 3600
+    # Annual term, and a payment EXTENDS the term instead of resetting it
+    # (0.1.75): with the Paystack plan gone, renewal is a customer action, so
+    # paying while still active must ADD a year to the remaining time, and
+    # paying after expiry starts a fresh year from today. Same rule the admin
+    # free-extend already uses.
+    now = int(time.time())
+    current_until = int(billing._row_get(account, "paid_until", 0) or 0)
+    paid_until = max(now, current_until) + 365 * 24 * 3600
     customer = data.get("customer") or {}
     sub = data.get("subscription") or {}
     db.set_subscription(
