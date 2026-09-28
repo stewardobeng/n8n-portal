@@ -195,7 +195,7 @@ var ICONS = {
   function profileChip() {
     var isAdmin = currentKind() === "admin";
     var acc = state.session && state.session.account ? state.session.account : null;
-    var name = isAdmin ? "Administrator" : (acc ? (acc.display_name || cap(acc.username)) : "Account");
+    var name = isAdmin ? "Administrator" : (acc ? firstNameOf(acc) : "Account");
     var sub = isAdmin ? "SteProTECH staff" : (acc ? acc.email : "");
     var initials = isAdmin ? "SO" : (acc ? initialsOf(acc.display_name || acc.username) : "?");
     // Interactive account chip (Steward 2026-09-04): toggles a drop-up menu
@@ -203,11 +203,22 @@ var ICONS = {
     // (admin clears + goes to admin sign-in, customer confirms + goes to entry,
     // impersonation exits first) so behavior stays identical to the topbar icon.
     return '<div class="profile-chip" role="button" tabindex="0" aria-haspopup="menu" aria-expanded="false" aria-controls="profile-chip-menu" data-action="profile-menu" title="Account menu">' +
-      '<span class="avatar">' + esc(initials) + '</span><span><strong>' + esc(name) + '</strong><small>' + esc(sub) + '</small></span>' +
+      '<span class="avatar">' + esc(initials) + '</span><span class="chip-text"><strong>' + esc(name) + '</strong><small>' + esc(sub) + '</small></span>' +
       '<svg class="chip-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></div>' +
       '<div class="chip-menu" id="profile-chip-menu" role="menu" aria-label="Account menu">' +
         '<button class="chip-menu-item" role="menuitem" data-action="signout-route">' + icon("signout") + " Log out</button>" +
       "</div>";
+  }
+  function firstNameOf(acc) {
+    // First name only (0.1.74, Steward): the chip is 216px wide, so a full name
+    // pushed the email into a hard clip at the container edge. `first_name` is
+    // the real field; older rows fall back to the first token of the display
+    // name ("Olisaemeka Ekwenem" -> "Olisaemeka"), then to the username.
+    var first = String((acc && acc.first_name) || "").trim();
+    if (first) return first;
+    var dn = String((acc && acc.display_name) || "").trim();
+    if (dn) return dn.split(/\s+/)[0];
+    return cap((acc && acc.username) || "");
   }
   function initialsOf(name) {
     var words = String(name || "?").split(/[\s._-]+/).filter(function (w) { return w.length; });

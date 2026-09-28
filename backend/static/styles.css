@@ -159,6 +159,11 @@ h3 { font-size: 1rem; line-height: 1.3; }
 .profile-chip { display: flex; align-items: center; gap: 10px; padding: 12px; border-top: 1px solid rgba(255,255,255,.09); }
 .avatar { display: grid; flex: 0 0 auto; place-items: center; width: 34px; height: 34px; border-radius: 50%; color: white; background: var(--teal-700); font-size: .75rem; font-weight: 800; }
 .profile-chip small { display: block; color: #8fa5b6; }
+/* Chip text (0.1.74): the name+email span must be ALLOWED to shrink
+ * (min-width:0) or flex keeps it at content width and the email is hard-clipped
+ * at the container edge instead of ellipsising. Scoped to the chip only. */
+.chip-text { min-width: 0; }
+.chip-text strong, .chip-text small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .main-area { min-width: 0; }
 .topbar { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; justify-content: space-between; min-height: 68px; padding: 0 clamp(20px,3vw,42px); border-bottom: 1px solid var(--slate-200); background: rgba(255,255,255,.92); backdrop-filter: blur(14px); }
 .topbar h2 { margin: 0; font-size: 1.15rem; }

@@ -148,6 +148,7 @@ class AccountOut(BaseModel):
     account_state: str = "active"  # active | suspended | archived
     backup_enabled: bool = False   # customer may self-service backup (admin-set)
     plan: str = "a"                 # subscribed tier: a = GHS 300, b = GHS 500 (Plus)
+    first_name: str = ""            # 0.1.74: the sidebar chip shows only this
     created_at: int
     provisioned_at: Optional[int] = None
 
@@ -380,6 +381,7 @@ def _account_to_out(a) -> AccountOut:
         account_state=_row_get(a, "account_state", "active"),
         backup_enabled=bool(_row_get(a, "backup_enabled", 0)),
         plan=_row_get(a, "plan", "a") or "a",
+        first_name=(_row_get(a, "first_name", "") or "").strip(),
         created_at=a["created_at"], provisioned_at=a["provisioned_at"],
     )
 
