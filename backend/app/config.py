@@ -77,6 +77,14 @@ class Settings:
     plan_b_name: str = os.getenv("PLAN_B_NAME", "n8n Workspace Plus")
     plan_b_amount_minor: int = int(os.getenv("PLAN_B_AMOUNT_MINOR", "50000"))  # GHS 500 / year
     plan_b_active: bool = os.getenv("PLAN_B_ACTIVE", "false").lower() == "true"
+    # Renewal reminders (0.1.76): with the Paystack plan removed there is no
+    # automatic renewal, so the portal emails the customer before and after the
+    # term ends, each mail carrying a login-free renewal link. Sending stays OFF
+    # until Steward approves the wording, so the copy can be previewed on live
+    # data without a single customer being emailed.
+    renewal_reminders_enabled: bool = \
+        os.getenv("RENEWAL_REMINDERS_ENABLED", "false").lower() == "true"
+    portal_base_url: str = os.getenv("PORTAL_BASE_URL", "https://portal.steprotech.com")
     # Plan B stack = chibz/bigcroc owner tier (0.50 CPU / 1 GiB / heap 768)
     plan_b_compose_template_path: str = os.getenv(
         "PLAN_B_COMPOSE_TEMPLATE_PATH", "/app/templates/n8n-stack-compose-plus.yml"

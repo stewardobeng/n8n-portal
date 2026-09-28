@@ -188,6 +188,29 @@ def init_db(db_path: str | None = None) -> None:
             UNIQUE(gateway, event_type, reference)
         );
         """)
+        # Renewal reminders + login-free renewal links (0.1.76): with the Paystack
+        # plan gone, renewal is a customer action, so the portal remembers which
+        # notice it already sent for which TERM (`period` = the paid_until that
+        # notice was about, so next year's reminders are not suppressed by this
+        # year's) and the random links it has emailed out.
+        cur.executescript("""
+        CREATE TABLE IF NOT EXISTS renewal_notices (
+            account_id INTEGER NOT NULL,
+            stage TEXT NOT NULL,
+            period INTEGER NOT NULL,
+            sent_at INTEGER NOT NULL,
+            email TEXT DEFAULT '',
+            PRIMARY KEY (account_id, stage, period)
+        );
+        CREATE TABLE IF NOT EXISTS renewal_links (
+            token TEXT PRIMARY KEY,
+            account_id INTEGER NOT NULL,
+            plan TEXT NOT NULL DEFAULT 'a',
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            used_at INTEGER
+        );
+        """)
         ic3 = [r[1] for r in cur.execute("PRAGMA table_info(instances)")]
         if "python_runner" not in ic3:
             cur.execute("ALTER TABLE instances ADD COLUMN python_runner INTEGER NOT NULL DEFAULT 0")
@@ -1162,6 +1185,94 @@ def consume_passkey_challenge(challenge_id: int) -> None:
     conn = get_conn()
     try:
         conn.execute("DELETE FROM passkey_challenges WHERE id=?", (challenge_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ---------- renewal reminders + login-free renewal links (0.1.76) ----------
+
+def renewal_link_for_account(account_id: int, plan: str, min_expires: int):
+    """A still-live link token for this account+package, else None."""
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT token FROM renewal_links WHERE account_id=? AND plan=? "
+            "AND expires_at >= ? ORDER BY created_at DESC LIMIT 1",
+            (int(account_id), plan, int(min_expires))).fetchone()
+        return row["token"] if row else None
+    finally:
+        conn.close()
+
+
+def renewal_candidates(now: int, horizon_days: int = 31) -> list:
+    """Accounts whose term is inside the reminder horizon (near OR past).
+
+    Admin-suspended and archived accounts are excluded (payment must never talk
+    them into a state an admin took away), as is anything with no paid_until.
+    """
+    conn = get_conn()
+    try:
+        return conn.execute(
+            "SELECT * FROM accounts WHERE paid_until IS NOT NULL AND paid_until <= ? "
+            "AND COALESCE(account_state, 'active') = 'active' "
+            "AND COALESCE(subscription_status, 'none') "
+            "IN ('active', 'past_due', 'unpaid', 'locked') "
+            "ORDER BY paid_until ASC",
+            (now + horizon_days * 86400,)).fetchall()
+    finally:
+        conn.close()
+
+
+def notice_sent(account_id: int, stage: str, period: int) -> bool:
+    conn = get_conn()
+    try:
+        return conn.execute(
+            "SELECT 1 FROM renewal_notices WHERE account_id=? AND stage=? AND period=?",
+            (account_id, stage, period)).fetchone() is not None
+    finally:
+        conn.close()
+
+
+def record_notice(account_id: int, stage: str, period: int, sent_at: int,
+                  email: str = "") -> None:
+    conn = get_conn()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO renewal_notices "
+            "(account_id, stage, period, sent_at, email) VALUES (?, ?, ?, ?, ?)",
+            (account_id, stage, period, sent_at, email))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def create_renewal_link(token: str, account_id: int, plan: str, created_at: int,
+                        expires_at: int) -> None:
+    conn = get_conn()
+    try:
+        conn.execute(
+            "INSERT INTO renewal_links (token, account_id, plan, created_at, expires_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (token, account_id, plan, created_at, expires_at))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_renewal_link(token: str):
+    conn = get_conn()
+    try:
+        return conn.execute("SELECT * FROM renewal_links WHERE token=?",
+                            (token,)).fetchone()
+    finally:
+        conn.close()
+
+
+def mark_renewal_link_used(token: str, used_at: int) -> None:
+    conn = get_conn()
+    try:
+        conn.execute("UPDATE renewal_links SET used_at=? WHERE token=?", (used_at, token))
         conn.commit()
     finally:
         conn.close()

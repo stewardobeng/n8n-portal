@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Request, Header
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr, Field
 
@@ -70,6 +70,17 @@ async def _expiry_loop(interval_seconds: int = 15 * 60) -> None:
             await asyncio.to_thread(billing.sweep_expired)
         except Exception as e:
             log.warning("expiry sweep failed: %s", e)
+        # Renewal reminders (0.1.76): with no Paystack plan there is no automatic
+        # renewal, so this loop also sends the reminders that are due. It runs at
+        # most once a day and only when RENEWAL_REMINDERS_ENABLED is true; the
+        # service enforces both, so a disabled switch is inert here.
+        try:
+            from .services import renewal
+            res = await asyncio.to_thread(renewal.maybe_send_reminders)
+            if res.get("sent"):
+                log.info("renewal reminders sent: %s", res)
+        except Exception as e:
+            log.warning("renewal reminders failed: %s", e)
         await asyncio.sleep(interval_seconds)
 
 
@@ -1614,6 +1625,86 @@ def admin_sweep():
     except Exception as e:
         raise HTTPException(502, str(e))
     return result
+
+
+# ---------- renewal reminders + login-free renewal links (0.1.76) ----------
+
+def _renewal_page(title: str, message: str) -> str:
+    """Plain, branded page for an expired or unknown renewal link."""
+    return f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>{title}</title></head>
+    <body style="font-family:Arial,sans-serif;background:#f9fafb;margin:0;padding:48px 16px">
+      <div style="max-width:520px;margin:auto;background:#ffffff;border:1px solid #e5e7eb;
+                  border-radius:10px;padding:28px">
+        <h2 style="color:#1f2937;margin-top:0">{title}</h2>
+        <p style="color:#374151;line-height:1.5">{message}</p>
+        <p><a href="{settings.portal_base_url}" style="color:#1f2937">Go to the portal</a></p>
+      </div>
+    </body></html>"""
+
+
+@app.get("/r/{token}", include_in_schema=False)
+def renewal_link(token: str):
+    """A reminder email's link: start a payment for that account, no sign-in.
+
+    The token is an unguessable 60-day key bound to one account and package. It
+    can only create an unpaid checkout for that same account; it cannot sign in,
+    read data, change anything, or reach another account.
+    """
+    from .services import renewal, paystack as paystack_svc
+
+    row = renewal.resolve_link(token)
+    if not row:
+        return HTMLResponse(_renewal_page(
+            "This renewal link has expired",
+            "Renewal links stay valid for 60 days. Please sign in to your dashboard to "
+            "renew, or reply to our email and we will send you a fresh link."),
+            status_code=410)
+    account = db.get_account(int(row["account_id"]))
+    if not account or (account["account_state"] or "active") != "active":
+        return HTMLResponse(_renewal_page(
+            "This account cannot renew here",
+            "Please get in touch with us and we will help you directly."),
+            status_code=410)
+    try:
+        out = paystack_svc.initialize_checkout(int(account["id"]), account["email"],
+                                               row["plan"])
+    except Exception as e:
+        log.error("renewal link: checkout failed for account %s: %s", account["id"], e)
+        return HTMLResponse(_renewal_page(
+            "We could not open the payment page",
+            "Please try the link again in a minute, or renew from your dashboard at "
+            f"{settings.portal_base_url}."), status_code=502)
+    db.mark_renewal_link_used(token, int(_time.time()))
+    log.info("renewal link used for account %s (package %s)", account["id"], row["plan"])
+    return RedirectResponse(out["authorization_url"], status_code=302)
+
+
+@app.get("/api/v1/admin/billing/renewal-notices", dependencies=[Depends(verify_admin)])
+def renewal_notices(account_id: Optional[int] = None):
+    """Every reminder email, rendered, WITHOUT sending anything.
+
+    Sending is off until Steward approves the wording; this is how the copy is
+    reviewed against a real account (or a sample when no id is given).
+    """
+    from .services import renewal
+    try:
+        return renewal.preview(account_id)
+    except ValueError as e:
+        raise HTTPException(404, detail=str(e))
+
+
+@app.post("/api/v1/admin/billing/renewal-notices/send", dependencies=[Depends(verify_admin)])
+def renewal_notices_send(account_id: int, stage: str):
+    """Send ONE reminder to a chosen account (the deliberate live test)."""
+    from .services import renewal
+    try:
+        return renewal.send_for_account(account_id, stage)
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(502, detail=f"send failed: {e}")
 
 
 @app.post("/api/v1/admin/accounts/{account_id}/lock", dependencies=[Depends(verify_admin)])
