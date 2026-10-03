@@ -41,17 +41,18 @@ def test_deny_marks_terminal_and_blocks_registration(tmp_path, monkeypatch):
     client = TestClient(app)
     h = {"Authorization": "Bearer " + _admin_token()}
 
-    # first issue a token so we can prove deny clears it
-    tok_r = client.post(f"/api/v1/admin/access-requests/{rid}/token", headers=h)
+    # first approve it, so we can prove deny withdraws an approval
+    # (0.1.77: approving no longer generates a code)
+    tok_r = client.post(f"/api/v1/admin/access-requests/{rid}/approve", headers=h)
     assert tok_r.status_code == 200, tok_r.text
-    tok = tok_r.json()["token"]
+    assert tok_r.json()["status"] == "approved"
     req_before = db.get_access_request_by_id(rid)
-    assert req_before["status"] == "token_sent" and req_before["token_hash"]
+    assert req_before["status"] == "approved" and not req_before["token_hash"]
 
-    # gate should now report token (code sent)
+    # gate should now report approved
     email = "request@" + os.getenv("TEST_DOMAIN", "steprotech.com")
     gate_r = client.post("/api/v1/auth/check", json={"email": email})
-    assert gate_r.json()["action"] == "token"
+    assert gate_r.json()["action"] == "approved"
 
     # deny it
     d = client.post(f"/api/v1/admin/access-requests/{rid}/deny", headers=h)
@@ -67,10 +68,10 @@ def test_deny_marks_terminal_and_blocks_registration(tmp_path, monkeypatch):
     gate_r2 = client.post("/api/v1/auth/check", json={"email": email})
     assert gate_r2.json()["action"] == "denied"
 
-    # register must be rejected even with the old token
+    # register must be rejected: the approval was withdrawn
     reg = client.post("/api/v1/accounts", json={
         "email": email, "username": "requser", "first_name": "R", "last_name": "U",
-        "password": "Abcdef123", "access_token": tok,
+        "password": "Abcdef123",
     })
     assert reg.status_code in (403, 409), reg.status_code
 
@@ -127,18 +128,16 @@ def test_registration_removes_request_email(tmp_path, monkeypatch):
     email = "request@" + os.getenv("TEST_DOMAIN", "steprotech.com")
     client = TestClient(app)
 
-    # issue a token (admin approves)
+    # admin approves (0.1.77: no code is generated any more)
     h = {"Authorization": "Bearer " + _admin_token()}
     rid = db.get_access_request(email)["id"]
-    tok_r = client.post(f"/api/v1/admin/access-requests/{rid}/token", headers=h)
-    tok = tok_r.json()["token"]
+    tok_r = client.post(f"/api/v1/admin/access-requests/{rid}/approve", headers=h)
+    assert tok_r.status_code == 200, tok_r.text
 
-    # verify token then register
-    v = client.post("/api/v1/auth/verify-token", json={"email": email, "token": tok})
-    assert v.status_code == 200, v.text
+    # the approved person registers straight away, with no code
     reg = client.post("/api/v1/accounts", json={
         "email": email, "username": "newmember", "first_name": "N", "last_name": "M",
-        "password": "Abcdef123", "access_token": tok,
+        "password": "Abcdef123",
     })
     assert reg.status_code in (200, 201), reg.text
 

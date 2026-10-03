@@ -574,9 +574,10 @@ def test_access_gate_full_flow():
     token = access_gate.issue_token(req["id"])
     assert len(token) == 9 and "-" in token  # K7FQ-2MXP style
 
-    # 3. visitor re-enters email -> now "token"
+    # 3. visitor re-enters email -> "approved" (0.1.77: the code is gone; an
+    #    approval, including one issued before this change, opens registration)
     r = client.post("/api/v1/auth/check", json={"email": "gated@steprotech.com"})
-    assert r.json()["action"] == "token"
+    assert r.json()["action"] == "approved"
 
     # 4. wrong token rejected, right token verified
     r = client.post("/api/v1/auth/verify-token",
@@ -586,22 +587,19 @@ def test_access_gate_full_flow():
                     json={"email": "gated@steprotech.com", "token": token})
     assert r.status_code == 200 and r.json()["action"] == "verified"
 
-    # 5. registration without a token is refused
+    # 5. registration needs NO code (0.1.77): no access_token is sent at all
     r = client.post("/api/v1/accounts", json={
         "email": "gated@steprotech.com", "username": "gated",
         "first_name": "Gate", "last_name": "User",
         "password": "GatePass123",
     })
-    assert r.status_code == 403, r.text
-
-    # 6. registration with the token succeeds + returns a session token
-    r = client.post("/api/v1/accounts", json={
-        "email": "gated@steprotech.com", "username": "gated",
-        "first_name": "Gate", "last_name": "User",
-        "password": "GatePass123", "access_token": token,
-    })
     assert r.status_code == 201, r.text
     assert r.json()["token"]
+
+    # 6. that token IS a live session: the person is signed in straight after
+    #    creating the account, with no separate sign-in step
+    me = client.get("/api/v1/me", headers={"Authorization": "Bearer " + r.json()["token"]})
+    assert me.status_code == 200 and me.json()["account"]["email"] == "gated@steprotech.com"
     # The access request is DELETED once the person becomes a member (Steward
     # 2026-09-03): their record now lives under the account, not the request list.
     req = db_mod.get_access_request("gated@steprotech.com")

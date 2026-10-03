@@ -38,7 +38,7 @@ from .services.admin_ops import AdminOpsError
 from .services.portainer_client import PortainerClient
 from .services.npm_client import NPMClient
 from .services.emailer import (send_welcome_credentials, send_reset_password,
-                               send_access_token, EmailError)
+                               send_access_token, send_access_approved, EmailError)
 from .security import (create_access_token, verify_admin,
                        verify_admin_password, verify_password, hash_password,
                        create_client_token, verify_client, create_mfa_token,
@@ -971,7 +971,7 @@ def my_download_backup(backup_id: int, account_id: int = Depends(verify_client))
 
 @app.post("/api/v1/accounts", response_model=dict, status_code=201)
 def create_account(payload: AccountCreate, request: Request):
-    """Registration is GATED: requires a verified access token for this email
+    """Registration is GATED: the email must carry an admin-approved access request
     (Steward 2026-09-01). Returns the account + a portal session token.
     SECURITY (2026-09-03): per-IP rate limited (access-token guessing / spam)."""
     ip = sc.client_ip(request)
@@ -983,18 +983,14 @@ def create_account(payload: AccountCreate, request: Request):
     existing = db.get_account_by_email(email)
     if existing:
         raise HTTPException(409, "An account with this email already exists.")
-    # gate: a token must have been issued AND verified for this email
+    # gate (0.1.77, Steward): an ADMIN APPROVAL is the gate, not a code. The email
+    # must carry an approved access request; nothing is generated, emailed or
+    # typed. 'token_sent' rows predate this change and were already approved, so
+    # they register exactly the same way. payload.access_token is still accepted
+    # (older clients send it) and deliberately ignored.
     req = db.get_access_request(email)
-    if not req or req["status"] != "token_sent":
-        raise HTTPException(403, "Access token required. Request access from an administrator first.")
-    if not req["token_hash"] or req["token_expires_at"] and _time.time() > req["token_expires_at"]:
-        raise HTTPException(403, "Access token expired. Request a new one from an administrator.")
-    # require the caller to prove token possession: the UI verified it first and
-    # we re-verify here with the plaintext token carried by the registration form.
-    if not payload.access_token:
-        raise HTTPException(403, "Access token required.")
-    if not access_gate.verify_token(email, payload.access_token):
-        raise HTTPException(401, "Invalid access token for this email.")
+    if not req or req["status"] not in ("approved", "token_sent"):
+        raise HTTPException(403, "Access required. Request access from an administrator first.")
     username = provisioner.ensure_unique_username(payload.username, email)
     try:
         provisioner.validate_password_policy(payload.password)
@@ -1575,23 +1571,35 @@ def admin_access_requests():
     return out
 
 
-@app.post("/api/v1/admin/access-requests/{request_id}/token", dependencies=[Depends(verify_admin)])
-def admin_issue_token(request_id: int):
-    """Generate a fresh access token for a request, email it to the person, and
-    return it once so the admin can also share it directly (WhatsApp etc.)."""
+@app.post("/api/v1/admin/access-requests/{request_id}/approve", dependencies=[Depends(verify_admin)])
+def admin_approve_request(request_id: int):
+    """Admin action (0.1.77, Steward): approve the request outright, with no code.
+
+    The person is emailed that their access is approved and asked to create their
+    account; registration then signs them in. `email_sent` is returned so the
+    dashboard can say plainly when the notice did not go out."""
     try:
-        token = access_gate.issue_token(request_id)
+        access_gate.approve_request(request_id)
     except access_gate.AccessGateError as e:
         raise HTTPException(409, str(e))
     req = db.get_access_request_by_id(request_id)
     email = req["email"] if req else ""
+    email_sent = False
     if email:
         try:
-            send_access_token(email, token)
+            send_access_approved(email)
+            email_sent = True
         except EmailError as e:
-            log.warning(f"Access-token email failed for {email}: {e}")
+            log.warning(f"Approval email failed for {email}: {e}")
     return {"request_id": request_id, "email": email,
-            "token": token, "expires_hours": access_gate.TOKEN_VALID_HOURS}
+            "status": "approved", "email_sent": email_sent}
+
+
+@app.post("/api/v1/admin/access-requests/{request_id}/token", dependencies=[Depends(verify_admin)])
+def admin_issue_token(request_id: int):
+    """LEGACY ALIAS (so an already-open dashboard keeps working): issuing a code
+    was replaced by approval in 0.1.77 and both now do the same thing."""
+    return admin_approve_request(request_id)
 
 
 @app.post("/api/v1/admin/access-requests/{request_id}/deny", dependencies=[Depends(verify_admin)])

@@ -295,7 +295,7 @@ var ICONS = {
     return authLayout(
       '<div class="center-state"><div class="state-orb">' + icon("mail") + "</div>" +
       '<div class="eyebrow">Request received</div><h1>Your request is awaiting approval</h1>' +
-      '<p class="muted">A SteProTECH team member will review it shortly. We will email a one-time access code to <strong>' + esc(email) + "</strong>.</p>" +
+      '<p class="muted">A SteProTECH team member will review it shortly. Once approved we will email <strong>' + esc(email) + "</strong> so you can create your account.</p>" +
       '<div class="banner" style="margin:26px 0;text-align:left">' + icon("clock") +
         "<div><strong>Watch your inbox</strong><br><span class=\"small\">Approval is handled by a person. You do not need to submit another request.</span></div></div>" +
       '<div class="actions" style="justify-content:center"><button class="button secondary" data-route="/entry">Use a different email</button></div></div>'
@@ -315,13 +315,10 @@ var ICONS = {
   function codePage() {
     var email = state.gateEmail || "";
     return authLayout(
-      '<div class="eyebrow">Email approved</div><h1>Create your account</h1>' +
-      '<p class="muted">We sent an access code to <strong>' + esc(email) + '</strong> (expires after 72 hours). Enter it below and set your portal password. Your workspace is created after you choose a plan.</p>' +
+      '<div class="eyebrow">Approved</div><h1>Create your account</h1>' +
+      '<p class="muted">Your request for <strong>' + esc(email) + '</strong> has been approved. Add your name and a password to create your account, then choose a plan. No code is needed.</p>' +
       '<form data-form="code"><div class="form-grid">' +
-        '<div class="field full"><label>Email address</label><input value="' + esc(email) + '" readonly><span class="hint">This email is already verified for you.</span></div>' +
-        '<div class="field full"><label for="access-token">Access code</label>' +
-        '<input id="access-token" name="token" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXX-XXXX" maxlength="9" style="text-transform:uppercase;letter-spacing:.12em;font-family:ui-monospace,monospace;font-weight:700">' +
-        '<span class="hint" id="token-hint">Looks like K7FQ-2MXP. Dashes optional.</span></div>' +
+        '<div class="field full"><label>Email address</label><input value="' + esc(email) + '" readonly><span class="hint">This email is already approved for you.</span></div>' +
         '<div class="field"><label>First name</label><input name="first_name" required maxlength="50"></div>' +
         '<div class="field"><label>Last name</label><input name="last_name" required maxlength="50"></div>' +
         '<div class="field"><label>Password</label><div class="input-row">' +
@@ -338,9 +335,10 @@ var ICONS = {
         '<span class="check" data-check="match" data-label="Passwords match">Passwords match</span></div>' +
       '</div>' +
       '<button class="button primary-wide" type="submit">Create account &amp; continue</button></form>' +
-      '<p class="small muted" style="text-align:center;margin-top:18px">Havent received it? <a href="#/entry">Use a different email</a> or contact support@steprotech.com</p>'
+      '<p class="small muted" style="text-align:center;margin-top:18px">Wrong address? <a href="#/entry">Use a different email</a> or contact support@steprotech.com</p>'
     );
   }
+
 
   function registerPage() {
     var email = state.gateEmail || "";
@@ -1017,7 +1015,7 @@ var ICONS = {
 
   function requestStatusLabel(st) {
     if (st === "requested") return statusBadge("awaiting", "Awaiting approval");
-    if (st === "token_sent") return statusBadge("approved", "Code sent");
+    if (st === "approved" || st === "token_sent") return statusBadge("approved", "Approved");
     if (st === "denied") return statusBadge("denied", "Disapproved");
     return statusBadge("registered", "Already registered");
   }
@@ -1027,27 +1025,27 @@ var ICONS = {
     var counts = {
       all: requests.length,
       awaiting: requests.filter(function (r) { return r.status === "requested"; }).length,
-      approved: requests.filter(function (r) { return r.status === "token_sent"; }).length,
+      approved: requests.filter(function (r) { return r.status === "approved" || r.status === "token_sent"; }).length,
       denied: requests.filter(function (r) { return r.status === "denied"; }).length
     };
     var filter = state.accessFilter || "all";
     var rows = requests.filter(function (r) {
       if (filter === "all") return true;
       if (filter === "awaiting") return r.status === "requested";
-      if (filter === "approved") return r.status === "token_sent";
+      if (filter === "approved") return r.status === "approved" || r.status === "token_sent";
       return r.status === "denied";
     });
     return appLayout("admin", "Access requests", "requests",
       '<main class="page">' + pageHead("Access requests", "Approve new customers, decline unwanted requests, or remove test/spam entries. Approved members move to the Accounts list once they register.") +
       '<section class="card flush"><div class="tabs">' +
-        [["all", "All"], ["awaiting", "Awaiting approval"], ["approved", "Code sent"], ["denied", "Disapproved"]].map(function (t) {
+        [["all", "All"], ["awaiting", "Awaiting approval"], ["approved", "Approved"], ["denied", "Disapproved"]].map(function (t) {
           return '<button class="tab' + (filter === t[0] ? " active" : "") + '" data-filter="' + t[0] + '">' + t[1] + " (" + counts[t[0]] + ")</button>";
         }).join("") +
       "</div>" +
       '<div class="table-wrap"><table><thead><tr><th>Email</th><th>Requested</th><th>Status</th><th>Action</th></tr></thead><tbody>' +
         (rows.length ? rows.map(function (r) {
-          var canApprove = r.status === "requested";
-          var canCourse = r.status === "requested" || r.status === "token_sent";
+          var canApprove = r.status !== "denied" && r.status !== "registered";
+          var canCourse = r.status === "requested" || r.status === "approved" || r.status === "token_sent";
           var action = (canApprove ? '<button class="button small-btn" data-approve="' + r.id + '">Approve</button>' : "") +
             (canCourse ? '<button class="button ghost small-btn" data-request-deny="' + r.id + '">Disapprove</button>' : "") +
             '<button class="button ghost small-btn" data-request-delete="' + r.id + '">Delete</button>';
@@ -1678,19 +1676,22 @@ var ICONS = {
   function approveModal(id) {
     var r = (state.requests || []).find(function (x) { return x.id === Number(id); });
     if (!r) return;
-    showModal(modalHeader("Approve access request?") +
-      "<p>Approve <strong>" + esc(r.email) + "</strong> to generate a one-time registration code.</p>" +
-      '<div class="consequence" style="background:var(--amber-100)"><strong>What happens next</strong><ul><li>The code is emailed automatically</li><li>It expires after 72 hours</li><li>The same code is shown here once for copying</li></ul></div>' +
+    var again = (r.status === "approved" || r.status === "token_sent");
+    showModal(modalHeader(again ? "Send the approval notice again?" : "Approve access request?") +
+      (again ? "<p>Resend the approval email to <strong>" + esc(r.email) + "</strong>.</p>"
+             : "<p>Approve <strong>" + esc(r.email) + "</strong> to open the portal for them.</p>") +
+      '<div class="consequence" style="background:var(--amber-100)"><strong>What happens next</strong><ul><li>The request is marked <strong>Approved</strong></li><li>No code is generated and none is needed</li><li>They are emailed that their access is approved</li><li>They create their account and are signed in straight away</li></ul></div>' +
       '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
-      '<button class="button" data-confirm-approve="' + id + '">Approve and send code</button></div>');
+      '<button class="button" data-confirm-approve="' + id + '">' + (again ? "Resend email" : "Approve and notify") + "</button></div>");
   }
+
 
   function denyModal(id) {
     var r = (state.requests || []).find(function (x) { return x.id === Number(id); });
     if (!r) return;
     showModal(modalHeader("Disapprove " + esc(r.email) + "?") +
-      "<p>This declines the request and clears any access code that was already sent. The person will not be able to register with this email.</p>" +
-      '<div class="consequence" style="background:var(--red-100)"><strong>What happens next</strong><ul><li>The request is marked <strong>Disapproved</strong></li><li>Any previously issued code is invalidated</li><li>The email is blocked from requesting again</li><li>Delete the request later to let them try again</li></ul></div>' +
+      "<p>This declines the request. The person will not be able to register with this email.</p>" +
+      '<div class="consequence" style="background:var(--red-100)"><strong>What happens next</strong><ul><li>The request is marked <strong>Disapproved</strong></li><li>The approval is withdrawn</li><li>The email is blocked from requesting again</li><li>Delete the request later to let them try again</li></ul></div>' +
       '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
       '<button class="button danger" data-confirm-request-deny="' + id + '">' + icon("close") + " Disapprove</button></div>");
   }
@@ -1707,14 +1708,15 @@ var ICONS = {
 
   function approvalSuccess(data) {
     var r = (state.requests || []).find(function (x) { return x.id === Number(data.request_id); });
+    var em = (r ? r.email : "") || data.email || "";
     showModal('<div class="center-state"><div class="state-orb success">' + icon("check") + '</div><h2 id="modal-title">Access approved</h2>' +
-      '<p class="muted">A one-time code was generated and emailed to <strong>' + esc(r ? r.email : "") + "</strong>.</p>" +
-      '<div class="card" style="margin:22px 0"><div class="eyebrow">One-time code</div>' +
-      '<div class="mono" style="font-size:1.7rem;letter-spacing:.18em;font-weight:800;margin:8px 0">' + esc(data.token || "") + "</div>" +
-      '<button class="button secondary small-btn" data-action="copy-code" data-code="' + esc(data.token || "") + '">' + icon("copy") + " Copy code</button></div>" +
-      '<div class="banner success" style="text-align:left">' + icon("check") + "<div><strong>Code emailed</strong><br><span class=\"small\">Expires in 72 hours. This code will not be shown again after closing.</span></div></div>" +
+      '<p class="muted"><strong>' + esc(em) + '</strong> can now create their account. No code is needed.</p>' +
+      (data.email_sent
+        ? '<div class="banner success" style="text-align:left">' + icon("check") + '<div><strong>Email sent</strong><br><span class="small">They were told their access is approved and asked to create their account.</span></div></div>'
+        : '<div class="banner warning" style="text-align:left">' + icon("warning") + '<div><strong>Email not sent</strong><br><span class="small">The approval is saved, but the notice did not go out. Tell them directly that they can create their account now.</span></div></div>') +
       '<button class="button" style="margin-top:22px" data-action="close-modal">Done</button></div>');
   }
+
 
   function adminAddUserModal() {
     showModal(modalHeader("Add a user") +
@@ -2925,10 +2927,10 @@ var ICONS = {
         var rr = (state.requests || []).find(function (x) { return x.id === Number(reqView.dataset.requestState); });
         if (rr) {
           var isRegistered = rr.status === "registered";
-          showModal(modalHeader(isRegistered ? "Already registered" : "Code already sent") +
+          showModal(modalHeader(isRegistered ? "Already registered" : "Already approved") +
             '<div class="banner ' + (isRegistered ? "" : "success") + '">' + icon(isRegistered ? "account" : "check") +
-            "<div><strong>No duplicate code was created</strong><br><span class=\"small\">" + esc(rr.email) + " " +
-            (isRegistered ? "already has a customer portal account." : "was previously approved and emailed a code.") + "</span></div></div>" +
+            "<div><strong>Nothing else was sent</strong><br><span class=\"small\">" + esc(rr.email) + " " +
+            (isRegistered ? "already has a customer portal account." : "was already approved and can create their account.") + "</span></div></div>" +
             '<button class="button" style="margin-top:20px" data-action="close-modal">Done</button>');
         }
       }
@@ -2938,7 +2940,7 @@ var ICONS = {
         var rid = confirmApprove.dataset.confirmApprove;
         (async function () {
           try {
-            var data = await api("/admin/access-requests/" + rid + "/token", { method: "POST" });
+            var data = await api("/admin/access-requests/" + rid + "/approve", { method: "POST" });
             closeModal();
             approvalSuccess(data);
             refreshAdminData();
@@ -3263,19 +3265,17 @@ var ICONS = {
         api("/auth/check", { method: "POST", body: { email: email } }).then(function (r) {
           state.gateEmail = r.email;
           if (r.action === "login") navigate("/signin");
-          else if (r.action === "token") navigate("/code");
+          else if (r.action === "approved" || r.action === "token") navigate("/code");
           else if (r.action === "denied") navigate("/denied");
           else navigate("/request"); // requested | waiting -> same screen copy
         }).catch(function (err) { showToast("Could not continue", err.message); });
       }
       else if (type === "code") {
         var fd0 = new FormData(form);
-        var token = String(fd0.get("token") || "").trim().toUpperCase();
         var first = String(fd0.get("first_name") || "").trim();
         var last = String(fd0.get("last_name") || "").trim();
         var pw2 = String(fd0.get("password") || "");
         var conf = String((document.getElementById("reg-confirm") || {}).value || "");
-        if (!token) { showToast("Enter the code", "Paste or type the code from your email."); return; }
         if (!first || !last) { showToast("Missing details", "Enter your first and last name."); return; }
         if (pw2 !== conf) { showToast("Passwords do not match", "Re-enter the same password in both fields."); return; }
         if (!/^.*(?=.*[A-Z])(?=.*[a-z])(?=.*\d).{8,}$/.test(pw2)) { showToast("Password too weak", "Use 8+ characters with uppercase, lowercase, and a digit."); return; }
@@ -3284,7 +3284,7 @@ var ICONS = {
         api("/accounts", { method: "POST", body: {
           email: state.gateEmail, username: null,
           first_name: first, last_name: last,
-          password: pw2, access_token: token
+          password: pw2
         } }).then(function (r) {
           localStorage.setItem("portal_token", r.token);
           state.provisioningPw = pw2;
