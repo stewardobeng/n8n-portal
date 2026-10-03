@@ -104,26 +104,26 @@ def send_access_token(to: str, token: str) -> None:
 
 
 def send_access_approved(to: str) -> None:
-    """0.1.77 (Steward): the approval notice. No code and nothing to click: the
-    person enters their email on the portal, creates their account, and is signed
-    in. Copy approved by Steward (no em dashes)."""
+    """0.1.78 (Steward): approval notice. Copy approved 2026-10-01 and deliberately
+    says nothing about a code and nothing about being signed in automatically, both
+    of which he judged unnecessary. No em dashes (house rule)."""
     html = f"""
     <div style="font-family:Arial,sans-serif;max-width:560px;margin:auto">
       <h2 style="color:#1f2937">Your access is approved</h2>
-      <p>Hello, an administrator has approved your request to join the SteProTECH
-      n8n portal.</p>
-      <p><b>What to do now</b></p>
+      <p>Hello,</p>
+      <p>An administrator has approved your request to join the SteProTECH n8n
+      portal.</p>
+      <p><b>What to do next</b></p>
       <ol>
-        <li>Open <a href="https://portal.steprotech.com/">https://portal.steprotech.com/</a></li>
-        <li>Enter this email address and continue</li>
-        <li>You will be asked to create your account with your name and a password</li>
+        <li>Open the portal at <a href="https://portal.steprotech.com/">https://portal.steprotech.com/</a></li>
+        <li>Enter this email address</li>
+        <li>Create your account with your name and a password</li>
+        <li>Choose a plan to set up your first workspace</li>
       </ol>
-      <p>There is no code to enter. As soon as you create your account you are
-      signed in, and you can choose a plan to set up your first workspace.</p>
       <p>If you did not request access, you can ignore this message.</p>
     </div>
     """
-    send_email(to, "Your SteProTECH n8n portal access is approved", html)
+    send_email(to, "Your access to the SteProTECH n8n portal is approved", html)
 
 
 def send_admin_welcome_credentials(to: str, email: str, username: str,
