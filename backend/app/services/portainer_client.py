@@ -60,6 +60,18 @@ class PortainerClient:
             params={"all": "true" if all else "false"},
         ).json()
 
+    def list_images(self, endpoint_id: int) -> list[dict]:
+        """Images on an environment (tags, repo digests, labels).
+
+        Needed because a container's ``Image`` field is only a NAME while its
+        image still carries tags: an untagged image is reported as a bare
+        ``sha256:...`` id, which no name-based n8n check can recognise.
+        """
+        return self._req(
+            "GET", f"/endpoints/{endpoint_id}/docker/images/json",
+            params={"all": "false"},
+        ).json()
+
     def get_container(self, endpoint_id: int, container_id: str) -> dict:
         """Full container inspect (env vars, labels) on an environment."""
         return self._req(

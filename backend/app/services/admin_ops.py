@@ -39,6 +39,62 @@ from .emailer import send_admin_welcome_credentials, EmailError
 log = logging.getLogger("n8n-portal")
 
 N8N_IMAGE_HINTS = ("n8nio/n8n", "n8n/n8n", "n8nio/n8n:")
+# Official n8n images carry this OCI label even after every tag is gone, which
+# is what makes an untagged image identifiable at all (0.1.79).
+N8N_IMAGE_LABEL = "org.opencontainers.image.title"
+N8N_IMAGE_TITLE = "n8n"
+N8N_PORT = 5678
+
+
+def _n8n_image_ids(pc, endpoint_id: int) -> set[str] | None:
+    """Image ids on an environment that really are n8n.
+
+    A container's ``Image`` field only holds a NAME while the image keeps its
+    tags. When the tag is gone the API reports a bare ``sha256:...`` id, which
+    no name-based hint can match, and the instance silently disappears from
+    every listing. (2026-10-05: `success.steprotech.com` and nine more on n8n
+    server 1 were exactly this: live containers on image 2.35.5 with
+    RepoTags=[] / RepoDigests=[] while the compose file says :latest.)
+
+    Returns None when the image list cannot be read, so callers know to fall
+    back rather than to treat everything as "not n8n".
+    """
+    fetch = getattr(pc, "list_images", None)
+    if fetch is None:
+        return None
+    try:
+        images = fetch(endpoint_id) or []
+    except Exception as e:
+        log.warning("image list env %s failed: %s", endpoint_id, e)
+        return None
+    ids: set[str] = set()
+    for im in images:
+        refs = list(im.get("RepoTags") or []) + list(im.get("RepoDigests") or [])
+        labels = im.get("Labels") or {}
+        is_n8n = any(any(h in ref for h in N8N_IMAGE_HINTS) for ref in refs) \
+            or labels.get(N8N_IMAGE_LABEL) == N8N_IMAGE_TITLE
+        if not is_n8n:
+            continue
+        for key in ("Id", "ID"):
+            if im.get(key):
+                ids.add(im[key])
+    return ids
+
+
+def _is_n8n_container(c: dict, n8n_ids: set[str] | None = None) -> bool:
+    """Is this container an n8n instance?
+
+    Name hint first, then resolved image identity. `n8n_ids is None` means the
+    environment's image list was unreadable, in which case fall back to n8n's
+    own port signature (5678) instead of hiding live instances.
+    """
+    image = c.get("Image") or ""
+    if any(h in image for h in N8N_IMAGE_HINTS):
+        return True
+    if n8n_ids is None:
+        return any(int(p.get("PrivatePort") or 0) == N8N_PORT
+                   for p in (c.get("Ports") or []))
+    return bool(n8n_ids) and (image in n8n_ids or (c.get("ImageID") or "") in n8n_ids)
 
 
 def _row_get(row, key, default=None):
@@ -102,10 +158,10 @@ def environment_overview(pc: PortainerClient | None = None,
         volumes_bytes = 0
         try:
             containers = pc.list_containers(eid, all=True)
+            n8n_ids = _n8n_image_ids(pc, eid)
             for c in containers:
                 name = (c.get("Names") or [""])[0].lstrip("/")
-                image = c.get("Image") or ""
-                if not any(h in image for h in N8N_IMAGE_HINTS):
+                if not _is_n8n_container(c, n8n_ids):
                     continue
                 # stack name = compose project label, else container prefix
                 labels = c.get("Labels") or {}
@@ -220,10 +276,10 @@ def discover_unlinked_stacks(pc: PortainerClient | None = None,
         except Exception as e:
             log.warning("unlinked scan env %s failed: %s", eid, e)
             continue
+        n8n_ids = _n8n_image_ids(pc, eid)
         per_stack: dict[str, dict] = {}
         for c in containers:
-            image = c.get("Image") or ""
-            if not any(h in image for h in N8N_IMAGE_HINTS):
+            if not _is_n8n_container(c, n8n_ids):
                 continue
             stack = _container_stack_name(c)
             if stack in linked_names:
@@ -410,9 +466,9 @@ def attach_instance(account_id: int, environment_id: int, stack_name: str,
         raise AdminOpsError(f"Cannot reach environment {environment_id}: {e}")
     container = None
     actual_port = port
+    n8n_ids = _n8n_image_ids(pc, environment_id)
     for c in containers:
-        image = c.get("Image") or ""
-        if not any(h in image for h in N8N_IMAGE_HINTS):
+        if not _is_n8n_container(c, n8n_ids):
             continue
         if _container_stack_name(c) == stack_name:
             container = c
