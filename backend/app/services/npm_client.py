@@ -58,7 +58,16 @@ class NPMClient:
             "forward_port": forward_port,
             "allow_websocket_upgrade": True,
             "block_exploits": True,
-            "caching_enabled": True,
+            # Asset caching OFF (2026-10-07). NPM's asset-caching location caches ANY status
+            # for 30 minutes, so a request made during the ~15 seconds while a new n8n
+            # container is still booting caches its "connection refused" as a 502 against
+            # that exact asset URL. The browser then loads the HTML but none of its JS and
+            # shows a BLANK PAGE until the entry expires. Those entries also sit in nginx's
+            # shared-memory cache zone, which a reload cannot clear, so the workspace stays
+            # blank even after the container is healthy (hurt omotade-duodu, first GHS 500
+            # customer, 2026-10-07). n8n serves its own static files from the same origin in
+            # milliseconds, so caching them buys almost nothing and costs a blank page.
+            "caching_enabled": False,
             "ssl_forced": True,
             "http2_support": False,
             "hsts_enabled": False,
