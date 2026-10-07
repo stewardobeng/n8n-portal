@@ -33,6 +33,7 @@
     adminInstances: [],    // admin: all instances (GET /admin/instances) for backup/update triggers
     adminInstancesLoaded: false,
     adminAccountsLoaded: false,
+    accountDetailTried: {}, // admin: accountId -> the per-account read has finished (ok or failed)
     impersonation: null,     // admin login-as: {id, label} while viewing a customer
     impTtlMinutes: 60,       // lifetime of the impersonation session (server-set)
     n8nLatestTag: "",        // latest n8n release tag seen (admin update watch)
@@ -1237,6 +1238,12 @@ var ICONS = {
     }
     if (!a) return appLayout("admin", "Account details", "accounts", "<main class=\"page\">" + pageHead("Account not found", "This account may have been removed.") + "</main>");
     var instances = (detail && detail.instances) || [];
+    // The workspace list arrives in a SECOND request (the per-account read).
+    // Until it lands, the card must not claim the customer has no workspace:
+    // that empty state flashed at admins looking at customers who DO have one
+    // (Steward's report, 2026-10-06). `accountDetailTried` keeps a FAILED read
+    // on the old behaviour instead of loading forever.
+    var wsKnown = !!(detail && detail.instances) || !!(state.accountDetailTried || {})[id];
     var sub = a.subscription_status || "none";
     var subBadge = sub === "active" ? statusBadge("active", "Active")
       : sub === "past_due" ? statusBadge("pastdue", "Past due")
@@ -1314,7 +1321,9 @@ var ICONS = {
               '<button class="button secondary small-btn" data-action="admin-update-image" data-id="' + i.id + '"' + updDisabled(i) + '>' + icon("refresh") + (state.instUpdating[i.id] ? " Updating..." : " Update n8n") + "</button>" +
               '<button class="button secondary small-btn" data-action="runner-toggle" data-id="' + i.id + '"' + runDisabled(i) + '>' + icon(i.python_runner ? "close" : "spark") + (state.runnerBusy[i.id] ? (i.python_runner ? " Removing..." : " Attaching...") : (i.python_runner ? " Remove Python" : " Attach Python")) + "</button>" +
               "</div></article>";
-        }).join("") : '<div class="empty-state" style="min-height:200px"><div><h3>No workspaces yet</h3><p class="muted">The customer has not provisioned a workspace.</p></div></div>') +
+        }).join("") : (wsKnown
+              ? '<div class="empty-state" style="min-height:200px"><div><h3>No workspaces yet</h3><p class="muted">The customer has not provisioned a workspace.</p></div></div>'
+              : '<div class="empty-state" style="min-height:200px" role="status" aria-live="polite"><div><h3>Loading workspaces...</h3><p class="muted">Checking what workspaces this account has.</p></div></div>')) +
         "</div></section>" +
         '<section class="card"><h2>Subscription timeline</h2><div class="timeline">' +
           '<div class="timeline-item"><h3>Account created</h3><p>' + esc(fmtDate(a.created_at)) + "</p></div>" +
@@ -1607,6 +1616,9 @@ var ICONS = {
           var detail = await api("/accounts/" + id);
           state.accountCache[id] = detail;
         } catch (e) { /* public per-account read failed */ }
+        // Marked whether it succeeded or not, so a failed read can never leave
+        // the Workspaces card stuck on its loading state (0.1.82).
+        state.accountDetailTried[id] = true;
       }
       var settings = await api("/admin/settings");
       state.envOrder = String(settings.landing_environments || "").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
@@ -2482,7 +2494,7 @@ var ICONS = {
       else if (action === "signout-route") {
         if (currentKind() === "admin") {
           localStorage.removeItem("admin_token"); state.adminAuthed = false;
-          state.adminAccounts = []; state.adminAccountsLoaded = false; state.adminArchived = []; state.requests = []; state.accountCache = {}; state.adminInstances = []; state.adminInstancesLoaded = false;
+          state.adminAccounts = []; state.adminAccountsLoaded = false; state.adminArchived = []; state.requests = []; state.accountCache = {}; state.accountDetailTried = {}; state.adminInstances = []; state.adminInstancesLoaded = false;
           showToast("Signed out", "Admin session ended."); navigate("/admin/signin");
         } else if (state.impersonation) {
           exitImpersonation();
