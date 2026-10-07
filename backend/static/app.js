@@ -1303,19 +1303,19 @@ var ICONS = {
    * an admin batch ahead of customer requests, and a single manual update from the
    * workspace row that never waits (it only holds that server's slot).
    */
-  function updateStateBadge(w) {
+  function updateStateBadge(w, latestKnown) {
     if (w.queued) {
       return w.queued.status === "running" ? statusBadge("provisioning", "Updating now")
         : statusBadge("awaiting", "Queued" + (w.queued.position ? " (" + w.queued.position + ")" : ""));
     }
     if (w.locked) return statusBadge("off", "Locked");
     if (w.status === "provisioning") return statusBadge("neutral", "Being set up");
-    if (!d.latest_known) return statusBadge("warning", "Cannot compare");
+    if (latestKnown === false) return statusBadge("warning", "Cannot compare");
     if (w.version_unknown) return statusBadge("neutral", "Version unknown");
     if (w.needs_update) return statusBadge("awaiting", "Needs update");
     return statusBadge("running", "Up to date");
   }
-  function updateRowHtml(w, sel) {
+  function updateRowHtml(w, sel, latestKnown) {
     var host = "server " + w.host;
     var last = w.last;
     var lastTxt = last
@@ -1334,7 +1334,7 @@ var ICONS = {
       '<td style="padding:8px">' + (w.current_version ? esc(w.current_version) : '<span class="muted">unknown</span>') +
         (w.floating_tag ? '<br><span class="small muted">floating tag</span>' : "") + "</td>" +
       '<td style="padding:8px">' + esc(w.latest_version || "") + "</td>" +
-      '<td style="padding:8px">' + updateStateBadge(w) + "</td>" +
+      '<td style="padding:8px">' + updateStateBadge(w, latestKnown) + "</td>" +
       '<td style="padding:8px"><span class="small muted">' + lastTxt + "</span></td>" +
       '<td style="padding:8px">' + (w.queued ? ""
         : '<button class="button secondary small-btn" data-action="updates-queue-one" data-id="' + w.instance_id + '">Update</button>') + "</td>" +
@@ -1376,7 +1376,7 @@ var ICONS = {
       '<ul class="small muted" style="margin:10px 0 0 18px">' +
       "<li>One workspace updates at a time <b>on each server</b>, so three servers can move at once and no box ever takes two.</li>" +
       "<li>After a workspace is verified stable that server rests <b>" + esc(String(d.interval_minutes)) +
-        " minutes</b> before its next one starts.</li>" +
+        (Number(d.interval_minutes) === 1 ? " minute</b>" : " minutes</b>") + " before its next one starts.</li>" +
       "<li>Your batch goes <b>ahead of customer requests</b>.</li>" +
       "<li>A manual update from a workspace row <b>starts immediately</b> and takes that server's slot while it runs.</li>" +
       "<li>Latest n8n release right now: <b>" + esc(d.latest_version || "could not be resolved") + "</b>" +
@@ -1421,7 +1421,7 @@ var ICONS = {
         "<th style=\"padding:8px\">Account</th><th style=\"padding:8px\">Server</th>" +
         "<th style=\"padding:8px\">Running</th><th style=\"padding:8px\">Latest</th>" +
         "<th style=\"padding:8px\">State</th><th style=\"padding:8px\">Last update</th><th style=\"padding:8px\"></th>" +
-        "</tr>" + ws.map(function (w) { return updateRowHtml(w, sel); }).join("") + "</table></div>"
+        "</tr>" + ws.map(function (w) { return updateRowHtml(w, sel, d.latest_known); }).join("") + "</table></div>"
         : loadingBlock("No workspaces found...", "", 160)) + "</section>";
 
     var queueCard = '<section class="card" style="margin-top:18px"><div class="card-head"><h3>In the line</h3>' +

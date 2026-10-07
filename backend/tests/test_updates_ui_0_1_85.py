@@ -23,6 +23,25 @@ def _flat():
     return re.sub(r"\s+", " ", _src())
 
 
+def test_the_asset_version_matches_the_release():
+    """A deploy must not leave a browser on a cached app.js (the rig hit exactly that:
+    the fixed file was on disk while the page ran the previous one). The query string
+    and the image tag are kept in step by this test."""
+    import re
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
+    html = (root / "static" / "index.html").read_text(encoding="utf-8")
+    ver = re.search(r"n8n-portal-backend:(\S+)", compose).group(1)
+    assert ("app.js?v=" + ver) in html, ("index.html must cache-bust app.js at " + ver)
+    assert ("styles.css?v=" + ver) in html
+
+
+def test_the_pacing_interval_reads_correctly_when_it_is_one_minute():
+    src = _src()
+    assert '(Number(d.interval_minutes) === 1 ? " minute</b>" : " minutes</b>")' in src
+
+
 def test_the_page_exists_and_is_reachable_from_the_sidebar():
     src = _src()
     assert '["updates", "Updates", "/admin/updates"]' in src
@@ -35,7 +54,7 @@ def test_the_page_states_the_pacing_rule_before_the_admin_acts():
     rule = src[src.find("function adminUpdates()"):]
     rule = rule[:rule.find("function adminBackups()")]
     for phrase in ("One workspace updates at a time <b>on each server</b>",
-                   "minutes</b> before its next one starts",
+                   "before its next one starts",
                    "ahead of customer requests",
                    "starts immediately</b> and takes that server's slot",
                    "No safety backup is taken before an update (your instruction)"):
@@ -50,11 +69,26 @@ def test_the_page_loads_with_an_announced_loading_state():
     assert "state.adminUpdatesLoaded = true;" in src
 
 
+def test_the_page_helpers_are_passed_their_data_not_reaching_for_it():
+    """Live rig bug 2026-10-07: updateStateBadge() referenced the page's own `d`, which
+    is not in its scope, so every render threw and the page froze on its loading state.
+    Rendering is checked for scope: helpers get their data as arguments."""
+    src = _src()
+    i = src.find("function updateStateBadge(")
+    body = src[i:src.find("function updateRowHtml(", i)]
+    assert "latestKnown" in body, "the flag is a parameter"
+    assert "d.latest_known" not in body, "the helper must not reach for page data"
+    row = src[src.find("function updateRowHtml("):src.find("function ", src.find("function updateRowHtml(") + 20)]
+    assert "d.latest_known" not in row, "the row builder must not reach for page data either"
+    assert "updateStateBadge(w, latestKnown)" in row
+    assert "updateRowHtml(w, sel, d.latest_known)" in src, "the page passes it in (only here)"
+
+
 def test_a_downed_release_check_is_stated_and_offers_nothing():
     """If the latest release cannot be read there is nothing to compare: the page must
     say so rather than badge every workspace "Up to date" (caught live 2026-10-07)."""
     src = _src()
-    assert 'if (!d.latest_known) return statusBadge("warning", "Cannot compare");' in src
+    assert 'if (latestKnown === false) return statusBadge("warning", "Cannot compare");' in src
     assert "behind.length && d.latest_known ?" in src, "no queue button while nothing can be compared"
     assert "esc(d.compare_note)" in src, "the page renders the API's reason for the admin"
     flat = _flat()

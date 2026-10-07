@@ -10,13 +10,15 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="styles.css?v=0.1.86" />
   </head>
   <body>
     <noscript>This preview requires JavaScript.</noscript>
     <div id="app"></div>
     <div id="modal-root"></div>
     <div id="toast-root" class="toast-stack" aria-live="polite"></div>
-    <script src="app.js"></script>
+    <!-- ?v=<release> busts the browser cache on deploy; keep it in step with
+         backend/docker-compose.yml (a test asserts they match) -->
+    <script src="app.js?v=0.1.86"></script>
   </body>
 </html>
