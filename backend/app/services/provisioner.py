@@ -11,14 +11,23 @@
 # On failure at any step: roll back created resources (stack, proxy host, cert).
 
 import json
+import logging
 import re
 import time
 from datetime import datetime
 
 from ..config import settings
 from .. import db
+from . import n8n_releases
 from .portainer_client import PortainerClient
 from .npm_client import NPMClient
+
+log = logging.getLogger(__name__)
+
+# The image name in the compose templates; kept here so the pinned tag and the
+# template substitution can never drift apart.
+N8N_IMAGE_NAME = "n8nio/n8n"
+_RELEASE_TAG_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 USERNAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,60}[a-z0-9])?$")
 RESERVED_USERNAMES = {"admin", "www", "api", "portal", "app", "mail", "smtp",
@@ -236,14 +245,73 @@ def build_stack_env(username: str, port: int, encryption_key: str,
     ]
 
 
-def load_compose_template(plan: str = "a") -> str:
+def resolve_provision_tag() -> tuple[str, str]:
+    """Which n8n version a NEW workspace gets, and where that came from.
+
+    Returns (tag, source) with source one of:
+      override  - N8N_PROVISION_TAG is set; Steward is holding new workspaces
+                  on a chosen version, so the release lookup is skipped.
+      release   - the newest release published on Docker Hub right now.
+      fallback  - the lookup could not be reached; N8N_FALLBACK_TAG is used so
+                  provisioning still pins a real version instead of floating.
+
+    Never returns a floating tag. A workspace on `latest` follows whatever the
+    host's tag resolves to at each container recreate, which means an
+    unattended n8n upgrade (plus its one-way DB migrations) with nobody
+    deciding it - that is the bug this replaces (Steward, 2026-10-06).
+    """
+    override = (settings.n8n_provision_tag or "").strip().lstrip("v")
+    if override:
+        return override, "override"
+
+    tag = ""
+    try:
+        rel = n8n_releases.latest_release() or {}
+        tag = str((rel.get("latest") or {}).get("tag") or "").strip().lstrip("v")
+    except Exception as e:                       # Docker Hub unreachable/timeout
+        log.warning("provision: n8n release lookup failed: %s", e)
+
+    if tag and _RELEASE_TAG_RE.match(tag):
+        return tag, "release"
+
+    fallback = (settings.n8n_fallback_tag or "").strip().lstrip("v")
+    if fallback and _RELEASE_TAG_RE.match(fallback):
+        log.warning("provision: no release tag resolved; pinning fallback %s", fallback)
+        return fallback, "fallback"
+
+    # Fail closed: never provision a floating workspace silently.
+    raise ProvisionError(
+        "Cannot determine an n8n version to provision with. "
+        "Set N8N_PROVISION_TAG or N8N_FALLBACK_TAG."
+    )
+
+
+def render_compose(content: str, tag: str) -> str:
+    """Pin the n8n image in a compose template to an exact release tag."""
+    if not tag:
+        return content
+    return re.sub(rf"({re.escape(N8N_IMAGE_NAME)}):[A-Za-z0-9._-]+", rf"\1:{tag}", content)
+
+
+def load_compose_template(plan: str = "a", tag: str | None = None) -> str:
     """Return the compose for the account's plan tier:
     a = canonical template (GHS 300), b = Plus template (GHS 500,
-    chibz/bigcroc owner tier: 0.50 CPU / 1 GiB / heap 768)."""
+    chibz/bigcroc owner tier: 0.50 CPU / 1 GiB / heap 768).
+
+    0.1.81: the template's `n8nio/n8n:latest` line is rewritten to an exact
+    release tag. The provisioning flow resolves that tag once (which may hit
+    Docker Hub) and passes it in, so the stack it deploys and the version it
+    records cannot disagree. A bare call - previews, tests - stays offline and
+    deterministic, pinning the configured tag instead of floating.
+    """
     path = (settings.plan_b_compose_template_path if plan == "b"
             else settings.compose_template_path)
     with open(path, "r") as f:
-        return f.read()
+        content = f.read()
+    if tag is None:
+        tag = ((settings.n8n_provision_tag or "").strip().lstrip("v")
+               or (settings.n8n_fallback_tag or "").strip().lstrip("v"))
+    return render_compose(content, tag)
 
 
 # ---------- environment selection ----------
@@ -567,6 +635,13 @@ def provision_account(account_id: int, password: str | None = None,
 
     # 3. persist instance row FIRST (so we can roll back + track)
     domain = f"{username}.{settings.base_domain}"
+    # Which n8n version this NEW workspace gets (0.1.81). Resolved once, before
+    # the row and the stack are created, so the deployed stack and the stored
+    # version cannot disagree.
+    image_tag, image_source = resolve_provision_tag()
+    full_image = f"{N8N_IMAGE_NAME}:{image_tag}"
+    log.info("provision %s: pinning %s (source: %s)", username, full_image, image_source)
+
     instance_id = db.create_instance(
         account_id=account_id,
         stack_name=username,
@@ -579,6 +654,9 @@ def provision_account(account_id: int, password: str | None = None,
         n8n_encryption_key=encryption_key,
         plan=plan_tier,
     )
+    # Record the real pinned image, not the template's floating tag, so the
+    # portal's own record matches what is deployed.
+    db.update_instance(instance_id, image=full_image)
 
     stack_id: int | None = None
     npm_host_id: int | None = None
@@ -591,7 +669,7 @@ def provision_account(account_id: int, password: str | None = None,
         stack = pc.create_standalone_stack_string(
             endpoint_id=env_id,
             name=username,
-            compose_content=load_compose_template(plan_tier),
+            compose_content=load_compose_template(plan_tier, tag=image_tag),
             env_vars=env_vars,
         )
         stack_id = stack.get("Id")

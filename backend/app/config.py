@@ -60,6 +60,20 @@ class Settings:
     compose_template_path: str = os.getenv(
         "COMPOSE_TEMPLATE_PATH", "/app/templates/n8n-stack-compose.yml"
     )
+    # --- Which n8n version NEW workspaces get (0.1.81) ---
+    # A new workspace is pinned to a real release tag, never the floating
+    # `latest` tag: `latest` is resolved per host at every container recreate,
+    # so attaching a Python runner or any Portainer redeploy could silently
+    # move a customer onto a newer n8n and run its one-way DB migrations with
+    # nobody deciding it (Steward, 2026-10-06).
+    # Default: pin the newest release published on Docker Hub at provision
+    # time, so a new customer still starts current.
+    # N8N_PROVISION_TAG (optional) holds new workspaces on a chosen version and
+    # wins over the lookup; N8N_FALLBACK_TAG is used when the lookup cannot be
+    # reached, so provisioning never falls back to a floating tag.
+    n8n_provision_tag: str = os.getenv("N8N_PROVISION_TAG", "").strip()
+    n8n_fallback_tag: str = os.getenv("N8N_FALLBACK_TAG", "2.43.1").strip()
+
     data_dir: str = "/data"
     backup_dir: str = os.getenv("BACKUP_DIR", "/data/backups")
 
