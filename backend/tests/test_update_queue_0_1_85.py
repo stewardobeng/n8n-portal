@@ -389,12 +389,26 @@ def test_an_admin_batch_report_is_sent_exactly_once(tmp_path, monkeypatch):
 
 # --------------------------------------------------- the customer's own button
 
-def test_self_update_is_for_the_plus_package_only(tmp_path, monkeypatch):
+def test_self_update_still_honours_the_plus_switch_for_a_permitted_account(tmp_path, monkeypatch):
+    """The 0.1.85 rule survives as the SECOND restriction (0.1.88): with the switch left on
+    'b', even a permitted customer may only self-update the Plus workspace."""
     aid, ids = _mk(tmp_path, monkeypatch, plans=("a", "b", "b", "b"))
+    db.set_account_update(aid, True)          # the admin allowed this account
     items = {i["instance_id"]: i for i in uq.customer_state(aid)}
+    assert items[ids[0]]["update_allowed"] is True
     assert items[ids[0]]["can_update"] is False
     assert "Workspace Plus" in items[ids[0]]["blocked_reason"]
     assert items[ids[1]]["can_update"] is True
+
+
+def test_an_unpermitted_account_sees_no_update_option_even_on_plus(tmp_path, monkeypatch):
+    """0.1.88 (Steward): the permission is the gate. Same Plus workspaces, no permission, so
+    the customer is shown nothing at all and told nothing - exactly like backups."""
+    aid, ids = _mk(tmp_path, monkeypatch, plans=("a", "b", "b", "b"))
+    items = {i["instance_id"]: i for i in uq.customer_state(aid)}
+    assert items[ids[1]]["update_allowed"] is False
+    assert items[ids[1]]["can_update"] is False
+    assert items[ids[1]]["blocked_reason"] == ""
 
 
 def test_self_update_is_not_offered_when_there_is_nothing_to_do(tmp_path, monkeypatch):
@@ -409,6 +423,7 @@ def test_self_update_is_not_offered_when_there_is_nothing_to_do(tmp_path, monkey
 
 def test_a_customer_cannot_hammer_the_update_button(tmp_path, monkeypatch):
     aid, ids = _mk(tmp_path, monkeypatch)
+    db.set_account_update(aid, True)          # permitted, so only the cooldown can refuse
     inst = db.get_instance(ids[0])
     qid = uq._insert_row(inst, "n8nio/n8io:2.43.1", "2.43.1", "customer",
                          requested_account=aid, priority=100)
@@ -496,8 +511,13 @@ def test_customer_self_update_endpoint_queues_and_reports_position(tmp_path, mon
     c = TestClient(app)
     # gated
     assert c.get("/api/v1/me/updates").status_code in (401, 403)
+    # 0.1.88: not permitted yet, so the API refuses and the row offers nothing
+    r = c.post("/api/v1/me/instances/%d/update" % ids[0], headers=_client_h(aid))
+    assert r.status_code == 403
+    db.set_account_update(aid, True)
     r = c.get("/api/v1/me/updates", headers=_client_h(aid))
     assert r.status_code == 200, r.text
+    assert r.json()["update_allowed"] is True
     items = {i["instance_id"]: i for i in r.json()["items"]}
     assert items[ids[0]]["can_update"] is True
     assert items[ids[0]]["latest_version"] == "2.43.1"
@@ -516,6 +536,7 @@ def test_a_ghana_300_customer_cannot_self_update(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
     from app.main import app
     aid, ids = _mk(tmp_path, monkeypatch, plans=("a", "a", "a", "a"))
+    db.set_account_update(aid, True)          # permitted, but the switch is Plus-only
     monkeypatch.setattr(uq, "worker_tick", lambda: {"started": []})
     c = TestClient(app)
     r = c.post("/api/v1/me/instances/%d/update" % ids[0], headers=_client_h(aid))

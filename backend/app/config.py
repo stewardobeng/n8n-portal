@@ -109,7 +109,12 @@ class Settings:
     update_interval_minutes: int = int(os.getenv("UPDATE_INTERVAL_MINUTES", "5"))
     update_worker_enabled: bool = os.getenv("UPDATE_WORKER_ENABLED", "true").lower() == "true"
     update_report_to: str = os.getenv("UPDATE_REPORT_TO", "stewardobeng@gmail.com")
-    update_self_service_plan: str = os.getenv("UPDATE_SELF_SERVICE_PLAN", "b")
+    # Who may self-update, on top of the per-account permission (accounts.update_enabled):
+    #   "none" = nobody (global kill switch)   "any" = no plan restriction
+    #   "b"    = Workspace Plus (GHS 500) only
+    # The PERMISSION is the real gate (0.1.88, Steward 2026-10-07: "let it only be available
+    # to the accounts that are permitted"); this switch only narrows it further.
+    update_self_service_plan: str = os.getenv("UPDATE_SELF_SERVICE_PLAN", "any")
     update_customer_cooldown_hours: int = int(os.getenv("UPDATE_CUSTOMER_COOLDOWN_HOURS", "24"))
     update_verify_timeout_seconds: int = int(os.getenv("UPDATE_VERIFY_TIMEOUT_SECONDS", "420"))
     # Plan B stack = chibz/bigcroc owner tier (0.50 CPU / 1 GiB / heap 768)

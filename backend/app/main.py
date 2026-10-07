@@ -163,6 +163,7 @@ class AccountOut(BaseModel):
     paid_from: Optional[int] = None
     account_state: str = "active"  # active | suspended | archived
     backup_enabled: bool = False   # customer may self-service backup (admin-set)
+    update_enabled: bool = False   # customer may self-update a workspace (admin-set, 0.1.88)
     plan: str = "a"                 # subscribed tier: a = GHS 300, b = GHS 500 (Plus)
     first_name: str = ""            # 0.1.74: the sidebar chip shows only this
     created_at: int
@@ -396,6 +397,7 @@ def _account_to_out(a) -> AccountOut:
         paid_from=_row_get(a, "paid_from"),
         account_state=_row_get(a, "account_state", "active"),
         backup_enabled=bool(_row_get(a, "backup_enabled", 0)),
+        update_enabled=bool(_row_get(a, "update_enabled", 0)),
         plan=_row_get(a, "plan", "a") or "a",
         first_name=(_row_get(a, "first_name", "") or "").strip(),
         created_at=a["created_at"], provisioned_at=a["provisioned_at"],
@@ -450,6 +452,16 @@ def _require_backup(account_id: int) -> None:
     if acct and bool(_row_get(acct, "backup_enabled", 0)):
         return
     raise HTTPException(403, "Backup is not enabled for this account. Contact support.")
+
+
+def _require_update(account_id: int) -> None:
+    """Self-update is admin-gated exactly like backups (0.1.88, Steward 2026-10-07): a
+    customer may only ask for a workspace update when the admin enabled it for their
+    account; otherwise the update UI is hidden AND the API refuses (defense in depth)."""
+    acct = db.get_account(account_id)
+    if acct and bool(_row_get(acct, "update_enabled", 0)):
+        return
+    raise HTTPException(403, "Self-update is not enabled for this account. Contact support.")
 
 
 def _run_backup(backup_id: int, instance: dict, kind: str) -> None:
@@ -968,6 +980,7 @@ def my_updates(account_id: int = Depends(verify_client)):
     workspace is genuinely behind, so the button never promises a no-op.
     """
     return {"latest_version": update_queue.latest_target()["version"],
+            "update_allowed": update_queue.account_update_allowed(account_id),
             "items": update_queue.customer_state(account_id)}
 
 
@@ -977,6 +990,7 @@ def my_request_update(instance_id: int, account_id: int = Depends(verify_client)
     """Ask for a self-update. ALWAYS queued: even if ten people click together, the
     worker updates one workspace per server with a quiet gap between them, and this
     response tells the customer where they are in their server's line."""
+    _require_update(account_id)
     inst = _get_owned_instance(account_id, instance_id)
     info = {i["instance_id"]: i for i in update_queue.customer_state(account_id)}.get(int(inst["id"]))
     if not info:
@@ -1831,6 +1845,22 @@ def admin_set_backup(account_id: int, payload: BackupIn):
         raise HTTPException(404, "Account not found.")
     db.set_account_backup(account_id, payload.backup_enabled)
     return {"account_id": account_id, "backup_enabled": payload.backup_enabled}
+
+
+class UpdateAccessIn(BaseModel):
+    update_enabled: bool
+
+
+@app.put("/api/v1/admin/accounts/{account_id}/update-access",
+         dependencies=[Depends(verify_admin)])
+def admin_set_update_access(account_id: int, payload: UpdateAccessIn):
+    """Grant/revoke a customer's self-update permission (0.1.88). Same shape as the backup
+    permission: off by default, and while it is off the customer sees NO update UI. The
+    admin can always update any workspace from the Updates page."""
+    if not db.get_account(account_id):
+        raise HTTPException(404, "Account not found.")
+    db.set_account_update(account_id, payload.update_enabled)
+    return {"account_id": account_id, "update_enabled": payload.update_enabled}
 
 
 # ---------- admin impersonation (login as a customer, 2026-09-03) ----------

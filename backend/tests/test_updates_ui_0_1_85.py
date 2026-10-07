@@ -130,9 +130,11 @@ def test_an_unknown_version_is_never_shown_as_needing_an_update():
     assert "report an undetermined version" in src
 
 
-def test_the_self_update_button_is_only_for_the_plus_package():
+def test_the_self_update_button_is_only_for_an_allowed_account():
+    """0.1.88 (Steward): the gate is the admin per-account permission, not the package."""
     flat = _flat()
-    assert 'if (!info || info.plan !== "b") return "";' in flat
+    assert 'if (!state.myUpdatesAllowed) return "";' in flat
+    assert 'state.myUpdatesAllowed = !!(d && d.update_allowed);' in flat
     assert 'data-action="ws-self-update"' in flat
     # and nothing at all is shown until /me/updates has answered
     assert "if (!state.myUpdatesLoaded || !inst) return null;" in flat

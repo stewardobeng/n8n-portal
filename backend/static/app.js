@@ -36,6 +36,7 @@
     requestsLoaded: false,       // admin: the access-request list has answered
     myUpdates: [],               // customer: version/self-update state per workspace (0.1.85)
     myUpdatesLoaded: false,      // customer: /me/updates has answered
+    myUpdatesAllowed: false,     // customer: the admin allowed self-update for this account (0.1.88)
     adminUpdates: null,          // admin: the update queue overview (0.1.85)
     adminUpdatesLoaded: false,
     updSel: {},                  // admin: workspaces ticked on the Updates page
@@ -714,8 +715,11 @@ var ICONS = {
     return "about " + minutes + " minutes (around " + fmtClock(Date.now() + minutes * 60000) + ")";
   }
   function selfUpdateHtml(inst) {
+    // Admin-gated exactly like backups (0.1.88): while the account is not permitted, the
+    // customer sees NO update UI at all, so nothing is claimed and nothing is promised.
+    if (!state.myUpdatesAllowed) return "";
     var info = myUpdateFor(inst);
-    if (!info || info.plan !== "b") return "";
+    if (!info) return "";
     if (info.queued) {
       var q = info.queued;
       if (q.status === "running") {
@@ -753,6 +757,7 @@ var ICONS = {
       var d = await api("/me/updates");
       state.myUpdates = (d && d.items) || [];
       state.myUpdatesLatest = (d && d.latest_version) || "";
+      state.myUpdatesAllowed = !!(d && d.update_allowed);
     } catch (e) { state.myUpdates = state.myUpdates || []; }
     // marked either way, so a broken read cannot leave the rows blank for ever
     state.myUpdatesLoaded = true;
@@ -1271,7 +1276,7 @@ var ICONS = {
         (archivedCount ? '<a class="button secondary" href="#/admin/archived">' + icon("archive") + " Archived (" + archivedCount + ")</a>" : "") +
         '<a class="button secondary" href="#/admin/requests">' + icon("requests") + " New requests</a></div>") +
       '<section class="card flush"><div class="table-tools"><div class="search"><input id="account-search" type="search" placeholder="Search name, email, or username" aria-label="Search accounts"></div></div>' +
-      '<div class="table-wrap"><table><thead><tr><th>Customer</th><th>Plan</th><th>Subscription</th><th>Period end</th><th>Quota</th><th>Backup</th><th></th></tr></thead><tbody>' +
+      '<div class="table-wrap"><table><thead><tr><th>Customer</th><th>Plan</th><th>Subscription</th><th>Period end</th><th>Quota</th><th>Backup</th><th>Update</th><th></th></tr></thead><tbody>' +
         (accounts.length ? accounts.map(function (a) {
           var badge = a.subscription_status === "active" ? statusBadge("active", "Active")
             : a.subscription_status === "past_due" ? statusBadge("pastdue", "Past due")
@@ -1281,6 +1286,7 @@ var ICONS = {
           var stateBadge = a.account_state === "suspended" ? statusBadge("suspended", "Suspended")
             : a.account_state === "archived" ? statusBadge("archived", "Archived") : "";
           var bkBadge = a.backup_enabled ? statusBadge("active", "On") : statusBadge("off", "Off");
+          var updBadge = a.update_enabled ? statusBadge("active", "On") : statusBadge("off", "Off");
           return "<tr data-account-row=\"" + a.id + "\">" +
             '<td><div class="customer-cell"><span class="avatar">' + esc(initialsOf(a.display_name || a.username)) + '</span><span class="cell-text"><strong>' + esc(a.display_name || cap(a.username)) + "</strong><span>" + esc(a.email) + "</span></span></div></td>" +
             "<td>" + esc(planName(a)) + "</td>" +
@@ -1289,11 +1295,13 @@ var ICONS = {
             "<td>" + (a.quota || 1) + "</td>" +
             '<td class="cell-actions-td"><div class="cell-actions fill">' + bkBadge +
             '<button class="button secondary small-btn" data-action="admin-backup-toggle" data-id="' + a.id + '" data-on="' + (a.backup_enabled ? "1" : "0") + '">' + (a.backup_enabled ? "Revoke" : "Allow") + " backup</button></div></td>" +
+            '<td class="cell-actions-td"><div class="cell-actions fill">' + updBadge +
+            '<button class="button secondary small-btn" data-action="admin-update-toggle" data-id="' + a.id + '" data-on="' + (a.update_enabled ? "1" : "0") + '">' + (a.update_enabled ? "Revoke" : "Allow") + " update</button></div></td>" +
             '<td class="cell-actions-td"><div class="cell-actions">' + (a.account_state === "active" ? '<button class="button secondary small-btn" data-action="admin-impersonate" data-id="' + a.id + '">' + icon("eye") + " Login as user</button>" : "") +
             '<button class="button secondary small-btn" data-route="/admin/account/' + a.id + '">View account</button></div></td></tr>';
         }).join("") : (state.adminAccountsLoaded
-          ? '<tr><td colspan="7"><div class="empty-state" style="min-height:240px"><div><h3>No customer accounts yet</h3><p class="muted">Accounts appear here after registration.</p></div></div></td></tr>'
-          : loadingRow(7, "Loading customer accounts...", "", 240))) +
+          ? '<tr><td colspan="8"><div class="empty-state" style="min-height:240px"><div><h3>No customer accounts yet</h3><p class="muted">Accounts appear here after registration.</p></div></div></td></tr>'
+          : loadingRow(8, "Loading customer accounts...", "", 240))) +
       "</tbody></table></div></section></main>");
   }
 
@@ -1601,6 +1609,11 @@ var ICONS = {
           ? "This customer can create and download backups from their own portal. You can revoke this at any time."
           : "This customer does not see a backup option. Only the admin can back up this workspace until you enable it.") + "</p>" +
         '<button class="button secondary small-btn" data-action="admin-backup-toggle" data-id="' + a.id + '" data-on="' + (a.backup_enabled ? "1" : "0") + '" style="margin-top:14px">' + (a.backup_enabled ? " Revoke backup access" : " Allow customer to back up") + "</button></section>" +
+      '<section class="card" style="margin-top:18px"><div class="card-head"><h2>Update access</h2>' + (a.update_enabled ? statusBadge("active", "Enabled for customer") : statusBadge("off", "Disabled")) + "</div>" +
+        '<p class="small muted" style="margin:0">' + (a.update_enabled
+          ? "This customer can update their own workspaces from their portal. Updates are paced on the server, one workspace at a time per server, and you can revoke this at any time."
+          : "This customer does not see an update option. Only you can update this customer's workspaces until you enable it.") + "</p>" +
+        '<button class="button secondary small-btn" data-action="admin-update-toggle" data-id="' + a.id + '" data-on="' + (a.update_enabled ? "1" : "0") + '" style="margin-top:14px">' + (a.update_enabled ? " Revoke update access" : " Allow customer to update") + "</button></section>" +
       '<div class="grid cols-3" style="margin-top:18px"><section class="card span-2"><div class="card-head"><h2>Workspaces</h2>' +
         (used < quota ? '<button class="button secondary small-btn" data-action="admin-add-workspace" data-id="' + a.id + '">Add workspace</button>' : "") + "</div>" +
         '<div class="workspace-list">' +
@@ -3264,6 +3277,23 @@ var ICONS = {
             '<button class="button" data-confirm-admin-backup-toggle="' + bktId + '" data-on="1">Allow backup</button></div>');
         }
       }
+      else if (action === "admin-update-toggle") {
+        event.preventDefault();
+        var updId = act.dataset.id, updOn = act.dataset.on === "1";
+        if (updOn) {
+          showModal(modalHeader("Revoke update access?") +
+            "<p>The customer will no longer see an update option in their portal. You can still update their workspaces yourself from the Updates page.</p>" +
+            '<div class="consequence"><strong>This action will:</strong><ul><li>Hide the update option from this customer</li><li>Not stop an update that is already in the line</li><li>Be reversible (you can allow updates again)</li></ul></div>' +
+            '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+            '<button class="button danger" data-confirm-admin-update-toggle="' + updId + '" data-on="0">Revoke access</button></div>');
+        } else {
+          showModal(modalHeader("Allow this customer to update?") +
+            "<p>Showing the update option lets this customer update their own workspaces from their portal. Updates stay paced on the server: one workspace at a time per server, with a few quiet minutes after each one.</p>" +
+            '<div class="consequence safe"><strong>This action will:</strong><ul><li>Show the update option on this customer workspace rows</li><li>Let them join the update line at any time</li><li>Be reversible (you can revoke at any time)</li></ul></div>' +
+            '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+            '<button class="button" data-confirm-admin-update-toggle="' + updId + '" data-on="1">Allow update</button></div>');
+        }
+      }
       else if (action === "admin-update-image") {
         event.preventDefault();
         var uInst = findInstanceById(act.dataset.id);
@@ -3523,6 +3553,19 @@ var ICONS = {
           showToast(bktEnabled ? "Backup access granted" : "Backup access revoked", bktEnabled
             ? "The customer can now create and download backups from their portal."
             : "The customer no longer sees a backup option.");
+          refreshAdminData();
+          render();
+        }).catch(function (err) { showToast("Update failed", err.message); });
+      }
+      var cUpdateToggle = event.target.closest("[data-confirm-admin-update-toggle]");
+      if (cUpdateToggle) {
+        var updTId = cUpdateToggle.dataset.confirmAdminUpdateToggle;
+        var updTOn = cUpdateToggle.dataset.on === "1";
+        closeModal();
+        api("/admin/accounts/" + updTId + "/update-access", { method: "PUT", body: { update_enabled: updTOn } }).then(function () {
+          showToast(updTOn ? "Update access granted" : "Update access revoked", updTOn
+            ? "The customer can now update their own workspaces from their portal."
+            : "The customer no longer sees an update option.");
           refreshAdminData();
           render();
         }).catch(function (err) { showToast("Update failed", err.message); });

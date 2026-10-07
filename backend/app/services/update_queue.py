@@ -565,10 +565,51 @@ def _semver_lt(a: str, b: str) -> bool:
         return False
 
 
+def account_update_allowed(account_id: int) -> bool:
+    """The admin's per-account self-update permission (accounts.update_enabled, 0.1.88).
+
+    Same shape as the backup permission: OFF by default, so a customer only sees update
+    controls once the admin allows them for that account."""
+    acct = db.get_account(int(account_id))
+    if not acct:
+        return False
+    return bool(db._row_get(acct, "update_enabled", 0))
+
+
+_SELF_SERVICE_OFF = ("", "none", "off", "0", "no")
+_SELF_SERVICE_ANY = ("any", "all", "*")
+
+
+def self_service_mode() -> str:
+    """The normalized update switch: 'none' (kill), 'any' (no plan limit) or a plan key."""
+    return (settings.update_self_service_plan or "any").strip().lower()
+
+
+def self_service_open(plan: str) -> bool:
+    """Whether the switch lets this workspace's package self-update at all.
+
+    The per-account permission is checked separately and always applies first, so this is
+    only the SECOND restriction."""
+    mode = self_service_mode()
+    if mode in _SELF_SERVICE_OFF:
+        return False
+    if mode in _SELF_SERVICE_ANY:
+        return True
+    return plan == mode
+
+
+def self_service_limited_to_plan() -> bool:
+    """True only when the switch names a specific plan, so a plan mismatch is worth
+    explaining to the customer (a global 'none' is not: they simply see nothing)."""
+    mode = self_service_mode()
+    return mode not in _SELF_SERVICE_OFF + _SELF_SERVICE_ANY
+
+
 def customer_state(account_id: int) -> list:
     """For the customer's own page: version, whether they may self-update, and
     their place in the line."""
     insts = [i for i in db.list_instances(int(account_id))]
+    allowed = account_update_allowed(account_id)
     data = overview()
     by_id = {w["instance_id"]: w for w in data["workspaces"]}
     out = []
@@ -576,7 +617,7 @@ def customer_state(account_id: int) -> list:
         iid = int(inst["id"])
         w = by_id.get(iid) or {}
         last = customer_last_request(iid)
-        can = (w.get("plan") == settings.update_self_service_plan
+        can = (allowed and self_service_open(w.get("plan"))
                and bool(w.get("needs_update")) and not w.get("queued")
                and not w.get("locked") and w.get("status") not in ("provisioning", "failed"))
         blocked = ""
@@ -586,8 +627,13 @@ def customer_state(account_id: int) -> list:
             # row must not read as "on the latest version"
             can = False
             blocked = ""
-        elif w.get("plan") != settings.update_self_service_plan:
-            blocked = "self-update is part of Workspace Plus"
+        elif not allowed or not self_service_open(w.get("plan")):
+            # Not permitted, or the switch is off: the customer sees NO update UI at all,
+            # exactly like the backup permission, and there is nothing to explain. Only a
+            # plan-specific switch mismatch is worth a sentence.
+            can = False
+            blocked = ("self-update is part of Workspace Plus"
+                       if allowed and self_service_limited_to_plan() else "")
         elif not w.get("needs_update"):
             blocked = ""
         elif w.get("queued"):
@@ -601,6 +647,7 @@ def customer_state(account_id: int) -> list:
             "stack_name": inst["stack_name"],
             "domain": inst["domain"],
             "plan": w.get("plan") or inst["plan"] or "a",
+            "update_allowed": allowed,
             "current_version": w.get("current_version") or "",
             "latest_version": w.get("latest_version") or "",
             "needs_update": bool(w.get("needs_update")),

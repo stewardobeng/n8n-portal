@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     paid_from INTEGER,               -- subscription start (admin mark-paid backdating)
     account_state TEXT NOT NULL DEFAULT 'active', -- active | suspended | archived (admin lifecycle)
     backup_enabled INTEGER NOT NULL DEFAULT 0, -- customer may self-service backup (admin-set; 0=hidden)
+    update_enabled INTEGER NOT NULL DEFAULT 0, -- customer may self-update a workspace (admin-set; 0=hidden, 0.1.88)
     totp_secret TEXT DEFAULT '',     -- authenticator-app secret (2FA)
     totp_enabled INTEGER DEFAULT 0,  -- authenticator 2FA active
     email_2fa INTEGER DEFAULT 0,     -- email one-time-code 2FA active
@@ -240,6 +241,11 @@ def init_db(db_path: str | None = None) -> None:
         acols5 = [r[1] for r in cur.execute("PRAGMA table_info(accounts)")]
         if "backup_enabled" not in acols5:
             cur.execute("ALTER TABLE accounts ADD COLUMN backup_enabled INTEGER NOT NULL DEFAULT 0")
+        # Migration: per-account self-update permission (admin-gated, same shape as backups).
+        # Default 0, so nobody can self-update until the admin allows it for that account.
+        acols6 = [r[1] for r in cur.execute("PRAGMA table_info(accounts)")]
+        if "update_enabled" not in acols6:
+            cur.execute("ALTER TABLE accounts ADD COLUMN update_enabled INTEGER NOT NULL DEFAULT 0")
         cur.executescript("""
         CREATE TABLE IF NOT EXISTS password_resets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -480,6 +486,23 @@ def set_account_quota(account_id: int, quota: int) -> None:
             "quota_b = CASE WHEN COALESCE(plan, 'a') = 'b' THEN ? ELSE quota_b END "
             "WHERE id = ?",
             (value, value, value, account_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_account_update(account_id: int, enabled: bool) -> None:
+    """Admin grants/revokes the customer's self-update permission (0.1.88).
+
+    Mirrors set_account_backup: when False the customer sees NO update UI at all, and the
+    API refuses the request as well (defense in depth). The admin can always update a
+    workspace from the portal regardless."""
+    conn = get_conn()
+    try:
+        conn.execute(
+            "UPDATE accounts SET update_enabled = ? WHERE id = ?",
+            (1 if enabled else 0, account_id),
         )
         conn.commit()
     finally:

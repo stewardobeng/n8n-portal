@@ -111,8 +111,8 @@ def test_archived_and_accounts_tables_gate_on_their_flags():
     flat = _flat()
     assert "(state.adminArchivedLoaded ? '<tr><td colspan=\"4\"><div class=\"empty-state\"" in flat
     assert 'loadingRow(4, "Loading archived accounts...", "", 220)' in flat
-    assert "(state.adminAccountsLoaded ? '<tr><td colspan=\"7\"><div class=\"empty-state\"" in flat
-    assert 'loadingRow(7, "Loading customer accounts...", "", 240)' in flat
+    assert "(state.adminAccountsLoaded ? '<tr><td colspan=\"8\"><div class=\"empty-state\"" in flat
+    assert 'loadingRow(8, "Loading customer accounts...", "", 240)' in flat
 
 
 def test_backup_tables_gate_on_their_flags():
