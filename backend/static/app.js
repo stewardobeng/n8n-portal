@@ -32,6 +32,7 @@
     security2fa: null,     // 2FA setup state (GET /me/security or /admin/security)
     adminInstances: [],    // admin: all instances (GET /admin/instances) for backup/update triggers
     adminInstancesLoaded: false,
+    sessionLoaded: false, // customer: /me has answered (or failed) at least once
     adminAccountsLoaded: false,
     accountDetailTried: {}, // admin: accountId -> the per-account read has finished (ok or failed)
     impersonation: null,     // admin login-as: {id, label} while viewing a customer
@@ -1292,10 +1293,10 @@ var ICONS = {
           '<div class="info-row"><dt>Period start</dt><dd>' + esc(fmtDate(a.paid_from)) + "</dd></div>" +
           '<div class="info-row"><dt>Period end</dt><dd>' + esc(fmtDate(a.paid_until)) + "</dd></div>" +
           '<div class="info-row"><dt>Renewal</dt><dd>Automatic</dd></div></dl></section>' +
-        '<section class="card"><div class="card-head"><h2>Quota</h2><strong>' + used + " / " + quota + "</strong></div>" +
-          '<div class="quota"><div class="bar"><span style="width:' + Math.min(100, quota ? Math.round(used / quota * 100) : 0) + '%"></span></div></div>' +
+        '<section class="card"><div class="card-head"><h2>Quota</h2><strong>' + (wsKnown ? used + " / " + quota : "Checking...") + "</strong></div>" +
+          (wsKnown ? '<div class="quota"><div class="bar"><span style="width:' + Math.min(100, quota ? Math.round(used / quota * 100) : 0) + '%"></span></div></div>' : "") +
           '<p class="small muted" style="margin-top:14px">Package allowances: ' + (a.quota_a || 1) + " × Workspace (GHS 300), " + (a.quota_b || 1) + " × Workspace Plus (GHS 500). Each workspace counts against its own package.</p>" +
-          '<p class="small muted" style="margin-top:8px">' + (used < quota ? "The customer may provision another workspace." : "Quota fully used.") + "</p>" +
+          (wsKnown ? '<p class="small muted" style="margin-top:8px">' + (used < quota ? "The customer may provision another workspace." : "Quota fully used.") + "</p>" : "") +
           '<button class="button secondary small-btn" data-action="quota" data-id="' + a.id + '">Change allowance</button></section>' +
       "</div>" +
       '<section class="card" style="margin-top:18px"><div class="card-head"><h2>Backup access</h2>' + (a.backup_enabled ? statusBadge("active", "Enabled for customer") : statusBadge("off", "Disabled")) + "</div>" +
@@ -1496,6 +1497,17 @@ var ICONS = {
 
   function requireCustomer(fn) {
     if (!localStorage.getItem("portal_token")) { navigate("/entry"); return ""; }
+    // First paint of a signed-in customer happens BEFORE /me answers, so every
+    // page used to render its zero/empty state as if it were fact: "No
+    // workspaces yet", "0 of 1 used", "Subscribe and provision..." for a paying
+    // customer (Steward's flash-of-misinformation report, 2026-10-07). Hold the
+    // page on an announced loading state until the session is known - or known to
+    // have failed (sessionLoaded is set on the failure path too).
+    if (!state.sessionLoaded) {
+      return appLayout("customer", "Loading", "workspace",
+        '<main class="page"><div class="center-state" style="min-height:60vh" role="status" aria-live="polite">' +
+        '<p class="muted">Loading your account...</p></div></main>');
+    }
     return fn();
   }
   function requireAdmin(fn) {
@@ -1569,10 +1581,11 @@ var ICONS = {
 
   async function refreshSession() {
     var token = localStorage.getItem("portal_token");
-    if (!token) { state.session = null; return null; }
+    if (!token) { state.session = null; state.sessionLoaded = true; return null; }
     try {
       var data = await api("/me");
       state.session = { token: token, account: data.account, instances: data.instances || [] };
+      state.sessionLoaded = true;
       if (!state.plans.length) await loadPlans();
       // lazily load backups when the customer opens the Backups page
       if ((location.hash || "").indexOf("/customer/backups") === 1 || state.backupsLoaded) {
@@ -1588,6 +1601,9 @@ var ICONS = {
         showToast("Session ended", "Please sign in again.");
         navigate("/entry");
       }
+      // Marked on failure too, so a broken /me can never leave the customer
+      // staring at a loading screen forever (0.1.83).
+      state.sessionLoaded = true;
       return null;
     }
   }
@@ -2224,6 +2240,7 @@ var ICONS = {
     state.impersonation = { id: Number(accountId), label: String(label) };
     state.impTtlMinutes = r.expires_minutes || 60;
     state.session = null;
+    state.sessionLoaded = false;
     state.menuOpen = false;
     stopPolling();
     showToast("Viewing as " + label, "Exit impersonation from the banner at any time.");
@@ -2245,6 +2262,7 @@ var ICONS = {
     localStorage.removeItem("impersonation");
     state.impersonation = null;
     state.session = null;
+    state.sessionLoaded = false;
     state.provisioningPw = null;
     stopPolling();
     showToast("Returned to admin", "You are no longer viewing as " + label + ".");
@@ -2489,7 +2507,7 @@ var ICONS = {
                (event.target === act || !act.classList.contains("modal-backdrop"))) closeModal();
       else if (action === "signout") {
         if (state.impersonation) { exitImpersonation(); }
-        else { localStorage.removeItem("portal_token"); state.session = null; state.provisioningPw = null; stopPolling(); showToast("Signed out", "You have been signed out of the portal."); navigate("/entry"); }
+        else { localStorage.removeItem("portal_token"); state.session = null; state.sessionLoaded = false; state.provisioningPw = null; stopPolling(); showToast("Signed out", "You have been signed out of the portal."); navigate("/entry"); }
       }
       else if (action === "signout-route") {
         if (currentKind() === "admin") {
@@ -2499,7 +2517,7 @@ var ICONS = {
         } else if (state.impersonation) {
           exitImpersonation();
         } else {
-          if (window.confirm("Sign out of the portal?")) { localStorage.removeItem("portal_token"); state.session = null; state.provisioningPw = null; stopPolling(); navigate("/entry"); }
+          if (window.confirm("Sign out of the portal?")) { localStorage.removeItem("portal_token"); state.session = null; state.sessionLoaded = false; state.provisioningPw = null; stopPolling(); navigate("/entry"); }
         }
       }
       else if (action === "toggle-password") {
