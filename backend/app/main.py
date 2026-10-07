@@ -2102,11 +2102,36 @@ def admin_update_image(instance_id: int, payload: UpdateImageIn):
 
 @app.get("/api/v1/admin/instances/{instance_id}/image", dependencies=[Depends(verify_admin)])
 def admin_current_image(instance_id: int):
-    """Report the instance's current running n8n image tag (for the UI)."""
+    """The instance's image reference AND the version it is really running.
+
+    `image` is what the update field needs; `version` is what the
+    behind/current report must use, because the reference is normally the
+    floating `latest` tag, which carries no version at all (0.1.80).
+    """
     inst = db.get_instance(instance_id)
     if not inst:
         raise HTTPException(404, "Instance not found.")
-    return {"image": backup_ops.current_image(inst)}
+    ver = backup_ops.current_version(inst, allow_exec=True)
+    return {
+        "image": backup_ops.current_image(inst),
+        "version": ver["version"],
+        "source": ver["source"],
+    }
+
+
+@app.get("/api/v1/admin/instance-versions", dependencies=[Depends(verify_admin)])
+def admin_instance_versions():
+    """True running n8n version for every instance (workspace list chip).
+
+    Batched: one container list + one image list per environment, so it stays
+    cheap however many workspaces exist. Empty on failure - the UI must show
+    "unknown" rather than claim a workspace is current.
+    """
+    try:
+        return {"versions": backup_ops.true_versions(db.list_instances())}
+    except Exception as e:
+        log.warning("instance version list failed: %s", e)
+        return {"versions": {}}
 
 
 class RunnerAttachIn(BaseModel):

@@ -34,6 +34,8 @@
 import gzip
 import logging
 import os
+import re
+import time
 import datetime
 import tarfile
 import io
@@ -59,6 +61,131 @@ def _row_get(row, key, default=None):
 
 
 # ---------- container resolution ----------
+
+# ---------- true running version (0.1.80) ----------
+#
+# The image REFERENCE says nothing reliable: every workspace stack is written
+# `image: n8nio/n8n:latest`, and "latest" is not a version. Comparing that string
+# with the newest release made the update dialog claim "already on the latest
+# release" for workspaces actually running 2.31.6 (Steward, 2026-10-06). So ask
+# the image/binary what it really is.
+
+_VERSION_RE = re.compile(r"^(\d+\.\d+\.\d+)")
+_IMAGE_CACHE: dict[int, tuple[float, dict]] = {}
+_IMAGE_TTL = 60.0
+
+
+def _image_versions(pc: PortainerClient, env: int) -> dict:
+    """image id -> version, from the image's own OCI label, cached ~60s.
+
+    One call per environment per minute, whatever the number of workspaces.
+    """
+    hit = _IMAGE_CACHE.get(env)
+    now = time.time()
+    if hit and now - hit[0] < _IMAGE_TTL:
+        return hit[1]
+    out: dict = {}
+    try:
+        for im in pc.list_images(env) or []:
+            labels = im.get("Labels") or {}
+            ver = str(labels.get("org.opencontainers.image.version") or "").strip()
+            iid = im.get("Id") or im.get("ID") or ""
+            if ver and iid and _VERSION_RE.match(ver):
+                out[iid] = ver
+    except Exception as e:
+        log.warning("image versions env %s failed: %s", env, e)
+    _IMAGE_CACHE[env] = (now, out)
+    return out
+
+
+def _tag_version(ref: str) -> str:
+    """Explicit version from an image reference; '' for latest/<none>/sha256."""
+    if not ref:
+        return ""
+    tag = ref.split(":")[-1] if ":" in ref else ""
+    m = _VERSION_RE.match(tag)
+    return m.group(1) if m else ""
+
+
+def current_version(instance, allow_exec: bool = False) -> dict:
+    """What this workspace is actually running: {version, source}.
+
+    source is one of image-label | exec | tag | unknown. A floating tag never
+    yields a version, and callers must treat '' as unknown rather than current.
+    """
+    resolved = resolve_container(instance)
+    stored = _row_get(instance, "image", "") or ""
+    tag_ver = _tag_version(stored)
+    if not resolved:
+        return {"version": tag_ver, "source": "tag" if tag_ver else "unknown"}
+    env, cid = resolved
+    pc = PortainerClient()
+    try:
+        insp = pc.get_container(env, cid)
+    except Exception as e:
+        log.warning("version inspect %s/%s failed: %s", env, cid, e)
+        return {"version": tag_ver, "source": "tag" if tag_ver else "unknown"}
+    image_id = insp.get("Image") or ""
+    ref = (insp.get("Config") or {}).get("Image") or stored
+    found = _image_versions(pc, env).get(image_id)
+    if found:
+        return {"version": found, "source": "image-label"}
+    if allow_exec:
+        try:
+            out = pc.exec_in_container(env, cid, ["n8n", "--version"], timeout=30.0)
+            text = (out or b"").decode("utf-8", "replace")
+            m = _VERSION_RE.search(text.strip())
+            if m:
+                return {"version": m.group(1), "source": "exec"}
+        except Exception as e:
+            log.warning("version exec %s/%s failed: %s", env, cid, e)
+    return {"version": _tag_version(ref), "source": "tag" if _tag_version(ref) else "unknown"}
+
+
+def true_versions(instances, pc: PortainerClient | None = None) -> dict:
+    """{instance_id: {version, source}} for a batch, without per-instance calls.
+
+    One container list and one image list per environment, so the admin UI can
+    show real versions for every workspace cheaply.
+    """
+    pc = pc or PortainerClient()
+    by_env: dict = {}
+    for inst in instances or []:
+        try:
+            by_env.setdefault(int(inst["environment_id"]), []).append(inst)
+        except Exception:
+            continue
+    out: dict = {}
+    for env, rows in by_env.items():
+        try:
+            containers = pc.list_containers(env, all=True)
+        except Exception as e:
+            log.warning("version scan env %s failed: %s", env, e)
+            containers = []
+        versions = _image_versions(pc, env)
+        for inst in rows:
+            name = f"{inst['stack_name']}-n8n-1"
+            cont = None
+            for c in containers:
+                if any((n or "").lstrip("/") == name for n in (c.get("Names") or [])):
+                    cont = c
+                    break
+            if cont is None:
+                cid = _row_get(inst, "container_id", "")
+                cont = next((c for c in containers if cid and c.get("Id") == cid), None)
+            stored = _row_get(inst, "image", "") or ""
+            if cont is None:
+                tv = _tag_version(stored)
+                out[inst["id"]] = {"version": tv, "source": "tag" if tv else "unknown"}
+                continue
+            ver = versions.get(cont.get("ImageID") or "") or versions.get(cont.get("Image") or "")
+            if ver:
+                out[inst["id"]] = {"version": ver, "source": "image-label"}
+            else:
+                tv = _tag_version(cont.get("Image") or stored)
+                out[inst["id"]] = {"version": tv, "source": "tag" if tv else "unknown"}
+    return out
+
 
 def resolve_container(instance) -> tuple[int, str] | None:
     """Return (endpoint_id, container_id) for an instance row, or None if the

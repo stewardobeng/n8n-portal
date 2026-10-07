@@ -36,6 +36,7 @@
     impersonation: null,     // admin login-as: {id, label} while viewing a customer
     impTtlMinutes: 60,       // lifetime of the impersonation session (server-set)
     n8nLatestTag: "",        // latest n8n release tag seen (admin update watch)
+    n8nVersions: {},         // admin: instanceId -> {version, source} actually running (0.1.80)
     instUpdating: {},        // instanceId -> target tag while an n8n update runs
     runnerBusy: {},          // instanceId -> "attach"|"detach" while a python-runner change runs
     busyModal: false         // true while a long-running action modal is open (render must not wipe it)
@@ -1592,6 +1593,11 @@ var ICONS = {
       state.adminArchived = (arch || []).filter(function (a) { return a.account_state === "archived"; });
       var reqs = await api("/admin/access-requests");
       state.requests = reqs || [];
+      // true running versions (0.1.80): the chip must not trust the image tag
+      try {
+        var vers = await api("/admin/instance-versions");
+        state.n8nVersions = (vers && vers.versions) || {};
+      } catch (e) { state.n8nVersions = {}; }
       // account details for the account page currently open (always fresh)
       var route = (location.hash || "").slice(1);
       var m = route.match(/^\/admin\/account\/(\d+)$/);
@@ -2245,6 +2251,15 @@ var ICONS = {
       return d;
     }).catch(function () { return null; });
   }
+  // The version a workspace really runs. The image reference is often the
+  // floating "latest" tag, which is not a version: never treat that as current.
+  function instVersion(inst) {
+    if (!inst) return "";
+    var m = (state.n8nVersions || {})[inst.id];
+    if (m && m.version) return m.version;
+    var tag = imageTagOf(inst.image || "");
+    return semverTuple(tag) ? tag : "";
+  }
   function imageTagOf(img) {
     var s = String(img || "");
     var i = s.lastIndexOf(":");
@@ -2266,8 +2281,10 @@ var ICONS = {
     return isNaN(d.getTime()) ? "" : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
   }
   function updateChip(inst) {
-    if (!inst || !state.n8nLatestTag || !inst.image) return "";
-    if (isVersionBehind(inst.image, state.n8nLatestTag)) {
+    if (!inst || !state.n8nLatestTag) return "";
+    var v = instVersion(inst);
+    if (!v) return "";   // unknown version: say nothing rather than claim "up to date"
+    if (isVersionBehind(v, state.n8nLatestTag)) {
       return ' <span class="status warning">n8n ' + esc(state.n8nLatestTag) + " available</span>";
     }
     return "";
@@ -2342,24 +2359,30 @@ var ICONS = {
     var wname = titleCase(uInst.stack_name);
     showModal(modalHeader("Update n8n for " + wname) + '<div class="spinner"></div><p class="muted">Checking the current version and the latest n8n release...</p>');
     var curP = api("/admin/instances/" + uInst.id + "/image").then(function (d) {
-      return d && d.image ? d.image : "";
-    }).catch(function () { return ""; });
+      return d || {};
+    }).catch(function () { return {}; });
     var relP = fetchN8nReleases();
     Promise.all([curP, relP]).then(function (res) {
-      var current = res[0] || "";
+      var info = res[0] || {};
+      var currentImage = info.image || "";
+      // Prefer the version the container actually runs; fall back to an explicit
+      // tag in the reference. "latest" is NOT a version, and pretending it was
+      // produced the false "already on the latest release" report (0.1.80).
+      var current = info.version || (semverTuple(imageTagOf(currentImage)) ? imageTagOf(currentImage) : "");
+      var known = !!semverTuple(current);
       var rel = res[1];
       var latestTag = (rel && rel.latest && rel.latest.tag) || "";
       var latestIso = (rel && rel.latest && rel.latest.published_at) || "";
-      var behind = !!(latestTag && current && isVersionBehind(current, latestTag));
-      var onLatest = !!(latestTag && current && !isVersionBehind(current, latestTag));
-      var showCurrent = current && imageTagOf(current) !== "latest";
+      var behind = !!(latestTag && known && isVersionBehind(current, latestTag));
+      var onLatest = !!(latestTag && known && !isVersionBehind(current, latestTag));
+      var showCurrent = !!current;
       var latestBanner = rel && rel.latest
         ? '<div class="banner' + (behind ? " success" : "") + '" style="margin-bottom:14px">' + icon("spark") +
           "<div><strong>Latest n8n release: " + esc(latestTag) + "</strong><br><span class=\"small\">" +
           (latestIso ? "Published " + esc(releaseDateLabel(latestIso)) + ". " : "") +
-          (behind ? "This workspace is on " + esc(imageTagOf(current)) + " and can be updated."
+          (behind ? "This workspace is on " + esc(current) + " and can be updated."
                   : onLatest ? "This workspace is already on the latest release."
-                             : (current ? "Current: " + esc(imageTagOf(current)) : "Current version unknown.")) +
+                             : "The current version could not be determined. You can still update to the latest release.") +
           "</span></div>" +
           (behind ? '<button class="button" data-action="update-image-now" data-id="' + uInst.id + '" data-tag="' + esc(latestTag) + '" style="margin-left:auto">' + icon("refresh") + " Update to " + esc(latestTag) + "</button>" : "") +
           "</div>"
@@ -2367,14 +2390,18 @@ var ICONS = {
           "<div><strong>Could not check for new releases</strong><br><span class=\"small\">The release list is unreachable right now. You can still update to a specific version below.</span></div></div>";
       showModal(modalHeader("Update n8n for " + wname) +
         latestBanner +
-        (showCurrent ? '<div class="field"><label>Current version</label><input class="mono" value="' + esc(current) + '" readonly></div>' : "") +
+        (showCurrent ? '<div class="field"><label>Current version</label><input class="mono" value="' + esc(current) + '" readonly>' +
+            (currentImage && imageTagOf(currentImage) !== current
+              ? '<span class="hint">Stack image: ' + esc(currentImage) + ' (a floating tag; the version above is what the container really runs)</span>'
+              : "") +
+            '</div>' : "") +
         '<div class="field"><label>Update to a specific version</label><div class="input-row">' +
         '<span class="input-suffix">n8nio/n8n:</span>' +
         '<input id="img-tag" type="text" placeholder="e.g. ' + esc(latestTag || "2.31.6") + '" autocomplete="off" spellcheck="false">' +
         '</div><span class="hint">Type the exact version tag to update to (for example ' + esc(latestTag || "2.31.6") + '). Every update pulls the image from Docker Hub first, so a brand-new version works right away. Workflows and credentials are preserved.</span></div>' +
         '<div class="actions end" style="justify-content:flex-start;flex-wrap:wrap">' +
         '<button class="button" data-action="update-to-version" data-id="' + uInst.id + '">' + icon("refresh") + " Update n8n</button>" +
-        (showCurrent && !behind ? '<button class="button secondary" data-action="repull-version" data-id="' + uInst.id + '" data-tag="' + esc(imageTagOf(current)) + '">Re-pull ' + esc(imageTagOf(current)) + "</button>" : "") +
+        (showCurrent && !behind ? '<button class="button secondary" data-action="repull-version" data-id="' + uInst.id + '" data-tag="' + esc(current) + '">Re-pull ' + esc(current) + "</button>" : "") +
         '<button class="button secondary" data-action="close-modal">Cancel</button></div>');
     });
   }
