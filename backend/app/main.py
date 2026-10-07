@@ -32,6 +32,7 @@ def _decode_subject_is_admin(authorization: str | None) -> bool:
         return False
 from .services import provisioner, billing, access_gate, admin_ops, backup_ops
 from .services import account_security, passkeys, n8n_releases, python_runner
+from .services import update_queue
 from .services import plan_specs
 from .services import security_controls as sc
 from .services.admin_ops import AdminOpsError
@@ -58,6 +59,10 @@ async def lifespan(app: FastAPI):
     # AUTO-EXPIRY background task (Steward 2026-09-01): every 15 minutes, stop
     # instances whose subscription has expired. Renewal restarts them.
     expiry_task = asyncio.create_task(_expiry_loop())
+    # WORKSPACE UPDATE QUEUE (0.1.85): one update at a time per server, a quiet gap
+    # between them, admin batches ahead of customer requests. Runs in this process
+    # so it survives a closed browser; queue state is in SQLite so it survives us.
+    update_queue.start_worker()
     try:
         yield
     finally:
@@ -953,6 +958,43 @@ def my_create_backup(instance_id: int, kind: str = "full",
     if background:
         background.add_task(_run_backup, bid, dict(inst), kind)
     return {"id": bid, "status": "creating"}
+
+
+@app.get("/api/v1/me/updates", dependencies=[Depends(verify_client)])
+def my_updates(account_id: int = Depends(verify_client)):
+    """Version and self-update state for the signed-in account's own workspaces.
+
+    `can_update` is true only on the self-service package and only when the
+    workspace is genuinely behind, so the button never promises a no-op.
+    """
+    return {"latest_version": update_queue.latest_target()["version"],
+            "items": update_queue.customer_state(account_id)}
+
+
+@app.post("/api/v1/me/instances/{instance_id}/update", status_code=202,
+          dependencies=[Depends(verify_client)])
+def my_request_update(instance_id: int, account_id: int = Depends(verify_client)):
+    """Ask for a self-update. ALWAYS queued: even if ten people click together, the
+    worker updates one workspace per server with a quiet gap between them, and this
+    response tells the customer where they are in their server's line."""
+    inst = _get_owned_instance(account_id, instance_id)
+    info = {i["instance_id"]: i for i in update_queue.customer_state(account_id)}.get(int(inst["id"]))
+    if not info:
+        raise HTTPException(404, "Workspace not found.")
+    if info.get("queued"):
+        raise HTTPException(409, "This workspace is already in the update line.")
+    if not info.get("can_update"):
+        raise HTTPException(403, info.get("blocked_reason") or "This workspace cannot self-update.")
+    res = update_queue.queue_workspaces([int(inst["id"])], requested_by="customer",
+                                       requested_account=account_id, priority=100)
+    if not res.get("ok"):
+        why = res.get("error") or (res.get("skipped") or [{}])[0].get("reason") or "Could not queue the update."
+        raise HTTPException(503, why)
+    row = res["queued"][0]
+    pos = update_queue.position_of(row["queue_id"])
+    return {"ok": True, "queue_id": row["queue_id"], "target_version": row["target_version"],
+            "position": pos.get("position"), "eta_minutes": pos.get("eta_minutes"),
+            "status": "queued"}
 
 
 @app.get("/api/v1/me/backups/{backup_id}/download", dependencies=[Depends(verify_client)])
@@ -2069,6 +2111,48 @@ class UpdateImageIn(BaseModel):
     image: str = Field(..., min_length=1, max_length=120)
 
 
+class UpdateQueueIn(BaseModel):
+    instance_ids: list[int] | None = None
+    all_behind: bool = False
+
+
+@app.get("/api/v1/admin/updates", dependencies=[Depends(verify_admin)])
+def admin_updates():
+    """Everything the Updates page shows (0.1.85): who is behind the latest release,
+    the live queue, each server's next allowed slot and recent history."""
+    return update_queue.overview()
+
+
+@app.post("/api/v1/admin/updates/queue", dependencies=[Depends(verify_admin)])
+def admin_queue_updates(payload: UpdateQueueIn):
+    """Queue updates for chosen workspaces, or for everything that is behind.
+
+    Admin rows take priority over customer requests, but the worker still moves one
+    workspace PER SERVER with the quiet gap between them, so a bulk action cannot
+    pile recreations onto one box.
+    """
+    if payload.all_behind:
+        res = update_queue.queue_all_behind(requested_by="admin")
+    else:
+        ids = [int(i) for i in (payload.instance_ids or [])]
+        if not ids:
+            raise HTTPException(400, "Pick at least one workspace, or use all_behind.")
+        res = update_queue.queue_workspaces(ids, requested_by="admin")
+    if not res.get("ok") and res.get("error"):
+        raise HTTPException(503, res["error"])
+    if res.get("queued"):
+        # start the first one now rather than on the next supervisor tick
+        update_queue.worker_tick()
+    return res
+
+
+@app.post("/api/v1/admin/updates/cancel", dependencies=[Depends(verify_admin)])
+def admin_cancel_updates(batch_id: str):
+    """Cancel the queued (not yet started) rows of one batch. A running update is
+    left to finish, because interrupting a recreate is worse than waiting."""
+    return {"ok": True, "canceled": update_queue.cancel_batch(batch_id)}
+
+
 @app.post("/api/v1/admin/instances/{instance_id}/update-image",
           dependencies=[Depends(verify_admin)])
 def admin_update_image(instance_id: int, payload: UpdateImageIn):
@@ -2078,9 +2162,15 @@ def admin_update_image(instance_id: int, payload: UpdateImageIn):
     inst = db.get_instance(instance_id)
     if not inst:
         raise HTTPException(404, "Instance not found.")
+    # 0.1.85: a manual update runs at once, as Steward asked, but it takes this
+    # server's slot so the queue worker cannot add a second update to the same box
+    # while it runs.
+    _manual_q = update_queue.reserve_manual(inst, payload.image,
+                                            update_queue.tag_to_version(payload.image))
     try:
         new_image = backup_ops.update_instance_image(inst, payload.image)
     except ValueError as e:
+        update_queue.complete_manual(_manual_q, False, error=str(e))
         raise HTTPException(422, str(e))
     except Exception as e:
         msg = str(e)
@@ -2096,7 +2186,10 @@ def admin_update_image(instance_id: int, payload: UpdateImageIn):
                 "n8n. Double-check the tag (format like 2.31.6) and try again.",
             )
         log.error("update image %s: %s", instance_id, e)
+        update_queue.complete_manual(_manual_q, False, error=msg)
         raise HTTPException(502, f"Image update failed: {e}")
+    update_queue.complete_manual(_manual_q, True, note="manual update from the dashboard",
+                                 result_version=update_queue.tag_to_version(payload.image))
     return {"ok": True, "instance_id": instance_id, "image": new_image}
 
 

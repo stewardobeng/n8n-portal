@@ -99,6 +99,19 @@ class Settings:
     renewal_reminders_enabled: bool = \
         os.getenv("RENEWAL_REMINDERS_ENABLED", "false").lower() == "true"
     portal_base_url: str = os.getenv("PORTAL_BASE_URL", "https://portal.steprotech.com")
+
+    # ---- Workspace update queue (0.1.85, Steward 2026-10-07) ----------------
+    # One update at a time PER SERVER (three servers therefore three streams), and
+    # after each workspace is verified stable the host waits the quiet gap before
+    # the next one starts. Admin batches jump ahead of customer requests, while a
+    # manual admin update still runs immediately (it takes the same host slot, so
+    # nothing else can start on that server while it runs).
+    update_interval_minutes: int = int(os.getenv("UPDATE_INTERVAL_MINUTES", "5"))
+    update_worker_enabled: bool = os.getenv("UPDATE_WORKER_ENABLED", "true").lower() == "true"
+    update_report_to: str = os.getenv("UPDATE_REPORT_TO", "stewardobeng@gmail.com")
+    update_self_service_plan: str = os.getenv("UPDATE_SELF_SERVICE_PLAN", "b")
+    update_customer_cooldown_hours: int = int(os.getenv("UPDATE_CUSTOMER_COOLDOWN_HOURS", "24"))
+    update_verify_timeout_seconds: int = int(os.getenv("UPDATE_VERIFY_TIMEOUT_SECONDS", "420"))
     # Plan B stack = chibz/bigcroc owner tier (0.50 CPU / 1 GiB / heap 768)
     plan_b_compose_template_path: str = os.getenv(
         "PLAN_B_COMPOSE_TEMPLATE_PATH", "/app/templates/n8n-stack-compose-plus.yml"

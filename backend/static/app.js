@@ -34,6 +34,11 @@
     adminInstancesLoaded: false,
     sessionLoaded: false, // customer: /me has answered (or failed) at least once
     requestsLoaded: false,       // admin: the access-request list has answered
+    myUpdates: [],               // customer: version/self-update state per workspace (0.1.85)
+    myUpdatesLoaded: false,      // customer: /me/updates has answered
+    adminUpdates: null,          // admin: the update queue overview (0.1.85)
+    adminUpdatesLoaded: false,
+    updSel: {},                  // admin: workspaces ticked on the Updates page
     adminArchivedLoaded: false,  // admin: the archived-account list has answered
     adminEnvsLoaded: false,      // admin: the per-server environment list has answered
     adminAccountsLoaded: false,
@@ -206,6 +211,7 @@ var ICONS = {
     ["requests", "Access requests", "/admin/requests"],
     ["accounts", "Accounts", "/admin/accounts"],
     ["backup", "Backups", "/admin/backups"],
+    ["updates", "Updates", "/admin/updates"],
     ["maintenance", "Billing maintenance", "/admin/maintenance"],
     ["settings", "Settings", "/admin/settings"],
     ["security", "Security", "/admin/security"]
@@ -683,7 +689,94 @@ var ICONS = {
     }
     return '<article class="workspace-item"><span class="workspace-logo">' + icon("workspace") + "</span>" +
       "<div><h3>" + esc(titleCase(inst.stack_name)) + " workspace" + wsPlanTag(inst) + "</h3><p>" + esc(inst.domain || "") + "</p></div>" +
-      (badgeHtml || "") + (actionHtml || "") + "</article>";
+      (badgeHtml || "") + (actionHtml || "") + (inst ? selfUpdateHtml(inst) : "") + "</article>";
+  }
+
+  /* ---- self-update (0.1.85) ----------------------------------------------------
+   * Workspace Plus customers may ask for an update, but it is ALWAYS queued: one
+   * workspace at a time per server, so the row shows where they are in the line
+   * instead of pretending it starts on click. Nothing is claimed before
+   * /me/updates has answered, and a GHS 300 workspace shows nothing at all.
+   */
+  function myUpdateFor(inst) {
+    if (!state.myUpdatesLoaded || !inst) return null;
+    var rows = state.myUpdates || [];
+    for (var i = 0; i < rows.length; i++) if (Number(rows[i].instance_id) === Number(inst.id)) return rows[i];
+    return null;
+  }
+  function fmtClock(ms) {
+    try { return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
+    catch (e) { return ""; }
+  }
+  function etaText(minutes) {
+    if (minutes === null || minutes === undefined) return "";
+    if (minutes <= 1) return "any moment now";
+    return "about " + minutes + " minutes (around " + fmtClock(Date.now() + minutes * 60000) + ")";
+  }
+  function selfUpdateHtml(inst) {
+    var info = myUpdateFor(inst);
+    if (!info || info.plan !== "b") return "";
+    if (info.queued) {
+      var q = info.queued;
+      if (q.status === "running") {
+        return '<span class="status awaiting">Updating now</span>';
+      }
+      return '<span class="status awaiting" title="' + esc(etaText(q.eta_minutes)) + '">Queued: ' +
+        (q.position ? ("position " + q.position + " on your server") : "waiting") + "</span>";
+    }
+    if (info.can_update) {
+      return '<button class="button small-btn" data-action="ws-self-update" data-id="' + inst.id + '">' +
+        icon("download") + " Update to " + esc(info.latest_version || "the latest version") + "</button>";
+    }
+    if (info.blocked_reason) {
+      return '<span class="small muted">' + esc(info.blocked_reason) + "</span>";
+    }
+    if (info.last && info.last.status === "done" && info.last.to_version) {
+      return '<span class="small muted">Updated to ' + esc(info.last.to_version) + "</span>";
+    }
+    if (!info.needs_update && info.current_version) {
+      return '<span class="small muted">On ' + esc(info.current_version) + " (latest)</span>";
+    }
+    if (info.needs_update) {
+      return '<span class="small muted">Update available, ask support</span>';
+    }
+    return "";
+  }
+  async function ensureMyUpdates(force) {
+    if (state.myUpdatesLoaded && !force) return;
+    try {
+      var d = await api("/me/updates");
+      state.myUpdates = (d && d.items) || [];
+      state.myUpdatesLatest = (d && d.latest_version) || "";
+    } catch (e) { state.myUpdates = state.myUpdates || []; }
+    // marked either way, so a broken read cannot leave the rows blank for ever
+    state.myUpdatesLoaded = true;
+    if (!modalRoot.children.length) render();
+  }
+  async function queueUpdates(ids) {
+    var body = ids ? { instance_ids: ids } : { all_behind: true };
+    try {
+      var r = await api("/admin/updates/queue", { method: "POST", body: body });
+      var n = (r && r.queued ? r.queued.length : 0);
+      var msg = n
+        ? n + " workspace(s) queued. One updates at a time per server, then the report arrives when the run finishes."
+        : "Nothing new to queue.";
+      if (r && r.skipped && r.skipped.length) msg += " Skipped " + r.skipped.length + ".";
+      showToast(n ? "Queue updated" : "Nothing to queue", msg);
+      state.updSel = {};
+      state.adminUpdatesLoaded = false;
+      await ensureAdminUpdates(true);
+    } catch (e) {
+      showToast("Could not queue", (e && e.message) || "Try again.");
+    }
+  }
+  async function ensureAdminUpdates(force) {
+    if (state.adminUpdatesLoaded && !force) return;
+    try {
+      state.adminUpdates = await api("/admin/updates");
+    } catch (e) { state.adminUpdates = state.adminUpdates || null; }
+    state.adminUpdatesLoaded = true;
+    if (!modalRoot.children.length) render();
   }
 
   function customerWorkspaces() {
@@ -722,7 +815,7 @@ var ICONS = {
         : '<button class="button secondary small-btn" data-action="workspace-detail" data-id="' + i.id + '">Details</button>';
       return '<article class="workspace-item"><span class="workspace-logo">' + icon("workspace") + "</span>" +
         "<div><h3>" + esc(titleCase(i.stack_name)) + " workspace" + wsPlanTag(i) + "</h3><p>https://" + esc(i.domain) + "<br>Created " + esc(fmtDate(i.created_at)) + "</p></div>" +
-        badge + action + "</article>";
+        badge + action + selfUpdateHtml(i) + "</article>";
     }).join("")
       : '<div class="empty-state" style="min-height:240px"><div><h3>No workspaces yet</h3><p class="muted">' + esc(emptyCopy) + "</p></div></div>";
     return appLayout("customer", "My workspaces", "workspace",
@@ -1195,6 +1288,156 @@ var ICONS = {
       "</tbody></table></div></section></main>");
   }
 
+  /* ---- admin Updates page (0.1.85, Steward 2026-10-07) -----------------------
+   * This page is where the pacing is explained as well as performed: one workspace
+   * at a time PER SERVER, five minutes of quiet after each one is verified stable,
+   * an admin batch ahead of customer requests, and a single manual update from the
+   * workspace row that never waits (it only holds that server's slot).
+   */
+  function updateStateBadge(w) {
+    if (w.queued) {
+      return w.queued.status === "running" ? statusBadge("provisioning", "Updating now")
+        : statusBadge("awaiting", "Queued" + (w.queued.position ? " (" + w.queued.position + ")" : ""));
+    }
+    if (w.locked) return statusBadge("off", "Locked");
+    if (w.status === "provisioning") return statusBadge("neutral", "Being set up");
+    if (w.version_unknown) return statusBadge("neutral", "Version unknown");
+    if (w.needs_update) return statusBadge("awaiting", "Needs update");
+    return statusBadge("running", "Up to date");
+  }
+  function updateRowHtml(w, sel) {
+    var host = "server " + w.host;
+    var last = w.last;
+    var lastTxt = last
+      ? (last.status === "done" ? "Updated to " + esc(last.to_version || "") + " on " + esc(fmtDate(last.at || 0))
+        : last.status === "failed" ? "Failed: " + esc((last.error || "see report"))
+        : esc(last.status) + " on " + esc(fmtDate(last.at || 0)))
+      : "Never updated from here";
+    return "<tr>" +
+      '<td style="padding:8px"><input type="checkbox" data-upd-check value="' + w.instance_id + '"' +
+        (sel[w.instance_id] ? " checked" : "") +
+        (w.queued ? " disabled" : "") + ' aria-label="Select ' + esc(w.stack_name) + '"></td>' +
+      "<td style=\"padding:8px\"><b>" + esc(titleCase(w.stack_name)) + "</b><br>" +
+        '<span class="small muted">' + esc(w.domain || "") + "</span></td>" +
+      '<td style="padding:8px">' + esc(w.account) + '<br><span class="small muted">' + esc(w.plan === "b" ? "Plus (GHS 500)" : "GHS 300") + "</span></td>" +
+      '<td style="padding:8px">' + esc(host) + '<br><span class="small muted">' + esc(w.host_name || "") + "</span></td>" +
+      '<td style="padding:8px">' + (w.current_version ? esc(w.current_version) : '<span class="muted">unknown</span>') +
+        (w.floating_tag ? '<br><span class="small muted">floating tag</span>' : "") + "</td>" +
+      '<td style="padding:8px">' + esc(w.latest_version || "") + "</td>" +
+      '<td style="padding:8px">' + updateStateBadge(w) + "</td>" +
+      '<td style="padding:8px"><span class="small muted">' + lastTxt + "</span></td>" +
+      '<td style="padding:8px">' + (w.queued ? ""
+        : '<button class="button secondary small-btn" data-action="updates-queue-one" data-id="' + w.instance_id + '">Update</button>') + "</td>" +
+      "</tr>";
+  }
+  function adminUpdates() {
+    var head = pageHead("Workspace updates",
+      "Move customer workspaces to the latest n8n release, one workspace per server at a time.",
+      '<div class="actions"><button class="button secondary small-btn" data-action="updates-refresh">Refresh</button>' +
+      '<button class="button secondary small-btn" data-action="updates-select-none">Clear selection</button></div>');
+    if (!state.adminUpdatesLoaded) {
+      return appLayout("admin", "Updates", "backup",
+        '<main class="page">' + head +
+        '<section class="card">' +
+        loadingBlock("Loading the update queue...", "Asking each server what it is running.", 220) +
+        "</section></main>");
+    }
+    var d = state.adminUpdates || {};
+    var ws = d.workspaces || [];
+    var behind = ws.filter(function (w) { return w.needs_update; });
+    var unknown = ws.filter(function (w) { return w.version_unknown; });
+    var queue = d.queue || [];
+    var waiting = queue.filter(function (q) { return q.status === "queued"; });
+    var sel = state.updSel || {};
+    var selCount = Object.keys(sel).length;
+
+    var ruleCard = '<section class="card"><div class="card-head"><h3>How updates run</h3>' +
+      statusBadge(d.worker_enabled ? "running" : "off", d.worker_enabled ? "Queue running" : "Queue paused") + "</div>" +
+      '<ul class="small muted" style="margin:10px 0 0 18px">' +
+      "<li>One workspace updates at a time <b>on each server</b>, so three servers can move at once and no box ever takes two.</li>" +
+      "<li>After a workspace is verified stable that server rests <b>" + esc(String(d.interval_minutes)) +
+        " minutes</b> before its next one starts.</li>" +
+      "<li>Your batch goes <b>ahead of customer requests</b>.</li>" +
+      "<li>A manual update from a workspace row <b>starts immediately</b> and takes that server's slot while it runs.</li>" +
+      "<li>Latest n8n release right now: <b>" + esc(d.latest_version || "could not be resolved") + "</b>" +
+        (d.latest_source === "release" ? "" : " (source: " + esc(d.latest_source || "unknown") + ")") + "</li>" +
+      "<li>Report emails go to <b>" + esc(d.report_to || "") + "</b> when a run finishes, and immediately when one fails.</li>" +
+      "<li>No safety backup is taken before an update (your instruction), so a failure is rolled back by image tag instead.</li>" +
+      "</ul>" +
+      '<div class="actions" style="margin-top:14px">' +
+      '<button class="button" data-action="updates-queue-all"' + (behind.length ? "" : " disabled") + ">Update all that need it (" +
+        behind.length + ")</button>" +
+      '<button class="button secondary" data-action="updates-queue-selected"' + (selCount ? "" : " disabled") +
+        ">Update selected (" + selCount + ")</button>" +
+      "</div>" +
+      (unknown.length ? '<p class="small muted" style="margin-top:12px">' + unknown.length +
+        " workspace(s) report an undetermined version, so they are not claimed as behind. Update them by hand if you want them moved.</p>" : "") +
+      "</section>";
+
+    var hostCards = (d.hosts || []).map(function (h) {
+      var per = (d.interval_minutes || 5) + (d.typical_minutes || 3);
+      return '<section class="card"><div class="card-head"><h3>' + esc(h.name || ("server " + h.environment_id)) +
+        ' <span class="muted small">server ' + h.environment_id + "</span></h3>" +
+        (h.running ? statusBadge("provisioning", "Updating now") : statusBadge(h.queued ? "awaiting" : "running", h.queued ? "In line" : "Idle")) +
+        "</div>" +
+        "<p class=\"small muted\" style=\"margin:8px 0 0\">" +
+        (h.running ? "Running: <b>" + esc(titleCase(h.running.stack_name || "")) + "</b> since " +
+            esc(fmtClock(Date.now() - (h.running.elapsed_seconds || 0) * 1000)) +
+            " (" + Math.round((h.running.elapsed_seconds || 0) / 60) + " min)"
+          : "Nothing running on this server.") + "</p>" +
+        '<p class="small muted" style="margin:6px 0 0">In line: <b>' + h.queued + "</b> (" + h.ahead_admin +
+        " from you, " + h.ahead_customer + " from customers)" +
+        (h.queued ? " &middot; finishing in about " + (h.queued * per) + " minutes" : "") + "</p>" +
+        '<p class="small muted" style="margin:6px 0 0">Next update may start: <b>' +
+        (h.next_allowed_at && h.next_allowed_at > Math.floor(Date.now() / 1000)
+          ? esc(fmtClock(h.next_allowed_at * 1000)) : "now") + "</b></p></section>";
+    }).join("");
+
+    var table = '<section class="card" style="margin-top:18px"><div class="card-head"><h3>Workspaces</h3>' +
+      '<span class="small muted">' + ws.length + " total, " + behind.length + " behind</span></div>" +
+      (ws.length ? '<div style="overflow-x:auto"><table style="border-collapse:collapse;width:100%;font-size:13px">' +
+        '<tr style="background:#f9fafb;text-align:left">' +
+        "<th style=\"padding:8px\"> </th><th style=\"padding:8px\">Workspace</th>" +
+        "<th style=\"padding:8px\">Account</th><th style=\"padding:8px\">Server</th>" +
+        "<th style=\"padding:8px\">Running</th><th style=\"padding:8px\">Latest</th>" +
+        "<th style=\"padding:8px\">State</th><th style=\"padding:8px\">Last update</th><th style=\"padding:8px\"></th>" +
+        "</tr>" + ws.map(function (w) { return updateRowHtml(w, sel); }).join("") + "</table></div>"
+        : loadingBlock("No workspaces found...", "", 160)) + "</section>";
+
+    var queueCard = '<section class="card" style="margin-top:18px"><div class="card-head"><h3>In the line</h3>' +
+      '<span class="small muted">' + waiting.length + " waiting</span></div>" +
+      (waiting.length ? '<ol class="small" style="margin:10px 0 0 18px">' + waiting.map(function (q) {
+          return "<li>server " + q.host + " &middot; <b>" + esc(titleCase(q.stack_name || "")) + "</b> to " +
+            esc(q.target_version || "") + " &middot; " +
+            (q.position === 1 ? "next on that server" : "position " + q.position) +
+            (q.requested_by === "customer" ? " &middot; customer request" : " &middot; your batch") + "</li>";
+        }).join("") + "</ol>" : '<p class="small muted">Nothing is waiting.</p>') +
+      ((d.batches || []).filter(function (b) { return b.open; }).map(function (b) {
+        return '<button class="button secondary small-btn" style="margin-top:12px" data-action="updates-cancel" data-batch="' +
+          esc(b.batch_id) + '">Cancel the remaining ' + b.open + " in your last batch</button>";
+      }).join("")) + "</section>";
+
+    var history = (d.history || []).slice(0, 30);
+    var historyCard = '<section class="card" style="margin-top:18px"><div class="card-head"><h3>Recent updates</h3>' +
+      '<span class="small muted">newest first</span></div>' +
+      (history.length ? '<ul class="small" style="margin:10px 0 0 18px">' + history.map(function (h) {
+          var badge = h.status === "done" ? statusBadge("running", "Done")
+            : h.status === "failed" ? statusBadge("failed", "Failed")
+            : h.status === "canceled" ? statusBadge("off", "Canceled") : statusBadge("neutral", cap(h.status));
+          return "<li>server " + h.host + " &middot; <b>" + esc(titleCase(h.stack_name || "")) + "</b> " +
+            esc(h.from_version || "?") + " to " + esc(h.to_version || "?") + " &middot; " + badge +
+            (h.error ? ' <span class="muted">' + esc(h.error.slice(0, 140)) + "</span>" : "") +
+            ' <span class="muted">' + esc(fmtDate(h.finished_at || 0)) + "</span></li>";
+        }).join("") + "</ul>" : '<p class="small muted">No updates yet.</p>') + "</section>";
+
+    return appLayout("admin", "Updates", "backup",
+      '<main class="page">' + head +
+      ruleCard +
+      '<div class="grid cols-3" style="margin-top:18px">' + hostCards + "</div>" +
+      table + queueCard + historyCard +
+      "</main>");
+  }
+
   function adminBackups() {
     var backups = state.adminBackups || [];
     var acctMap = {};
@@ -1522,6 +1765,7 @@ var ICONS = {
     else if (route === "/admin/requests") html = requireAdmin(function () { return adminRequests(); });
     else if (route === "/admin/accounts") html = requireAdmin(function () { return adminAccounts(); });
     else if (route === "/admin/backups") html = requireAdmin(function () { return adminBackups(); });
+    else if (route === "/admin/updates") html = requireAdmin(function () { return adminUpdates(); });
     else if (route === "/admin/archived") html = requireAdmin(function () { return archivedAccounts(); });
     else if (parts[0] === "admin" && parts[1] === "account") html = requireAdmin(function () { return adminAccountPage(parts[2]); });
     else if (route === "/admin/maintenance") html = requireAdmin(function () { return maintenancePage(); });
@@ -1565,8 +1809,19 @@ var ICONS = {
       done = true;
       if (!routeChanged(route) && dataSig() !== sigBefore && !modalRoot.children.length) render();
     }
-    if (parts[0] === "customer") { refreshSession().then(after); }
-    else if (parts[0] === "admin" && route !== "/admin/signin") { refreshAdminData().then(after); }
+    if (parts[0] === "customer") { refreshSession().then(after); ensureMyUpdates(); }
+    else if (parts[0] === "admin" && route !== "/admin/signin") {
+      refreshAdminData().then(after);
+      if (route === "/admin/updates") {
+        ensureAdminUpdates();
+        // the queue moves in the background, so keep this page honest while it is open
+        if (!state.updatesPoll) {
+          state.updatesPoll = setInterval(function () {
+            if ((location.hash || "").slice(1) === "/admin/updates") ensureAdminUpdates(true);
+          }, 15000);
+        }
+      } else if (state.updatesPoll) { clearInterval(state.updatesPoll); state.updatesPoll = null; }
+    }
     // security (2FA) setup state: /me/security or /admin/security. Set the state
     // and let dataSig detect the change to re-render ONCE (calling render() here
     // directly caused an infinite render<->fetch loop that prevented the modal
@@ -1613,10 +1868,13 @@ var ICONS = {
     var sec = state.security2fa ? JSON.stringify(state.security2fa) : "";
     var bk = state.backups ? JSON.stringify(state.backups) : "";
     var abk = state.adminBackups ? JSON.stringify(state.adminBackups) : "";
+    var mu = state.myUpdates ? JSON.stringify(state.myUpdates) : "";
+    var au = state.adminUpdates ? JSON.stringify(state.adminUpdates) : "";
     var route = (location.hash || "").slice(1);
     var m = route.match(/^\/admin\/account\/(\d+)$/);
     var d = m && state.accountCache[m[1]] ? JSON.stringify(state.accountCache[m[1]]) : "";
     return c + "|" + a + "|" + ar + "|" + r + "|" + e + "|" + p + "|" + d + "|" + ev + "|" + ul + "|" + sec + "|" + bk + "|" + abk +
+      "|" + mu + "|" + au +
       "|" + (state.paymentsOpen ? "po1" : "po0") + (state.adminPaymentsOpen ? "apo1" : "apo0");
   }
 
@@ -2874,6 +3132,54 @@ var ICONS = {
           '<button class="button' + (openTo ? "" : " danger") + '" data-confirm-payments="1" data-open="' + (openTo ? "1" : "0") + '">' +
           (openTo ? icon("check") + " Open payments" : icon("pause") + " Hold payments") + "</button></div>");
       }
+      else if (action === "updates-refresh") {
+        state.adminUpdatesLoaded = false;
+        ensureAdminUpdates(true);
+      }
+      else if (action === "updates-select-none") {
+        state.updSel = {};
+        render();
+      }
+      else if (action === "updates-queue-one") {
+        queueUpdates([Number(act.dataset.id)]);
+      }
+      else if (action === "updates-queue-selected") {
+        var picked = [].slice.call(document.querySelectorAll("[data-upd-check]"))
+          .filter(function (cb) { return cb.checked; })
+          .map(function (cb) { return Number(cb.value); });
+        if (!picked.length) { showToast("Nothing selected", "Tick at least one workspace first."); }
+        else { queueUpdates(picked); }
+      }
+      else if (action === "updates-queue-all") {
+        queueUpdates(null);
+      }
+      else if (action === "updates-cancel") {
+        api("/admin/updates/cancel?batch_id=" + encodeURIComponent(act.dataset.batch || ""), { method: "POST" })
+          .then(function (r) {
+            showToast("Batch cancelled", ((r && r.canceled) || 0) +
+              " queued update(s) removed. Anything already running still finishes.");
+            state.adminUpdatesLoaded = false;
+            return ensureAdminUpdates(true);
+          })
+          .catch(function (e) { showToast("Could not cancel", (e && e.message) || "Try again."); });
+      }
+      else if (action === "ws-self-update") {
+        // The customer's own button: it QUEUES, it never starts on click, and the
+        // toast says so with their place in their server's line.
+        act.disabled = true;
+        api("/me/instances/" + Number(act.dataset.id) + "/update", { method: "POST" })
+          .then(function (r) {
+            showToast("Update requested", "Your workspace is in the line: position " + ((r && r.position) || 1) +
+              ((r && r.eta_minutes) ? ", " + etaText(r.eta_minutes) : "") +
+              ". We will email you the moment it is done.");
+            state.myUpdatesLoaded = false;
+            return ensureMyUpdates(true);
+          })
+          .catch(function (e) {
+            act.disabled = false;
+            showToast("Could not request the update", (e && e.message) || "Try again later.");
+          });
+      }
       else if (action === "admin-attach") {
         var attId = act.dataset.id;
         // The scan walks every n8n server, so say so instead of appearing dead.
@@ -3328,6 +3634,20 @@ var ICONS = {
       /* (server reorder removed - placement is now checkbox selection) */
     });
 
+    document.addEventListener("change", function (event) {
+      // Updates page: remember which workspaces are ticked so the 15 second refresh
+      // cannot silently clear a selection the admin is still building.
+      var t = event.target;
+      if (!t || !t.matches || !t.matches("[data-upd-check]")) return;
+      state.updSel = state.updSel || {};
+      if (t.checked) state.updSel[t.value] = true; else delete state.updSel[t.value];
+      var label = document.querySelector("[data-action=\"updates-queue-selected\"]");
+      if (label) {
+        var n = Object.keys(state.updSel).length;
+        label.textContent = "Update selected (" + n + ")";
+        label.disabled = !n;
+      }
+    });
     document.addEventListener("input", function (event) {
       if (event.target.id === "account-search") {
         var q = event.target.value.toLowerCase();

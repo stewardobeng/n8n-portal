@@ -303,6 +303,51 @@ def init_db(db_path: str | None = None) -> None:
             created_at INTEGER NOT NULL,
             expires_at INTEGER NOT NULL
         );
+        -- Workspace update queue (0.1.85). One row per requested update; the worker
+        -- moves one row per SERVER at a time and the host waits its quiet gap
+        -- between rows. requested_by: admin | customer | admin-manual.
+        CREATE TABLE IF NOT EXISTS update_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            instance_id INTEGER NOT NULL,
+            account_id INTEGER,
+            environment_id INTEGER NOT NULL,
+            stack_name TEXT DEFAULT '',
+            target_image TEXT NOT NULL,
+            target_version TEXT DEFAULT '',
+            from_image TEXT DEFAULT '',
+            from_version TEXT DEFAULT '',
+            result_version TEXT DEFAULT '',
+            requested_by TEXT NOT NULL DEFAULT 'admin',
+            requested_account INTEGER,
+            batch_id TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'queued',   -- queued|running|done|failed|skipped|canceled
+            priority INTEGER NOT NULL DEFAULT 100,   -- 10 = admin batch, 100 = customer
+            attempts INTEGER NOT NULL DEFAULT 0,
+            error TEXT DEFAULT '',
+            note TEXT DEFAULT '',
+            created_at INTEGER NOT NULL,
+            started_at INTEGER,
+            finished_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_update_queue_pick
+            ON update_queue(status, environment_id, priority, id);
+        -- Per-server pacing: when the next update may start, plus what is running.
+        CREATE TABLE IF NOT EXISTS update_host_state (
+            environment_id INTEGER PRIMARY KEY,
+            next_allowed_at INTEGER NOT NULL DEFAULT 0,
+            last_finished_at INTEGER,
+            last_instance_id INTEGER,
+            busy_since INTEGER
+        );
+        -- One row per report email already sent, so a batch can never be reported twice.
+        CREATE TABLE IF NOT EXISTS update_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id TEXT NOT NULL,
+            kind TEXT NOT NULL,             -- batch | failure | customer
+            sent_at INTEGER NOT NULL,
+            summary TEXT DEFAULT '',
+            UNIQUE(batch_id, kind)
+        );
         """)
         conn.commit()
     finally:
