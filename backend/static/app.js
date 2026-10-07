@@ -1276,7 +1276,10 @@ var ICONS = {
         (archivedCount ? '<a class="button secondary" href="#/admin/archived">' + icon("archive") + " Archived (" + archivedCount + ")</a>" : "") +
         '<a class="button secondary" href="#/admin/requests">' + icon("requests") + " New requests</a></div>") +
       '<section class="card flush"><div class="table-tools"><div class="search"><input id="account-search" type="search" placeholder="Search name, email, or username" aria-label="Search accounts"></div></div>' +
-      '<div class="table-wrap"><table><thead><tr><th>Customer</th><th>Plan</th><th>Subscription</th><th>Period end</th><th>Quota</th><th>Backup</th><th>Update</th><th></th></tr></thead><tbody>' +
+      // The header already says Backup / Update, so the buttons only need the verb: the full
+      // sentence lives in the tooltip, the confirm popup and the accessible name (Steward,
+      // 2026-10-07 - the wide labels were what forced the table to scroll sideways).
+      '<div class="table-wrap"><table class="accounts-table"><thead><tr><th>Customer</th><th>Plan</th><th>Subscription</th><th>Period end</th><th>Quota</th><th>Backup</th><th>Update</th><th></th></tr></thead><tbody>' +
         (accounts.length ? accounts.map(function (a) {
           var badge = a.subscription_status === "active" ? statusBadge("active", "Active")
             : a.subscription_status === "past_due" ? statusBadge("pastdue", "Past due")
@@ -1288,17 +1291,20 @@ var ICONS = {
           var bkBadge = a.backup_enabled ? statusBadge("active", "On") : statusBadge("off", "Off");
           var updBadge = a.update_enabled ? statusBadge("active", "On") : statusBadge("off", "Off");
           return "<tr data-account-row=\"" + a.id + "\">" +
-            '<td><div class="customer-cell"><span class="avatar">' + esc(initialsOf(a.display_name || a.username)) + '</span><span class="cell-text"><strong>' + esc(a.display_name || cap(a.username)) + "</strong><span>" + esc(a.email) + "</span></span></div></td>" +
+            // The name IS the way into the account (Steward, 2026-10-07): a real link, so
+            // keyboard users can open it too, and the actions cell no longer needs a
+            // "View account" button (which is what pushed the table into a sideways scroll).
+            '<td><a class="customer-cell cell-link" href="#/admin/account/' + a.id + '" data-route="/admin/account/' + a.id + '" title="Open this account"><span class="avatar">' + esc(initialsOf(a.display_name || a.username)) + '</span><span class="cell-text"><strong>' + esc(a.display_name || cap(a.username)) + "</strong><span>" + esc(a.email) + "</span></span></a></td>" +
             "<td>" + esc(planName(a)) + "</td>" +
             "<td>" + badge + (stateBadge ? " " + stateBadge : "") + "</td>" +
             "<td>" + esc(fmtDate(a.paid_until)) + "</td>" +
             "<td>" + (a.quota || 1) + "</td>" +
             '<td class="cell-actions-td"><div class="cell-actions fill">' + bkBadge +
-            '<button class="button secondary small-btn" data-action="admin-backup-toggle" data-id="' + a.id + '" data-on="' + (a.backup_enabled ? "1" : "0") + '">' + (a.backup_enabled ? "Revoke" : "Allow") + " backup</button></div></td>" +
+            '<button class="button secondary small-btn" data-action="admin-backup-toggle" data-id="' + a.id + '" data-on="' + (a.backup_enabled ? "1" : "0") + '" title="' + (a.backup_enabled ? "Revoke backup access for this account" : "Allow backup access for this account") + '" aria-label="' + (a.backup_enabled ? "Revoke backup access for this account" : "Allow backup access for this account") + '">' + (a.backup_enabled ? "Revoke" : "Allow") + "</button></div></td>" +
             '<td class="cell-actions-td"><div class="cell-actions fill">' + updBadge +
-            '<button class="button secondary small-btn" data-action="admin-update-toggle" data-id="' + a.id + '" data-on="' + (a.update_enabled ? "1" : "0") + '">' + (a.update_enabled ? "Revoke" : "Allow") + " update</button></div></td>" +
-            '<td class="cell-actions-td"><div class="cell-actions">' + (a.account_state === "active" ? '<button class="button secondary small-btn" data-action="admin-impersonate" data-id="' + a.id + '">' + icon("eye") + " Login as user</button>" : "") +
-            '<button class="button secondary small-btn" data-route="/admin/account/' + a.id + '">View account</button></div></td></tr>';
+            '<button class="button secondary small-btn" data-action="admin-update-toggle" data-id="' + a.id + '" data-on="' + (a.update_enabled ? "1" : "0") + '" title="' + (a.update_enabled ? "Revoke update access for this account" : "Allow update access for this account") + '" aria-label="' + (a.update_enabled ? "Revoke update access for this account" : "Allow update access for this account") + '">' + (a.update_enabled ? "Revoke" : "Allow") + "</button></div></td>" +
+            '<td class="cell-actions-td"><div class="cell-actions">' + (a.account_state === "active" ? '<button class="button secondary small-btn" data-action="admin-impersonate" data-id="' + a.id + '" title="Login as user" aria-label="Login as user">' + icon("eye") + " Login</button>" : "") +
+            "</div></td></tr>";
         }).join("") : (state.adminAccountsLoaded
           ? '<tr><td colspan="8"><div class="empty-state" style="min-height:240px"><div><h3>No customer accounts yet</h3><p class="muted">Accounts appear here after registration.</p></div></div></td></tr>'
           : loadingRow(8, "Loading customer accounts...", "", 240))) +

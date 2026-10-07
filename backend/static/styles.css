@@ -253,6 +253,11 @@ h3 { font-size: 1rem; line-height: 1.3; }
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; }
 th, td { padding: 14px 20px; border-bottom: 1px solid var(--slate-100); text-align: left; vertical-align: middle; }
+/* The accounts table has the most columns (8) and two permission controls per row, so it is the
+ * only table that needs a tighter gutter: 20px per side cost ~320px over the row on its own.
+ * Scoped to .accounts-table so every other table keeps its current spacing. */
+.accounts-table th, .accounts-table td { padding-left: 10px; padding-right: 10px; }
+.accounts-table th:last-child, .accounts-table td:last-child { padding-right: 4px; }
 th { color: var(--slate-500); background: var(--surface-soft); font-size: .74rem; font-weight: 800; letter-spacing: .03em; text-transform: uppercase; }
 .table-wrap { padding: 0 4px; }
 td { font-size: .87rem; }
@@ -269,6 +274,11 @@ td { font-size: .87rem; }
 .cell-actions.fill > .button { flex: 1 1 auto; }
 tbody tr:hover { background: #fbfdfd; }
 .customer-cell { display: flex; align-items: center; gap: 12px; }
+/* The account name opens the account page (0.1.89): keep the cell looking identical to
+ * the other rows, but make it visibly clickable and keyboard reachable. */
+.cell-link { color: inherit; text-decoration: none; }
+.cell-link:hover .cell-text strong { text-decoration: underline; }
+.cell-link:focus-visible { outline: 2px solid var(--teal-700); outline-offset: 3px; border-radius: 8px; }
 .customer-cell .cell-text { display: block; min-width: 0; }
 .customer-cell .cell-text strong, .customer-cell .cell-text span { display: block; }
 .customer-cell .cell-text span { color: var(--slate-500); font-size: .77rem; }
