@@ -50,6 +50,26 @@ def test_the_page_loads_with_an_announced_loading_state():
     assert "state.adminUpdatesLoaded = true;" in src
 
 
+def test_a_downed_release_check_is_stated_and_offers_nothing():
+    """If the latest release cannot be read there is nothing to compare: the page must
+    say so rather than badge every workspace "Up to date" (caught live 2026-10-07)."""
+    src = _src()
+    assert 'if (!d.latest_known) return statusBadge("warning", "Cannot compare");' in src
+    assert "behind.length && d.latest_known ?" in src, "no queue button while nothing can be compared"
+    assert "esc(d.compare_note)" in src, "the page renders the API's reason for the admin"
+    flat = _flat()
+    assert "Version check unavailable" in flat, "the customer sees a note, not a false all-clear"
+
+
+def test_a_failed_load_says_so_instead_of_looking_empty():
+    """An unanswered request must not render as an empty queue (same class as every
+    other loading fix): the page states the failure and offers Refresh."""
+    src = _src()
+    assert 'state.adminUpdates = state.adminUpdates ||' in src
+    assert "load_error" in src
+    assert "The update queue could not" in src and "Use Refresh to try again." in src
+
+
 def test_the_page_offers_selection_and_everything_behind():
     flat = _flat()
     assert 'data-action="updates-queue-selected"' in flat

@@ -54,6 +54,22 @@ def _now() -> int:
 
 # --------------------------------------------------------------------- targets
 
+def release_tag_of(info) -> str:
+    """The release tag out of `n8n_releases.latest_release()`.
+
+    That service returns `{"latest": {"tag": "2.43.1", "published_at": ...}}` (or
+    `None` when it could not resolve anything) - NOT a bare string. Unwrapping it
+    wrongly is silent: the exception is swallowed and the queue simply refuses every
+    update while the page reports nothing is behind, which is how this was caught in
+    production on 2026-10-07. A plain string is still accepted so a future change to
+    the service cannot break the queue again.
+    """
+    info = info or {}
+    raw = info.get("latest")
+    tag = raw.get("tag") if isinstance(raw, dict) else raw
+    return str(tag or "").strip().lstrip("v")
+
+
 def _image_for(version: str) -> str:
     return f"n8nio/n8n:{version}" if version else ""
 
@@ -82,7 +98,9 @@ def latest_target(force: bool = False) -> dict:
     version = ""
     try:
         info = n8n_releases.latest_release(force=force) or {}
-        version = (info.get("latest") or "").strip()
+        version = release_tag_of(info)
+        if not version:
+            log.warning("latest release lookup returned no usable tag: %r", info.get("latest"))
     except Exception as e:  # noqa: BLE001 - never let reporting break an update
         log.warning("latest release lookup failed: %s", e)
     if not version:
@@ -385,6 +403,7 @@ def overview() -> dict:
     """Everything the admin Updates page needs, and what the customer view reuses."""
     tgt = latest_target()
     latest = tgt["version"]
+    latest_known = bool(latest)
     insts = list(db.list_instances())
     accounts = {int(a["id"]): a for a in db.list_accounts()}
     try:
@@ -448,6 +467,7 @@ def overview() -> dict:
             "floating_tag": floating,
             "version_unknown": version_unknown,
             "latest_version": latest,
+            "latest_known": latest_known,
             "needs_update": needs,
             "queued": by_instance.get(iid),
             "last": last_by_instance.get(iid),
@@ -500,6 +520,12 @@ def overview() -> dict:
 
     return {
         "latest_version": latest,
+        "latest_known": latest_known,
+        # when the release check itself failed there is nothing to compare, and calling a
+        # workspace "up to date" would be a claim we cannot back (the 0.1.80 rule again)
+        "compare_note": "" if latest_known else (
+            "The latest n8n release could not be read from Docker Hub just now, so no "
+            "workspace can be compared and nothing can be queued until it reads again."),
         "latest_source": tgt["source"],
         "interval_minutes": int(settings.update_interval_minutes),
         "typical_minutes": _typical_minutes(),
@@ -554,7 +580,13 @@ def customer_state(account_id: int) -> list:
                and bool(w.get("needs_update")) and not w.get("queued")
                and not w.get("locked") and w.get("status") not in ("provisioning", "failed"))
         blocked = ""
-        if w.get("plan") != settings.update_self_service_plan:
+        unavailable = not w.get("latest_known", True)
+        if unavailable:
+            # the release check failed, so there is nothing to compare against and this
+            # row must not read as "on the latest version"
+            can = False
+            blocked = ""
+        elif w.get("plan") != settings.update_self_service_plan:
             blocked = "self-update is part of Workspace Plus"
         elif not w.get("needs_update"):
             blocked = ""
@@ -575,6 +607,7 @@ def customer_state(account_id: int) -> list:
             "floating_tag": bool(w.get("floating_tag")),
             "can_update": bool(can),
             "blocked_reason": blocked,
+            "updates_unavailable": bool(unavailable),
             "queued": w.get("queued"),
             "last": w.get("last"),
         })

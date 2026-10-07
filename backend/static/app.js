@@ -728,6 +728,11 @@ var ICONS = {
       return '<button class="button small-btn" data-action="ws-self-update" data-id="' + inst.id + '">' +
         icon("download") + " Update to " + esc(info.latest_version || "the latest version") + "</button>";
     }
+    if (info.updates_unavailable) {
+      // the release check is down: nothing can be compared, so this must not read as
+      // "on the latest version" or offer a button that the server would refuse
+      return '<span class="status muted" title="The version check is unavailable right now.">Version check unavailable</span>';
+    }
     if (info.blocked_reason) {
       return '<span class="small muted">' + esc(info.blocked_reason) + "</span>";
     }
@@ -774,7 +779,11 @@ var ICONS = {
     if (state.adminUpdatesLoaded && !force) return;
     try {
       state.adminUpdates = await api("/admin/updates");
-    } catch (e) { state.adminUpdates = state.adminUpdates || null; }
+    } catch (e) {
+      // never leave a half-page: an unanswered load says so, it does not look empty
+      state.adminUpdates = state.adminUpdates ||
+        { load_error: (e && e.message) || "The update queue could not be loaded." };
+    }
     state.adminUpdatesLoaded = true;
     if (!modalRoot.children.length) render();
   }
@@ -1301,6 +1310,7 @@ var ICONS = {
     }
     if (w.locked) return statusBadge("off", "Locked");
     if (w.status === "provisioning") return statusBadge("neutral", "Being set up");
+    if (!d.latest_known) return statusBadge("warning", "Cannot compare");
     if (w.version_unknown) return statusBadge("neutral", "Version unknown");
     if (w.needs_update) return statusBadge("awaiting", "Needs update");
     return statusBadge("running", "Up to date");
@@ -1343,6 +1353,12 @@ var ICONS = {
         "</section></main>");
     }
     var d = state.adminUpdates || {};
+    if (d.load_error) {
+      return appLayout("admin", "Updates", "backup",
+        '<main class="page">' + head +
+        '<section class="card"><p class="muted" role="status" style="margin:0">The update queue could not ' +
+        "be loaded: " + esc(d.load_error) + " Use Refresh to try again.</p></section></main>");
+    }
     var ws = d.workspaces || [];
     var behind = ws.filter(function (w) { return w.needs_update; });
     var unknown = ws.filter(function (w) { return w.version_unknown; });
@@ -1351,7 +1367,11 @@ var ICONS = {
     var sel = state.updSel || {};
     var selCount = Object.keys(sel).length;
 
-    var ruleCard = '<section class="card"><div class="card-head"><h3>How updates run</h3>' +
+    var compareWarn = d.compare_note
+      ? '<section class="card"><p class="muted" role="status" style="margin:0">' +
+        esc(d.compare_note) + "</p></section>"
+      : "";
+    var ruleCard = compareWarn + '<section class="card"><div class="card-head"><h3>How updates run</h3>' +
       statusBadge(d.worker_enabled ? "running" : "off", d.worker_enabled ? "Queue running" : "Queue paused") + "</div>" +
       '<ul class="small muted" style="margin:10px 0 0 18px">' +
       "<li>One workspace updates at a time <b>on each server</b>, so three servers can move at once and no box ever takes two.</li>" +
@@ -1365,7 +1385,7 @@ var ICONS = {
       "<li>No safety backup is taken before an update (your instruction), so a failure is rolled back by image tag instead.</li>" +
       "</ul>" +
       '<div class="actions" style="margin-top:14px">' +
-      '<button class="button" data-action="updates-queue-all"' + (behind.length ? "" : " disabled") + ">Update all that need it (" +
+      '<button class="button" data-action="updates-queue-all"' + (behind.length && d.latest_known ? "" : " disabled") + ">Update all that need it (" +
         behind.length + ")</button>" +
       '<button class="button secondary" data-action="updates-queue-selected"' + (selCount ? "" : " disabled") +
         ">Update selected (" + selCount + ")</button>" +

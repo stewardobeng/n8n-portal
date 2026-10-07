@@ -46,8 +46,7 @@ def _offline_and_fast(tmp_path, monkeypatch):
     monkeypatch.setattr(uq, "VERIFY_FLOOR_SECONDS", 1)
     monkeypatch.setattr(uq.time, "sleep", lambda *_: None)
     monkeypatch.setattr(uq, "_env_name", lambda env: "server " + str(env))
-    monkeypatch.setattr(uq.n8n_releases, "latest_release",
-                        lambda force=False: {"latest": "2.43.1", "recent": [], "checked_at": 0})
+    monkeypatch.setattr(uq.n8n_releases, "latest_release", _release_ok)
     monkeypatch.setattr(backup_ops, "true_versions",
                         lambda insts, pc=None: {int(i["id"]): {"version": "2.40.5", "source": "image-label"}
                                                 for i in insts})
@@ -114,6 +113,50 @@ def test_needs_update_is_never_claimed_from_missing_data(tmp_path, monkeypatch):
     ws = {w["instance_id"]: w for w in uq.overview()["workspaces"]}
     assert ws[ids[0]]["needs_update"] is False
     assert ws[ids[0]]["current_version"] == ""
+
+
+def _release_ok(force=False):
+    """Exactly what n8n_releases.latest_release() returns: a DICT, not a string."""
+    return {"latest": {"tag": "2.43.1", "published_at": "2026-10-07T00:00:00Z"},
+            "recent": [], "checked_at": 0}
+
+
+def _release_down(force=False):
+    return {"latest": None, "recent": [], "checked_at": 0}
+
+
+def test_release_tag_of_accepts_every_shape_the_service_can_return():
+    assert uq.release_tag_of({"latest": {"tag": "2.43.1"}}) == "2.43.1"
+    assert uq.release_tag_of({"latest": {"tag": "v2.43.1"}}) == "2.43.1"
+    assert uq.release_tag_of({"latest": "2.42.0"}) == "2.42.0"
+    assert uq.release_tag_of({"latest": None}) == ""
+    assert uq.release_tag_of({}) == ""
+    assert uq.release_tag_of(None) == ""
+
+
+def test_the_target_is_resolved_from_the_real_service_shape(tmp_path, monkeypatch):
+    """Regression (found live 2026-10-07): the release service returns
+    {"latest": {"tag": ...}}. Unwrapping it as a string made every update impossible
+    while the page cheerfully reported that no workspace was behind."""
+    _mk(tmp_path, monkeypatch)
+    tgt = uq.latest_target()
+    assert tgt["version"] == "2.43.1" and tgt["source"] == "release"
+    assert tgt["image"] == "n8nio/n8n:2.43.1"
+    assert uq.queue_all_behind(requested_by="admin")["considered"] > 0
+
+
+def test_when_the_release_check_is_down_nothing_is_called_up_to_date(tmp_path, monkeypatch):
+    aid, ids = _mk(tmp_path, monkeypatch)
+    monkeypatch.setattr(uq.n8n_releases, "latest_release", _release_down)
+    ov = uq.overview()
+    assert ov["latest_known"] is False and ov["latest_version"] == ""
+    assert ov["compare_note"], "the page must be told why nothing can be compared"
+    assert all(w["needs_update"] is False for w in ov["workspaces"]), "no claim either way"
+    assert all(w["latest_known"] is False for w in ov["workspaces"])
+    items = uq.customer_state(aid)
+    assert all(i["can_update"] is False and i["updates_unavailable"] is True for i in items)
+    res = uq.queue_all_behind(requested_by="admin")
+    assert res["queued"] == [] and "could not be resolved" in res["error"].lower()
 
 
 def test_a_workspace_behind_the_latest_release_needs_an_update(tmp_path, monkeypatch):
