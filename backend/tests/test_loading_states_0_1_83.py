@@ -44,8 +44,9 @@ def test_gate_re_arms_when_the_identity_changes():
     """Impersonation swaps the customer, and signout drops them: the next paint
     must wait for the new /me, not reuse the previous answer."""
     assert "state.session = null;\n    state.sessionLoaded = false;" in SRC          # impersonate start
-    assert "state.session = null;\n    state.sessionLoaded = false;\n    state.provisioningPw = null;" in SRC  # impersonation exit
-    assert SRC.count("state.session = null; state.sessionLoaded = false; state.provisioningPw = null;") == 2  # both signout branches
+    assert "state.session = null;\n    state.sessionLoaded = false;\n    state.backupsLoaded = false; state.backups = [];\n    state.provisioningPw = null;" in SRC  # impersonation exit
+    # both signout branches (0.1.84 added the backups reset inside each)
+    assert SRC.count("state.session = null; state.sessionLoaded = false; state.backupsLoaded = false; state.backups = []; state.provisioningPw = null;") == 2
 
 
 # ---------- admin side: the Quota card ----------

@@ -51,7 +51,9 @@ def test_empty_state_is_gated_behind_wsKnown():
 
 
 def test_loading_frame_is_announced_to_screen_readers():
-    i = SRC.find("Loading workspaces...")
+    # Scoped to the Workspaces CARD's loader: 0.1.84 added other "Loading
+    # workspaces..." frames elsewhere in the file.
+    i = SRC.find("Loading workspaces...", SRC.find("(wsKnown"))
     assert i > 0
     markup = SRC[max(0, i - 260):i + 120]
     assert 'role="status"' in markup

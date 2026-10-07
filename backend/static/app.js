@@ -33,6 +33,9 @@
     adminInstances: [],    // admin: all instances (GET /admin/instances) for backup/update triggers
     adminInstancesLoaded: false,
     sessionLoaded: false, // customer: /me has answered (or failed) at least once
+    requestsLoaded: false,       // admin: the access-request list has answered
+    adminArchivedLoaded: false,  // admin: the archived-account list has answered
+    adminEnvsLoaded: false,      // admin: the per-server environment list has answered
     adminAccountsLoaded: false,
     accountDetailTried: {}, // admin: accountId -> the per-account read has finished (ok or failed)
     impersonation: null,     // admin login-as: {id, label} while viewing a customer
@@ -142,6 +145,19 @@ var ICONS = {
   function icon(name) {
     var inner = ICONS[name] || ICONS.plus;
     return '<svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true">' + inner + '</svg>';
+  }
+
+  /* Loading placeholders (0.1.84). A table or list that is still being fetched must
+   * SAY so, and must never print its "nothing here" message, because the user reads
+   * that as fact (Steward: almost every table claimed there was nothing until it
+   * loaded). The frame matches .empty-state exactly, so nothing shifts when the real
+   * rows arrive. */
+  function loadingBlock(title, hint, minHeight) {
+    return '<div class="empty-state" style="min-height:' + (minHeight || 180) + 'px" role="status" aria-live="polite">' +
+      "<div><h3>" + esc(title) + "</h3>" + (hint ? '<p class="muted">' + esc(hint) + "</p>" : "") + "</div></div>";
+  }
+  function loadingRow(colspan, title, hint, minHeight) {
+    return '<tr><td colspan="' + colspan + '">' + loadingBlock(title, hint, minHeight) + "</td></tr>";
   }
 
   function statusBadge(type, label) {
@@ -741,8 +757,10 @@ var ICONS = {
         "<p>" + esc(fmtDate(b.created_at)) + " &middot; " + esc(sizeTxt) + (b.error ? " &middot; " + esc(b.error) : "") + "</p></div>" +
         status + dl + "</div>";
     }).join("");
-    var listHtml = rows ? rows : '<div class="empty-state"><div><h3>No backups yet</h3>' +
-      '<p class="muted">Create a backup of your workspace below.</p></div></div>';
+    var listHtml = rows ? rows : (state.backupsLoaded
+      ? '<div class="empty-state"><div><h3>No backups yet</h3>' +
+        '<p class="muted">Create a backup of your workspace below.</p></div></div>'
+      : loadingBlock("Loading backups...", "Fetching your workspace backups.", 240));
 
     var buttonsByInst = insts.map(function (i) {
       var st = i.locked ? "locked" : i.status;
@@ -986,18 +1004,22 @@ var ICONS = {
     var total = accounts.length;
 
     var requestRows = requests.slice(0, 6);
+    // The four counters below are computed from two lists; before those lists
+    // answer, a 0 is a claim about the business, not a fact (0.1.84).
+    var acctKnown = state.adminAccountsLoaded;
+    var reqKnown = state.requestsLoaded;
 
     return appLayout("admin", "Overview", "overview",
       '<main class="page">' + pageHead("Today at a glance", "See what needs attention and jump directly to the right task.") +
       '<div class="grid cols-4">' +
         '<article class="card metric"><div class="metric-top"><span class="metric-icon">' + icon("requests") + "</span>" + statusBadge("awaiting", "Needs review") + "</div>" +
-          '<div class="metric-value">' + awaiting + '</div><p class="muted">Access requests awaiting approval</p><a href="#/admin/requests">Review requests ' + icon("arrow") + '</a></article>' +
+          '<div class="metric-value">' + (reqKnown ? awaiting : "...") + '</div><p class="muted">Access requests awaiting approval</p><a href="#/admin/requests">Review requests ' + icon("arrow") + '</a></article>' +
         '<article class="card metric"><div class="metric-top"><span class="metric-icon" style="background:var(--amber-100);color:var(--amber-700)">' + icon("warning") + "</span></div>" +
-          '<div class="metric-value">' + pastDue + '</div><p class="muted">Accounts past due</p><a href="#/admin/accounts">View accounts ' + icon("arrow") + '</a></article>' +
+          '<div class="metric-value">' + (acctKnown ? pastDue : "...") + '</div><p class="muted">Accounts past due</p><a href="#/admin/accounts">View accounts ' + icon("arrow") + '</a></article>' +
         '<article class="card metric"><div class="metric-top"><span class="metric-icon" style="background:var(--green-100);color:var(--green-700)">' + icon("workspace") + "</span></div>" +
-          '<div class="metric-value">' + locked + '</div><p class="muted">Locked / cancelled accounts</p><a href="#/admin/accounts">Review ' + icon("arrow") + '</a></article>' +
+          '<div class="metric-value">' + (acctKnown ? locked : "...") + '</div><p class="muted">Locked / cancelled accounts</p><a href="#/admin/accounts">Review ' + icon("arrow") + '</a></article>' +
         '<article class="card metric"><div class="metric-top"><span class="metric-icon" style="background:var(--slate-100);color:var(--slate-700)">' + icon("account") + "</span></div>" +
-          '<div class="metric-value">' + total + '</div><p class="muted">Total customer accounts</p><a href="#/admin/accounts">View accounts ' + icon("arrow") + '</a></article>' +
+          '<div class="metric-value">' + (acctKnown ? total : "...") + '</div><p class="muted">Total customer accounts</p><a href="#/admin/accounts">View accounts ' + icon("arrow") + '</a></article>' +
       "</div>" +
       envHealthCards() +
       '<div class="grid cols-3 overview-row" style="margin-top:18px">' +
@@ -1005,7 +1027,9 @@ var ICONS = {
           '<div class="table-wrap"><table><thead><tr><th>Email</th><th>Status</th><th>Requested</th></tr></thead><tbody>' +
           (requestRows.length ? requestRows.map(function (r) {
             return "<tr><td><strong>" + esc(r.email) + "</strong></td><td>" + requestStatusLabel(r.status) + "</td><td>" + esc(fmtDateTime(r.created_at)) + "</td></tr>";
-          }).join("") : '<tr><td colspan="3"><div class="empty-state" style="min-height:160px"><div><h3>No access requests</h3><p class="muted">New requests appear here.</p></div></div></td></tr>') +
+          }).join("") : (state.requestsLoaded
+            ? '<tr><td colspan="3"><div class="empty-state" style="min-height:160px"><div><h3>No access requests</h3><p class="muted">New requests appear here.</p></div></div></td></tr>'
+            : loadingRow(3, "Loading access requests...", "", 160))) +
           "</tbody></table></div></section>" +
         '<aside class="card"><h2>Quick actions</h2><div class="grid">' +
           '<a class="button" href="#/admin/requests">Review access requests</a>' +
@@ -1053,7 +1077,9 @@ var ICONS = {
             (canCourse ? '<button class="button ghost small-btn" data-request-deny="' + r.id + '">Disapprove</button>' : "") +
             '<button class="button ghost small-btn" data-request-delete="' + r.id + '">Delete</button>';
           return "<tr><td><strong>" + esc(r.email) + "</strong></td><td>" + esc(fmtDateTime(r.created_at)) + "</td><td>" + requestStatusLabel(r.status) + "</td><td>" + action + "</td></tr>";
-        }).join("") : '<tr><td colspan="4"><div class="empty-state" style="min-height:220px"><div><h3>No matching requests</h3><p class="muted">New requests will appear here after someone enters their email on the portal.</p></div></div></td></tr>') +
+        }).join("") : (state.requestsLoaded
+          ? '<tr><td colspan="4"><div class="empty-state" style="min-height:220px"><div><h3>No matching requests</h3><p class="muted">New requests will appear here after someone enters their email on the portal.</p></div></div></td></tr>'
+          : loadingRow(4, "Loading access requests...", "", 220))) +
       "</tbody></table></div></section></main>");
   }
 
@@ -1069,7 +1095,9 @@ var ICONS = {
           "<td>" + esc(a.email) + "</td>" +
           "<td>" + statusBadge("archived", "Archived") + "</td>" +
           '<td><button class="button small-btn" data-action="admin-restore" data-id="' + a.id + '">Restore</button></td></tr>';
-      }).join("") : '<tr><td colspan="4"><div class="empty-state" style="min-height:220px"><div><h3>No archived accounts</h3><p class="muted">Archived accounts move here instead of being deleted.</p></div></div></td></tr>') +
+      }).join("") : (state.adminArchivedLoaded
+        ? '<tr><td colspan="4"><div class="empty-state" style="min-height:220px"><div><h3>No archived accounts</h3><p class="muted">Archived accounts move here instead of being deleted.</p></div></div></td></tr>'
+        : loadingRow(4, "Loading archived accounts...", "", 220))) +
       "</tbody></table></div></section></main>");
   }
 
@@ -1161,7 +1189,9 @@ var ICONS = {
             '<button class="button secondary small-btn" data-action="admin-backup-toggle" data-id="' + a.id + '" data-on="' + (a.backup_enabled ? "1" : "0") + '">' + (a.backup_enabled ? "Revoke" : "Allow") + " backup</button></div></td>" +
             '<td class="cell-actions-td"><div class="cell-actions">' + (a.account_state === "active" ? '<button class="button secondary small-btn" data-action="admin-impersonate" data-id="' + a.id + '">' + icon("eye") + " Login as user</button>" : "") +
             '<button class="button secondary small-btn" data-route="/admin/account/' + a.id + '">View account</button></div></td></tr>';
-        }).join("") : '<tr><td colspan="7"><div class="empty-state" style="min-height:240px"><div><h3>No customer accounts yet</h3><p class="muted">Accounts appear here after registration.</p></div></div></td></tr>') +
+        }).join("") : (state.adminAccountsLoaded
+          ? '<tr><td colspan="7"><div class="empty-state" style="min-height:240px"><div><h3>No customer accounts yet</h3><p class="muted">Accounts appear here after registration.</p></div></div></td></tr>'
+          : loadingRow(7, "Loading customer accounts...", "", 240))) +
       "</tbody></table></div></section></main>");
   }
 
@@ -1208,9 +1238,13 @@ var ICONS = {
         status + dl + "</div>";
     }).join("");
     var historySection = '<section class="card" style="margin-top:18px"><div class="card-head"><h3>Backup history</h3><p class="small muted" style="margin:0">Completed backups are downloadable in your browser.</p></div>' +
-      (rows || '<div class="empty-state" style="min-height:160px"><div><h3>No backups yet</h3><p class="muted">Create one above and it will appear here.</p></div></div>') + "</section>";
+      (rows || (state.adminBackupsLoaded
+        ? '<div class="empty-state" style="min-height:160px"><div><h3>No backups yet</h3><p class="muted">Create one above and it will appear here.</p></div></div>'
+        : loadingBlock("Loading backups...", "", 160))) + "</section>";
     var triggerSection = '<section class="card"><div class="card-head"><h3>Create a backup</h3><p class="small muted" style="margin:0">Choose what to back up for each workspace.</p></div>' +
-      (creatable || '<p class="muted" style="padding:20px">There are no workspaces to back up right now.</p>') + "</section>";
+      (creatable || (state.adminInstancesLoaded
+        ? '<p class="muted" style="padding:20px">There are no workspaces to back up right now.</p>'
+        : loadingBlock("Loading workspaces...", "", 160))) + "</section>";
 
     // Only load the instance list once per visit (avoid re-fetch churn).
     if (!state.adminInstancesLoaded) {
@@ -1367,6 +1401,11 @@ var ICONS = {
   }
   function envHealthCards() {
     var envs = state.adminEnvs || [];
+    // Was silently absent until the list arrived; now it says it is loading (0.1.84).
+    if (!envs.length && !state.adminEnvsLoaded) {
+      return '<section class="card flush" style="margin-top:18px"><div class="card-head" style="padding:20px 20px 0"><h2>Server environments</h2></div>' +
+        loadingBlock("Loading servers...", "Asking each n8n server for its state.", 160) + "</section>";
+    }
     if (!envs.length) return "";
     return '<section class="card flush" style="margin-top:18px"><div class="card-head" style="padding:20px 20px 0"><h2>Server environments</h2><a class="button ghost small-btn" href="#/admin/settings">Manage</a></div>' +
       '<div class="grid cols-3" style="padding:14px 20px 20px">' +
@@ -1402,7 +1441,9 @@ var ICONS = {
         "<span><strong>" + esc(e.name || "Server") + '</strong><span class="small muted">' + esc(e.ip || "") +
         ' - <span class="status ' + dotCls + '">' + dot + "</span></span></span>" +
         '<span class="small muted">' + e.running_n8n + " running, " + esc(fmtBytes(e.storage_bytes)) + "</span></label>";
-    }).join("") || '<div class="empty-state" style="min-height:160px"><div><h3>No environments found</h3><p class="muted">The n8n servers could not be listed right now.</p></div></div>';
+    }).join("") || (state.adminEnvsLoaded
+      ? '<div class="empty-state" style="min-height:160px"><div><h3>No environments found</h3><p class="muted">The n8n servers could not be listed right now.</p></div></div>'
+      : loadingBlock("Loading servers...", "Asking each n8n server for its state.", 160));
     return appLayout("admin", "Settings", "settings",
       '<main class="page">' + pageHead("Portal settings", "Choose where new customer workspaces are created and whether customers can pay.", '<button class="button" data-action="save-servers">' + icon("check") + " Save selection</button>") +
       paymentsCard() +
@@ -1589,8 +1630,12 @@ var ICONS = {
       if (!state.plans.length) await loadPlans();
       // lazily load backups when the customer opens the Backups page
       if ((location.hash || "").indexOf("/customer/backups") === 1 || state.backupsLoaded) {
-        var bk = await api("/me/backups");
-        state.backups = (bk && bk.backups) || [];
+        try {
+          var bk = await api("/me/backups");
+          state.backups = (bk && bk.backups) || [];
+        } catch (e) { state.backups = state.backups || []; }
+        // Marked on failure too: the Backups page must not sit on "Loading..."
+        // forever if the read breaks (0.1.84).
         state.backupsLoaded = true;
       }
       return state.session;
@@ -1598,6 +1643,7 @@ var ICONS = {
       if (e.status === 401) {
         localStorage.removeItem("portal_token");
         state.session = null;
+        state.backupsLoaded = false; state.backups = [];
         showToast("Session ended", "Please sign in again.");
         navigate("/entry");
       }
@@ -1616,8 +1662,10 @@ var ICONS = {
       state.adminAccountsLoaded = true;
       var arch = await api("/admin/accounts?include_archived=1");
       state.adminArchived = (arch || []).filter(function (a) { return a.account_state === "archived"; });
+      state.adminArchivedLoaded = true;
       var reqs = await api("/admin/access-requests");
       state.requests = reqs || [];
+      state.requestsLoaded = true;
       // true running versions (0.1.80): the chip must not trust the image tag
       try {
         var vers = await api("/admin/instance-versions");
@@ -1643,15 +1691,23 @@ var ICONS = {
         try { state.environmentList = await api("/environments"); } catch (e) { state.environmentList = []; }
       }
       try { state.adminEnvs = await api("/admin/environments"); } catch (e) { state.adminEnvs = []; }
+      state.adminEnvsLoaded = true;
       try {
         if ((location.hash || "").indexOf("/admin/backups") === 1 || state.adminBackupsLoaded) {
           var bk = await api("/admin/backups");
           state.adminBackups = (bk && bk.backups) || [];
-          state.adminBackupsLoaded = true;
         }
       } catch (e) { state.adminBackups = state.adminBackups || []; }
+      if ((location.hash || "").indexOf("/admin/backups") === 1 || state.adminBackupsLoaded) state.adminBackupsLoaded = true;
     } catch (e) {
       if (e.status === 401) { localStorage.removeItem("admin_token"); state.adminAuthed = false; showToast("Admin session ended", "Please sign in again."); navigate("/admin/signin"); }
+      // If the whole refresh breaks, show the lists as they are rather than leaving
+      // every table on a loading state for ever (0.1.84, same rule as 0.1.83's /me).
+      state.adminAccountsLoaded = true;
+      state.requestsLoaded = true;
+      state.adminArchivedLoaded = true;
+      state.adminEnvsLoaded = true;
+      state.adminBackupsLoaded = true;
     }
   }
 
@@ -2241,6 +2297,7 @@ var ICONS = {
     state.impTtlMinutes = r.expires_minutes || 60;
     state.session = null;
     state.sessionLoaded = false;
+    state.backupsLoaded = false; state.backups = [];
     state.menuOpen = false;
     stopPolling();
     showToast("Viewing as " + label, "Exit impersonation from the banner at any time.");
@@ -2263,6 +2320,7 @@ var ICONS = {
     state.impersonation = null;
     state.session = null;
     state.sessionLoaded = false;
+    state.backupsLoaded = false; state.backups = [];
     state.provisioningPw = null;
     stopPolling();
     showToast("Returned to admin", "You are no longer viewing as " + label + ".");
@@ -2507,17 +2565,19 @@ var ICONS = {
                (event.target === act || !act.classList.contains("modal-backdrop"))) closeModal();
       else if (action === "signout") {
         if (state.impersonation) { exitImpersonation(); }
-        else { localStorage.removeItem("portal_token"); state.session = null; state.sessionLoaded = false; state.provisioningPw = null; stopPolling(); showToast("Signed out", "You have been signed out of the portal."); navigate("/entry"); }
+        else { localStorage.removeItem("portal_token"); state.session = null; state.sessionLoaded = false; state.backupsLoaded = false; state.backups = []; state.provisioningPw = null; stopPolling(); showToast("Signed out", "You have been signed out of the portal."); navigate("/entry"); }
       }
       else if (action === "signout-route") {
         if (currentKind() === "admin") {
           localStorage.removeItem("admin_token"); state.adminAuthed = false;
           state.adminAccounts = []; state.adminAccountsLoaded = false; state.adminArchived = []; state.requests = []; state.accountCache = {}; state.accountDetailTried = {}; state.adminInstances = []; state.adminInstancesLoaded = false;
+          state.requests = []; state.requestsLoaded = false; state.adminArchived = []; state.adminArchivedLoaded = false;
+          state.adminEnvs = []; state.adminEnvsLoaded = false; state.adminBackups = []; state.adminBackupsLoaded = false;
           showToast("Signed out", "Admin session ended."); navigate("/admin/signin");
         } else if (state.impersonation) {
           exitImpersonation();
         } else {
-          if (window.confirm("Sign out of the portal?")) { localStorage.removeItem("portal_token"); state.session = null; state.sessionLoaded = false; state.provisioningPw = null; stopPolling(); navigate("/entry"); }
+          if (window.confirm("Sign out of the portal?")) { localStorage.removeItem("portal_token"); state.session = null; state.sessionLoaded = false; state.backupsLoaded = false; state.backups = []; state.provisioningPw = null; stopPolling(); navigate("/entry"); }
         }
       }
       else if (action === "toggle-password") {
@@ -2617,7 +2677,7 @@ var ICONS = {
           // refresh the backups list shortly after
           setTimeout(function () {
             api("/me/backups").then(function (bk) { state.backups = (bk && bk.backups) || []; state.backupsLoaded = true; render(); })
-              .catch(function () {});
+              .catch(function () { state.backups = state.backups || []; state.backupsLoaded = true; render(); });
           }, 4000);
         }).catch(function (err) { showToast("Could not start backup", err.message); });
       }
@@ -2816,6 +2876,8 @@ var ICONS = {
       }
       else if (action === "admin-attach") {
         var attId = act.dataset.id;
+        // The scan walks every n8n server, so say so instead of appearing dead.
+        showModal(modalHeader("Finding workspaces") + '<p class="muted" role="status" aria-live="polite">Checking the n8n servers for workspaces that are not attached to an account yet...</p>');
         (async function () {
           try {
             state.unlinkedStacks = await api("/admin/stacks/unlinked");
@@ -2824,8 +2886,8 @@ var ICONS = {
         })();
       }
       else if (action === "after-add-attach") {
-        closeModal();
         var aaId = act.dataset.id;
+        showModal(modalHeader("Finding workspaces") + '<p class="muted" role="status" aria-live="polite">Checking the n8n servers for workspaces that are not attached to an account yet...</p>');
         (async function () {
           try { state.unlinkedStacks = await api("/admin/stacks/unlinked"); } catch (e) { state.unlinkedStacks = []; }
           attachModal(aaId);
