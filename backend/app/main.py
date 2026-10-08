@@ -10,12 +10,14 @@
 #   GET  /api/v1/admin/accounts    — list all accounts
 
 import logging
+import re
 import time as _time
 import asyncio
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Request, Header
+from fastapi import (FastAPI, HTTPException, Depends, BackgroundTasks, Request, Header,
+                     Body)
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr, Field
@@ -31,7 +33,7 @@ def _decode_subject_is_admin(authorization: str | None) -> bool:
     except Exception:
         return False
 from .services import provisioner, billing, access_gate, admin_ops, backup_ops
-from .services import account_security, passkeys, n8n_releases, python_runner
+from .services import account_security, passkeys, n8n_releases, python_runner, sms
 from .services import update_queue
 from .services import plan_specs
 from .services import security_controls as sc
@@ -252,6 +254,14 @@ class AdminSettingsIn(BaseModel):
     # caller can update ONLY the payments switch without touching placement.
     landing_environments: Optional[str] = None
     payments_open: Optional[bool] = None
+    # Admin profile + SMS delivery (0.1.90, Steward 2026-10-07). Every field is optional
+    # so one card can save without touching the others. sms_api_key is write-only: it goes
+    # in and only a masked confirmation comes back.
+    admin_email: Optional[str] = None
+    admin_phone: Optional[str] = None
+    sms_api_key: Optional[str] = None
+    sms_sender_id: Optional[str] = None
+    sms_otp_type: Optional[str] = None
 
 
 class AdminLoginIn(BaseModel):
@@ -325,6 +335,13 @@ class PasskeyVerifyIn(BaseModel):
     # The full WebAuthn credential JSON (registration or authentication response)
     # as produced by navigator.credentials.create()/get() and JSON-serialized.
     credential: dict = Field(...)
+
+
+class AdminMFASendOTPIn(BaseModel):
+    # Which channel to send the admin code on. Optional so the old call (no body) still
+    # means "email", exactly as it did before 0.1.90.
+    channel: Optional[str] = None
+    challenge: Optional[str] = None      # required for SMS: proves the password step ran
 
 
 class AdminMFAVerifyIn(BaseModel):
@@ -1362,8 +1379,15 @@ def admin_login(payload: AdminLoginIn, request: Request):
         sc.record_failed(ip, "login_fail", None, "admin bad password")
         raise HTTPException(401, "Invalid admin password.")
     sc.record_ok(ip, "login_ok", None)
-    # Admin 2FA gate
-    methods = account_security.admin_2fa_state()["methods"]
+    # Admin 2FA gate. 0.1.90: if 2FA is switched on but no channel can actually
+    # deliver (e.g. only SMS is on and the phone number was removed), refuse rather
+    # than quietly signing the admin in without a second factor.
+    state_2fa = account_security.admin_2fa_state()
+    methods = state_2fa["methods"]
+    if not methods and (db.get_setting("admin_2fa", "") or "").strip():
+        raise HTTPException(
+            409, "Admin 2FA is switched on but no usable method is configured. "
+                 "Add your phone number or email in Settings.")
     if methods:
         return AdminLoginOut(
             token="__mfa__",
@@ -1396,8 +1420,9 @@ def admin_mfa_verify(payload: AdminMFAVerifyIn, request: Request):
     ok = False
     if any(m["method"] == "totp" for m in enabled):
         ok = account_security.admin_totp_verify_code(payload.code)
-    if not ok and any(m["method"] == "email" for m in enabled):
-        ok = account_security.admin_email_otp_verify(payload.code)
+    if not ok and any(m["method"] in ("email", "sms") for m in enabled):
+        # One code slot for the admin, whichever channel delivered it (0.1.90).
+        ok = account_security.admin_otp_verify(payload.code)
     if not ok:
         sc.record_failed(ip, "mfa_fail", None)
         raise HTTPException(401, "That code is invalid or has expired.")
@@ -1409,16 +1434,38 @@ def admin_mfa_verify(payload: AdminMFAVerifyIn, request: Request):
 
 
 @app.post("/api/v1/admin/mfa-send-otp", response_model=dict)
-def admin_mfa_send_otp(request: Request):
-    """Resend the emailed one-time code for the admin second-factor step.
-    (Steward 2026-09-03: admin now has a real post-password MFA flow.)"""
+def admin_mfa_send_otp(request: Request, payload: Optional[AdminMFASendOTPIn] = Body(None)):
+    """Send the admin one-time code for the second-factor step, by email or SMS.
+
+    Steward 2026-09-03: the admin has a real post-password MFA flow.
+    Steward 2026-10-07: SMS joined it, so the channel is now chosen here. An SMS costs
+    real credits, so that channel additionally demands the MFA challenge - proof the
+    password step actually happened - instead of being an open tap on the admin's phone.
+    """
     ip = sc.client_ip(request)
     if sc.check_rate(ip, "forgot"):
         raise HTTPException(429, "Too many requests. Try again in a few minutes.")
+    channel = ((payload.channel if payload else None) or "email").strip().lower()
+    if channel not in ("email", "sms"):
+        raise HTTPException(422, "Unknown code channel.")
     enabled = account_security.admin_2fa_state()["methods"]
-    if not any(m["method"] == "email" for m in enabled):
-        raise HTTPException(409, "Email 2FA is not enabled for the admin.")
-    return account_security.admin_email_send_otp()
+    if not any(m["method"] == channel for m in enabled):
+        raise HTTPException(409, "%s 2FA is not enabled for the admin."
+                            % ("SMS" if channel == "sms" else "Email"))
+    if channel == "sms":
+        challenge = (payload.challenge or "").strip() if payload else ""
+        if not challenge:
+            raise HTTPException(400, "Sign in again to receive an SMS code.")
+        try:
+            acc_id, _methods = verify_mfa_token(challenge)
+        except Exception:  # noqa: BLE001 - any bad token is the same answer to the caller
+            acc_id = None
+        if acc_id != 0:
+            raise HTTPException(401, "Invalid admin MFA challenge.")
+    try:
+        return account_security.admin_send_otp(channel)
+    except account_security.SecurityError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.get("/api/v1/admin/security", dependencies=[Depends(verify_admin)])
@@ -1465,6 +1512,72 @@ def admin_email_disable():
     cur = db.get_setting("admin_2fa", "") or ""
     db.set_setting("admin_2fa", ",".join(x for x in cur.split(",") if x != "email"))
     return {"ok": True}
+
+
+# ---------- admin SMS (mNotify) 0.1.90, Steward 2026-10-07 --------------------
+
+@app.post("/api/v1/admin/security/sms/send", dependencies=[Depends(verify_admin)])
+def admin_sms_otp_send():
+    """Send a code to the admin phone: used both to switch SMS 2FA on and to test it."""
+    try:
+        return account_security.admin_sms_send_otp()
+    except account_security.SecurityError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/v1/admin/security/sms/enable", dependencies=[Depends(verify_admin)])
+def admin_sms_enable(payload: OTPEnableIn):
+    """Turn SMS on only after a code that arrived by SMS has been proven."""
+    if not account_security.admin_otp_verify(payload.code.strip()):
+        raise HTTPException(400, "That code is invalid or has expired.")
+    try:
+        account_security.admin_sms_enable()
+    except account_security.SecurityError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
+
+
+@app.post("/api/v1/admin/security/sms/disable", dependencies=[Depends(verify_admin)])
+def admin_sms_disable():
+    account_security.admin_sms_disable()
+    return {"ok": True}
+
+
+@app.post("/api/v1/admin/sms/test", dependencies=[Depends(verify_admin)])
+def admin_sms_test():
+    """A plain test message to the admin phone (not a code).
+
+    Deliberately does NOT touch the one-time-code slot: testing your mNotify setup must
+    not invalidate a code you are halfway through using at sign-in.
+    """
+    phone = account_security.admin_phone()
+    if not account_security.admin_phone_ok():
+        raise HTTPException(400, "Save your phone number first.")
+    try:
+        info = sms.send_sms(phone, "SteProTECH portal test message. Your mNotify setup "
+                                   "works. No action needed.")
+    except sms.SmsError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, **info}
+
+
+@app.get("/api/v1/admin/sms/status", dependencies=[Depends(verify_admin)])
+def admin_sms_status():
+    """Sender-ID approval + SMS credits, so an empty wallet is visible before it bites."""
+    out = {"configured": sms.configured(), "sender_id": sms.sender_id(),
+           "otp_typing": sms.otp_typing()}
+    if not out["configured"]:
+        out["error"] = "No mNotify API key saved yet."
+        return out
+    try:
+        out["sender"] = sms.check_sender()
+    except sms.SmsError as e:
+        out["sender_error"] = str(e)
+    try:
+        out["balance"] = sms.sms_balance()
+    except sms.SmsError as e:
+        out["balance_error"] = str(e)
+    return out
 
 
 # ---------- admin passkeys (WebAuthn, Steward 2026-09-03) ----------
@@ -1576,10 +1689,21 @@ def admin_passkey_login_verify(payload: PasskeyVerifyIn, request: Request):
 
 @app.get("/api/v1/admin/settings", dependencies=[Depends(verify_admin)])
 def get_admin_settings():
-    return {
+    out = {
         "landing_environments": db.get_setting("landing_environments", default="8"),
         "payments_open": billing.payments_open(),
+        # Admin profile + SMS delivery (0.1.90). The mNotify key is write-only: only
+        # whether it is stored and its last four characters ever come back.
+        "admin_email": account_security.admin_email(),
+        "admin_phone": account_security.admin_phone(),
+        "admin_phone_pretty": sms.pretty_phone(account_security.admin_phone()),
+        "sms_sender_id": sms.sender_id(),
+        "sms_otp_type": "otp" if sms.otp_typing() else "",
+        "sms_configured": sms.configured(),
+        "admin_2fa": db.get_setting("admin_2fa", "") or "",
     }
+    out.update(sms.masked_key())
+    return out
 
 
 @app.put("/api/v1/admin/settings", dependencies=[Depends(verify_admin)])
@@ -1595,6 +1719,42 @@ def put_admin_settings(payload: AdminSettingsIn):
     if payload.payments_open is not None:
         billing.set_payments_open(payload.payments_open)
         out["payments_open"] = billing.payments_open()
+    # ---- admin profile (0.1.90) -------------------------------------------------
+    if payload.admin_email is not None:
+        addr = payload.admin_email.strip()
+        if addr and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[A-Za-z]{2,}", addr):
+            raise HTTPException(422, "That email address does not look right.")
+        db.set_setting(account_security.ADMIN_EMAIL_SETTING, addr)
+        out["admin_email"] = account_security.admin_email()
+    if payload.admin_phone is not None:
+        raw = payload.admin_phone.strip()
+        if not raw:
+            db.set_setting(account_security.ADMIN_PHONE_SETTING, "")
+            out["admin_phone"] = ""
+        else:
+            local = sms.normalise_phone(raw)
+            if not local:
+                raise HTTPException(422, "That phone number does not look like a Ghana "
+                                         "number. Use 024 123 4567 or +233 24 123 4567.")
+            db.set_setting(account_security.ADMIN_PHONE_SETTING, local)
+            out["admin_phone"] = local
+            out["admin_phone_pretty"] = sms.pretty_phone(local)
+    # ---- SMS delivery (0.1.90) --------------------------------------------------
+    if payload.sms_api_key is not None:
+        db.set_setting(sms.SMS_KEY, payload.sms_api_key.strip())
+        out.update(sms.masked_key())          # never the key itself
+    if payload.sms_sender_id is not None:
+        try:
+            name = sms.validate_sender(payload.sms_sender_id)
+        except sms.SmsError as e:
+            raise HTTPException(422, str(e))
+        db.set_setting(sms.SMS_SENDER, name)
+        out["sms_sender_id"] = sms.sender_id()
+    if payload.sms_otp_type is not None:
+        mode = "otp" if str(payload.sms_otp_type).strip().lower() in ("otp", "1", "true", "on") \
+            else ""
+        db.set_setting(sms.SMS_OTP_TYPE, mode)
+        out["sms_otp_type"] = mode
     if not out:
         raise HTTPException(422, "Nothing to update.")
     return out

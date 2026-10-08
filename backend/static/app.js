@@ -28,7 +28,9 @@
     pollTimer: null,
     provisioningPw: null, // signup password held in-session for owner auto-create
     mfa: null,             // 2FA challenge in-flight (email, challenge, methods)
-    adminMfa: null,        // admin 2FA challenge in-flight (challenge, methods)
+    adminMfa: null,
+    adminMfaSent: null,
+    smsStatus: null,        // admin 2FA challenge in-flight (challenge, methods)
     security2fa: null,     // 2FA setup state (GET /me/security or /admin/security)
     adminInstances: [],    // admin: all instances (GET /admin/instances) for backup/update triggers
     adminInstancesLoaded: false,
@@ -109,6 +111,8 @@ var ICONS = {
   accounts: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /> <circle cx="9" cy="7" r="4" /> <path d="M22 21v-2a4 4 0 0 0-3-3.87" /> <path d="M16 3.13a4 4 0 0 1 0 7.75" />',
   arrow: '<path d="M5 12h14" /> <path d="m12 5 7 7-7 7" />',
   "arrow-left": '<path d="m12 19-7-7 7-7" /> <path d="M19 12H5" />',
+  phone: '<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />',
+  message: '<path d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.86 9.86 0 0 1-4-.84L3 21l1.05-4.2A7.7 7.7 0 0 1 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />',
   archive: '<rect width="20" height="5" x="2" y="3" rx="1" /> <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" /> <path d="M10 12h4" />',
   pause: '<rect x="14" y="4" width="4" height="16" rx="1" /> <rect x="6" y="4" width="4" height="16" rx="1" />',
   bell: '<path d="M10.268 21a2 2 0 0 0 3.464 0" /> <path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326" />',
@@ -452,18 +456,37 @@ var ICONS = {
   function adminMfaPage() {
     var m = state.adminMfa;
     if (!m) { navigate("/admin/signin"); return ""; }
-    var hasEmail = m.methods.some(function (x) { return x.method === "email"; });
-    var hasPasskey = m.methods.some(function (x) { return x.method === "passkey"; });
+    var byMethod = {};
+    m.methods.forEach(function (x) { byMethod[x.method] = x; });
+    var hasEmail = !!byMethod.email;
+    var hasSms = !!byMethod.sms;
+    var hasPasskey = !!byMethod.passkey;
     var labels = m.methods.map(function (x) { return x.label || x.method; });
     var ex = labels.join(" or ");
+    // Nothing is sent automatically: an SMS costs real credits, so the admin presses the
+    // button and sees exactly where the code went. (0.1.90, Steward 2026-10-07.)
+    var senders = "";
+    if (hasSms) {
+      senders += '<button class="button primary-wide" data-action="admin-mfa-send" data-channel="sms">' +
+        icon("phone") + " Text me a code" + (byMethod.sms.to ? ' <span class="small">' + esc(byMethod.sms.to) + "</span>" : "") + "</button>";
+    }
+    if (hasEmail) {
+      senders += '<button class="button ' + (hasSms ? "secondary " : "") + 'primary-wide" style="margin-top:8px" data-action="admin-mfa-send" data-channel="email">' +
+        icon("mail") + " Email me a code" + (byMethod.email.to ? ' <span class="small">' + esc(byMethod.email.to) + "</span>" : "") + "</button>";
+    }
+    var sentNote = state.adminMfaSent
+      ? '<p class="small muted" style="text-align:center;margin-top:12px">Code sent to <b>' +
+        esc(state.adminMfaSent.to || "") + "</b> (" + esc(state.adminMfaSent.channel === "sms" ? "text message" : "email") + ").</p>"
+      : "";
     return authLayout(
       '<div class="eyebrow">Staff verification</div><h1>Enter your code</h1>' +
       '<p class="muted">Use your <b>' + esc(ex) + '</b> to finish signing in.</p>' +
+      (senders ? '<div style="margin-bottom:14px">' + senders + "</div>" : "") +
+      sentNote +
       '<form data-form="admin-mfa"><div class="field"><label>Verification code</label>' +
       '<input id="admin-mfa-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" required placeholder="123456" maxlength="10"></div>' +
       '<button class="button primary-wide" type="submit">Verify &amp; sign in</button></form>' +
       (hasPasskey ? '<div style="text-align:center;margin-top:12px"><button class="button secondary" data-action="admin-mfa-passkey">' + icon("fingerprint") + " Use a passkey</button></div>" : "") +
-      (hasEmail ? '<p class="small muted" style="text-align:center;margin-top:14px"><a href="#" data-action="admin-mfa-resend">Resend email code</a></p>' : "") +
       '<p class="small muted" style="text-align:center;margin-top:20px">Customer? <a href="#/entry">Return to customer portal</a></p>'
     );
   }
@@ -1249,6 +1272,22 @@ var ICONS = {
       '<button class="button" data-action="sec-passkey-setup" data-kind="' + (isAdmin ? "admin" : "user") + '">' + icon("key") + " Add a passkey</button>" +
       passkeyList +
       "</section>";
+    // SMS card (0.1.90). Admin only in this release: customers keep the two channels
+    // they already have, and SMS needs a phone number per customer plus their opt-in.
+    var smsOn = !!(st && st.sms_2fa);
+    var hasPhone = !!(st && st.has_phone);
+    var smsCard = isAdmin
+      ? '<section class="card"><div class="card-head"><h2>Text message (SMS)</h2>' +
+        (smsOn ? statusBadge("active", "On") : statusBadge("pending", "Off")) + "</div>" +
+        '<p class="muted">We text a 6-digit code to your phone at sign-in' +
+        (hasPhone && st.admin_phone_masked ? " (" + esc(st.admin_phone_masked) + ")" : "") + ".</p>" +
+        (smsOn
+          ? '<button class="button secondary" data-action="sec-sms-disable">Turn off SMS 2FA</button>'
+          : (hasPhone
+            ? '<button class="button" data-action="sec-sms-setup">' + icon("phone") + " Set up SMS 2FA</button>"
+            : '<p class="small muted">Add your phone number in <a href="#/admin/settings">Settings</a> first, then come back here.</p>')) +
+        "</section>"
+      : "";
     var heading = isAdmin ? "Admin security" : "Account security";
     // "How it works" lives in the second row as a real card (2x2 grid) so the
     // page shows four evenly-spaced cards that look identical to their
@@ -1260,7 +1299,10 @@ var ICONS = {
     return appLayout(isAdmin ? "admin" : "customer", "Security", "security",
       '<main class="page">' + pageHead(heading, "Add a second factor to your sign-in. You can use any combination; a code from one of them is required at login.") +
       '<div class="grid cols-2" style="margin-top:10px">' + totpCard + emailCard + "</div>" +
-      '<div class="grid cols-2" style="margin-top:10px">' + passkeyCard + howCard + "</div>" +
+      (isAdmin
+        ? '<div class="grid cols-2" style="margin-top:10px">' + smsCard + passkeyCard + "</div>" +
+          '<div style="margin-top:10px">' + howCard + "</div>"
+        : '<div class="grid cols-2" style="margin-top:10px">' + passkeyCard + howCard + "</div>") +
       "</main>");
   }
 
@@ -1729,6 +1771,7 @@ var ICONS = {
     return appLayout("admin", "Settings", "settings",
       '<main class="page">' + pageHead("Portal settings", "Choose where new customer workspaces are created and whether customers can pay.", '<button class="button" data-action="save-servers">' + icon("check") + " Save selection</button>") +
       paymentsCard() +
+      '<div class="grid cols-2" style="margin-bottom:18px">' + adminProfileCard() + mnotifyCard() + "</div>" +
       '<div class="grid cols-3"><section class="card span-2"><div class="card-head"><div><h2>Available servers</h2><p class="muted small" style="margin:4px 0 0">Only the n8n servers are listed here. The local control host is never used for customer workspaces.</p></div></div>' +
       '<div class="server-list env-check-list">' + rows + "</div></section>" +
       '<aside class="card"><h2>Placement rule</h2>' +
@@ -1757,6 +1800,72 @@ var ICONS = {
           '<div><strong>No customer can pay or subscribe right now</strong><br><span class="small">New checkouts are refused. Give each onboarded user free access with <strong>Extend expiry</strong> on their account (works while payments are held), then open payments again when paid onboarding starts.</span></div></div>' +
           '<div class="actions end"><button class="button" data-action="payments-toggle" data-open="1">' + icon("check") + " Open payments</button></div>") +
       "</section>";
+  }
+
+  /* Administrator profile (0.1.90): the address and the phone the admin's own sign-in
+   * codes go to. Before this the email was hardcoded in the backend. */
+  function adminProfileCard() {
+    var s = state.adminSettings || {};
+    return '<section class="card"><div class="card-head">' +
+      '<div><h2>Administrator profile</h2><p class="muted small" style="margin:4px 0 0">' +
+      "Both are used by your second factor at sign-in.</p></div></div>" +
+      '<div class="field"><label for="admin-profile-email">Email address (email codes)</label>' +
+      '<input id="admin-profile-email" type="email" autocomplete="email" placeholder="you@example.com" value="' +
+      esc(s.admin_email || "") + '"></div>' +
+      '<div class="field"><label for="admin-profile-phone">Phone number (SMS codes)</label>' +
+      '<input id="admin-profile-phone" type="tel" autocomplete="tel" placeholder="024 123 4567" value="' +
+      esc(s.admin_phone_pretty || s.admin_phone || "") + '">' +
+      '<p class="small muted" style="margin:6px 0 0">Any Ghana format: 024 123 4567, ' +
+      "+233 24 123 4567 or 233241234567. Saved as 0241234567.</p></div>" +
+      '<div class="actions end"><button class="button" data-action="save-admin-profile">' +
+      icon("check") + " Save profile</button></div></section>";
+  }
+
+  /* mNotify SMS delivery (0.1.90). The API key is write-only: it goes up, and only
+   * "saved ... last four" ever comes back, so a screenshot of this page leaks nothing. */
+  function mnotifyCard() {
+    var s = state.adminSettings || {};
+    var st = state.smsStatus || null;
+    var keyLine = s.sms_api_key_set
+      ? statusBadge("active", "Key saved") + ' <span class="small muted">ends ' + esc(s.sms_api_key_last4 || "") + "</span>"
+      : statusBadge("pending", "No API key saved");
+    var status = "";
+    if (st) {
+      if (st.error) {
+        status = '<div class="banner warning" style="margin:12px 0">' + icon("error") +
+          "<div><strong>" + esc(st.error) + '</strong><br><span class="small">Paste your mNotify API key and save it.</span></div></div>';
+      } else {
+        var sender = st.sender || {};
+        var bal = st.balance || {};
+        status = '<div class="banner' + (sender.approved ? "" : " warning") + '" style="margin:12px 0">' + icon(sender.approved ? "check" : "error") +
+          "<div><strong>Sender ID " + esc(sender.sender || st.sender_id || "") + ": " + esc(sender.status || "unknown") + "</strong><br>" +
+          '<span class="small">' + (sender.approved
+            ? "Messages will go out under this name."
+            : "mNotify must approve this Sender ID before texts will arrive.") + "</span></div></div>" +
+          (bal.balance === null || bal.balance === undefined ? "" :
+            '<p class="small muted" style="margin:0 0 12px">SMS credits left: <strong>' + esc(String(bal.balance)) + "</strong>" +
+            (bal.bonus ? " plus " + esc(String(bal.bonus)) + " bonus" : "") + "</p>") +
+          (st.sender_error ? '<p class="small muted" style="margin:0 0 12px">Sender check: ' + esc(st.sender_error) + "</p>" : "") +
+          (st.balance_error ? '<p class="small muted" style="margin:0 0 12px">Balance check: ' + esc(st.balance_error) + "</p>" : "");
+      }
+    }
+    return '<section class="card"><div class="card-head">' +
+      '<div><h2>Text messages (mNotify)</h2><p class="muted small" style="margin:4px 0 0">' +
+      "Delivers your SMS sign-in codes.</p></div>" + keyLine + "</div>" +
+      '<div class="field"><label for="sms-api-key">API key</label>' +
+      '<input id="sms-api-key" type="password" autocomplete="new-password" placeholder="' +
+      (s.sms_api_key_set ? "Saved - paste a new key to replace it" : "Paste your mNotify API key") + '">' +
+      '<p class="small muted" style="margin:6px 0 0">Stored on the portal server and never shown again.</p></div>' +
+      '<div class="field"><label for="sms-sender-id">Sender ID</label>' +
+      '<input id="sms-sender-id" type="text" maxlength="11" value="' + esc(s.sms_sender_id || "StePro-OTP") + '">' +
+      '<p class="small muted" style="margin:6px 0 0">Must be approved in mNotify. Up to 11 characters.</p></div>' +
+      '<label class="env-check" style="margin-bottom:12px"><input type="checkbox" id="sms-otp-type"' + (s.sms_otp_type === "otp" ? " checked" : "") + ">" +
+      '<span class="check-ui"></span><span><strong>Route as an OTP</strong><span class="small muted">' +
+      "Off (plain) is what you chose. Turning it on adds 0.035 per campaign on top of the normal credit.</span></span></label>" +
+      status +
+      '<div class="actions end"><button class="button secondary" data-action="sms-status">' + icon("bell") + " Check connection</button>" +
+      '<button class="button secondary" data-action="sms-test">' + icon("phone") + " Send test SMS</button>" +
+      '<button class="button" data-action="save-sms">' + icon("check") + " Save SMS settings</button></div></section>";
   }
 
   /* ================= router ================= */
@@ -1984,6 +2093,7 @@ var ICONS = {
       var settings = await api("/admin/settings");
       state.envOrder = String(settings.landing_environments || "").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
       state.adminPaymentsOpen = settings.payments_open !== false;
+      state.adminSettings = settings;      // admin profile + mNotify card (0.1.90)
       if (!state.environmentList.length) {
         try { state.environmentList = await api("/environments"); } catch (e) { state.environmentList = []; }
       }
@@ -2951,12 +3061,16 @@ var ICONS = {
           showToast("Code sent", "A new code has been emailed to you.");
         }).catch(function (err) { showToast("Could not send", err.message); });
       }
-      else if (action === "admin-mfa-resend") {
+      else if (action === "admin-mfa-send" || action === "admin-mfa-resend") {
         event.preventDefault();
         var ams = state.adminMfa;
         if (!ams) return;
-        api("/admin/mfa-send-otp", { method: "POST" }).then(function () {
-          showToast("Code sent", "A new code has been emailed to you.");
+        var chan = (act.dataset && act.dataset.channel) || "email";
+        api("/admin/mfa-send-otp", { method: "POST", body: { channel: chan, challenge: ams.challenge } }).then(function (r) {
+          state.adminMfaSent = { channel: r.channel || chan, to: r.to || "" };
+          showToast(chan === "sms" ? "Code texted" : "Code sent",
+            (chan === "sms" ? "A text message is on its way to " : "A new code has been emailed to ") + (r.to || "you") + ".");
+          render();
         }).catch(function (err) { showToast("Could not send", err.message); });
       }
       else if (action === "payment-continue") { doPayment(); }
@@ -3090,6 +3204,30 @@ var ICONS = {
         var es = act.dataset.kind === "admin" ? "/admin/security/email/send" : "/me/security/email/send";
         api(es, { method: "POST" }).then(function () { showToast("Code sent", "A new code has been emailed to you."); })
           .catch(function (err) { showToast("Could not send", err.message); });
+      }
+      else if (action === "sec-sms-setup") {
+        // Mirror of the email flow: prove the phone can receive a code before switching it on.
+        showModal(modalHeader("Set up SMS 2FA") + '<div class="spinner"></div>');
+        api("/admin/security/sms/send", { method: "POST" }).then(function (r) {
+          showModal(modalHeader("Enter the texted code") +
+            '<p class="muted">We texted a 6-digit code to ' + esc(r.to || "your phone") + ". Enter it below to confirm SMS 2FA.</p>" +
+            '<form data-form="sec-sms-enable"><div class="field"><label>Verification code</label>' +
+            '<input name="code" type="text" inputmode="numeric" autocomplete="one-time-code" required maxlength="6" placeholder="123456" style="text-align:center;letter-spacing:.3em">' +
+            "</div>" +
+            '<button class="button primary-wide" type="submit">Confirm &amp; enable</button></form>' +
+            '<p class="small muted" style="text-align:center;margin-top:14px">Did not arrive? <a href="#" data-action="sec-sms-send">Send another code</a></p>');
+        }).catch(function (err) { showToast("Could not send", err.message); closeModal(); });
+      }
+      else if (action === "sec-sms-send") {
+        event.preventDefault();
+        api("/admin/security/sms/send", { method: "POST" }).then(function (r) {
+          showToast("Code texted", "A new code is on its way to " + (r.to || "your phone") + ".");
+        }).catch(function (err) { showToast("Could not send", err.message); });
+      }
+      else if (action === "sec-sms-disable") {
+        showModal(modalHeader("Turn off SMS 2FA?") + "<p>You will no longer be texted a sign-in code.</p>" +
+          '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+          '<button class="button danger" data-confirm-sec-sms-disable="1">Turn off</button></div>');
       }
       else if (action === "sec-email-disable") {
         var ed = act.dataset.kind === "admin" ? "/admin/security/email/disable" : "/me/security/email/disable";
@@ -3394,6 +3532,55 @@ var ICONS = {
           } catch (err) { showToast("Save failed", err.message); }
         })();
       }
+      else if (action === "save-admin-profile") {
+        (async function () {
+          try {
+            var em = String((document.getElementById("admin-profile-email") || {}).value || "").trim();
+            var ph = String((document.getElementById("admin-profile-phone") || {}).value || "").trim();
+            var res = await api("/admin/settings", { method: "PUT", body: { admin_email: em, admin_phone: ph } });
+            state.adminSettings = Object.assign({}, state.adminSettings || {}, res);
+            showToast("Profile saved", ph ? "Codes will go to " + (res.admin_phone_pretty || ph) + "." : "Email codes only for now.");
+            render();
+          } catch (err) { showToast("Could not save", err.message); }
+        })();
+      }
+      else if (action === "save-sms") {
+        (async function () {
+          try {
+            var keyEl = document.getElementById("sms-api-key");
+            var senderEl = document.getElementById("sms-sender-id");
+            var otpEl = document.getElementById("sms-otp-type");
+            var body = {
+              sms_sender_id: String((senderEl || {}).value || "").trim(),
+              sms_otp_type: otpEl && otpEl.checked ? "otp" : "",
+            };
+            var typed = String((keyEl || {}).value || "").trim();
+            if (typed) body.sms_api_key = typed;      // empty means "leave the saved key alone"
+            var res = await api("/admin/settings", { method: "PUT", body: body });
+            if (keyEl) keyEl.value = "";
+            state.adminSettings = Object.assign({}, state.adminSettings || {}, res);
+            showToast("SMS settings saved", res.sms_api_key_set ? "Key saved. Send a test SMS to be sure." : "Saved.");
+            render();
+          } catch (err) { showToast("Could not save", err.message); }
+        })();
+      }
+      else if (action === "sms-status") {
+        (async function () {
+          try {
+            state.smsStatus = await api("/admin/sms/status");
+            render();
+          } catch (err) { showToast("Check failed", err.message); }
+        })();
+      }
+      else if (action === "sms-test") {
+        (async function () {
+          try {
+            var r = await api("/admin/sms/test", { method: "POST" });
+            showToast("Test text sent", "Sent to " + (r.to || "your phone") +
+              (r.credit_left !== null && r.credit_left !== undefined ? " - " + r.credit_left + " credits left." : "."));
+          } catch (err) { showToast("Test failed", err.message); }
+        })();
+      }
       else if (action === "copy-code") {
         var code = act.dataset.code;
         if (navigator.clipboard && code) navigator.clipboard.writeText(code);
@@ -3684,6 +3871,14 @@ var ICONS = {
           refreshSecurity();
         }).catch(function (err) { showToast("Could not disable", err.message); });
       }
+      var cSecSms = event.target.closest("[data-confirm-sec-sms-disable]");
+      if (cSecSms) {
+        closeModal();
+        api("/admin/security/sms/disable", { method: "POST" }).then(function () {
+          showToast("SMS 2FA off", "");
+          refreshSecurity();
+        }).catch(function (err) { showToast("Could not disable", err.message); });
+      }
       var cSecPk = event.target.closest("[data-confirm-sec-passkey-delete]");
       if (cSecPk) {
         closeModal();
@@ -3909,6 +4104,14 @@ else if (type === "register") {
           refreshSecurity();
         }).catch(function (err) { showToast("Code not accepted", err.message); });
       }
+      else if (type === "sec-sms-enable") {
+        var scCode = String(new FormData(form).get("code") || "").trim();
+        api("/admin/security/sms/enable", { method: "POST", body: { code: scCode } }).then(function () {
+          closeModal();
+          showToast("SMS 2FA on", "A code is now texted to you at sign-in.");
+          refreshSecurity();
+        }).catch(function (err) { showToast("Code not accepted", err.message); });
+      }
       else if (type === "admin-signin") {
         var pwA = String(new FormData(form).get("password") || "");
         var btnA = form.querySelector("button[type=submit]");
@@ -3917,6 +4120,7 @@ else if (type === "register") {
           if (r.mfa) {
             // Admin second factor required (authenticator/email/passkey).
             state.adminMfa = { challenge: r.mfa.challenge, methods: r.mfa.methods || [], codeSent: false };
+            state.adminMfaSent = null;
             navigate("/admin/mfa");
             return;
           }
