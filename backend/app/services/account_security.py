@@ -44,8 +44,19 @@ class SecurityError(Exception):
     pass
 
 
+# Letters a person never confuses with a digit when reading it off a phone screen.
+OTP_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ"
+
+
 def _rand_otp() -> str:
+    """Numeric code: the email channel keeps the familiar six digits."""
     return "".join(secrets.choice(string.digits) for _ in range(OTP_LEN))
+
+
+def _rand_word() -> str:
+    """Letters-only code for SMS (0.1.91, Steward): "it must not be numbers the otp can just
+    be letters or so" - a numeric code in a text message looks like an OTP blast."""
+    return "".join(secrets.choice(OTP_ALPHABET) for _ in range(OTP_LEN))
 
 
 def _new_reset_token() -> str:
@@ -342,7 +353,7 @@ def admin_send_otp(channel: str = "email") -> dict:
             raise SecurityError("Add your phone number in Settings before using SMS codes.")
         if not sms.configured():
             raise SecurityError("No mNotify API key has been saved yet. Add it in Settings.")
-        code = _rand_otp()
+        code = _rand_word()          # letters: ordinary-looking SMS content
         _store_otp(code, "sms")
         try:
             info = sms.send_otp_code(to, code, minutes=max(1, OTP_TTL // 60))
@@ -380,7 +391,8 @@ def admin_email_otp_verify(code: str) -> bool:
     the code, whichever way it was delivered."""
     if int(db.get_setting(ADMIN_OTP_EXPIRES) or 0) < time.time():
         return False
-    if not verify_password(code.strip(), db.get_setting(ADMIN_OTP_HASH) or ""):
+    # .upper() so a lettered code typed in lower case still works (SMS codes are letters).
+    if not verify_password(code.strip().upper(), db.get_setting(ADMIN_OTP_HASH) or ""):
         return False
     db.set_setting(ADMIN_OTP_HASH, "")
     db.set_setting(ADMIN_OTP_EXPIRES, "0")

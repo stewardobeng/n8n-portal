@@ -484,7 +484,8 @@ var ICONS = {
       (senders ? '<div style="margin-bottom:14px">' + senders + "</div>" : "") +
       sentNote +
       '<form data-form="admin-mfa"><div class="field"><label>Verification code</label>' +
-      '<input id="admin-mfa-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" required placeholder="123456" maxlength="10"></div>' +
+      '<input id="admin-mfa-code" name="code" type="text" inputmode="text" autocapitalize="characters" ' +
+      'autocorrect="off" spellcheck="false" autocomplete="one-time-code" required placeholder="Code" maxlength="10"></div>' +
       '<button class="button primary-wide" type="submit">Verify &amp; sign in</button></form>' +
       (hasPasskey ? '<div style="text-align:center;margin-top:12px"><button class="button secondary" data-action="admin-mfa-passkey">' + icon("fingerprint") + " Use a passkey</button></div>" : "") +
       '<p class="small muted" style="text-align:center;margin-top:20px">Customer? <a href="#/entry">Return to customer portal</a></p>'
@@ -1845,6 +1846,10 @@ var ICONS = {
           (bal.balance === null || bal.balance === undefined ? "" :
             '<p class="small muted" style="margin:0 0 12px">SMS credits left: <strong>' + esc(String(bal.balance)) + "</strong>" +
             (bal.bonus ? " plus " + esc(String(bal.bonus)) + " bonus" : "") + "</p>") +
+          (st.otp_typing && bal.wallet !== null && bal.wallet !== undefined
+            ? '<p class="small muted" style="margin:0 0 12px">Main wallet: <strong>' + esc(String(bal.wallet)) +
+              "</strong>" + (bal.wallet > 0 ? "" : " - empty, so OTP-typed sends will be refused. Top it up or turn the OTP route off.") + "</p>"
+            : "") +
           (st.sender_error ? '<p class="small muted" style="margin:0 0 12px">Sender check: ' + esc(st.sender_error) + "</p>" : "") +
           (st.balance_error ? '<p class="small muted" style="margin:0 0 12px">Balance check: ' + esc(st.balance_error) + "</p>" : "");
       }
@@ -1861,7 +1866,8 @@ var ICONS = {
       '<p class="small muted" style="margin:6px 0 0">Must be approved in mNotify. Up to 11 characters.</p></div>' +
       '<label class="env-check" style="margin-bottom:12px"><input type="checkbox" id="sms-otp-type"' + (s.sms_otp_type === "otp" ? " checked" : "") + ">" +
       '<span class="check-ui"></span><span><strong>Route as an OTP</strong><span class="small muted">' +
-      "Off (plain) is what you chose. Turning it on adds 0.035 per campaign on top of the normal credit.</span></span></label>" +
+      "Off (plain) is what you chose. The OTP route bills 0.035 per campaign from your MAIN WALLET " +
+      "(a separate purse from these SMS credits), so it fails if that wallet is empty.</span></span></label>" +
       status +
       '<div class="actions end"><button class="button secondary" data-action="sms-status">' + icon("bell") + " Check connection</button>" +
       '<button class="button secondary" data-action="sms-test">' + icon("phone") + " Send test SMS</button>" +
@@ -3210,9 +3216,10 @@ var ICONS = {
         showModal(modalHeader("Set up SMS 2FA") + '<div class="spinner"></div>');
         api("/admin/security/sms/send", { method: "POST" }).then(function (r) {
           showModal(modalHeader("Enter the texted code") +
-            '<p class="muted">We texted a 6-digit code to ' + esc(r.to || "your phone") + ". Enter it below to confirm SMS 2FA.</p>" +
+            '<p class="muted">We texted a sign-in code to ' + esc(r.to || "your phone") + ". Enter it below to confirm SMS 2FA.</p>" +
             '<form data-form="sec-sms-enable"><div class="field"><label>Verification code</label>' +
-            '<input name="code" type="text" inputmode="numeric" autocomplete="one-time-code" required maxlength="6" placeholder="123456" style="text-align:center;letter-spacing:.3em">' +
+            '<input name="code" type="text" inputmode="text" autocapitalize="characters" autocorrect="off" spellcheck="false" ' +
+            'autocomplete="one-time-code" required maxlength="6" placeholder="Code" style="text-align:center;letter-spacing:.3em;text-transform:uppercase">' +
             "</div>" +
             '<button class="button primary-wide" type="submit">Confirm &amp; enable</button></form>' +
             '<p class="small muted" style="text-align:center;margin-top:14px">Did not arrive? <a href="#" data-action="sec-sms-send">Send another code</a></p>');

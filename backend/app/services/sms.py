@@ -206,11 +206,21 @@ def send_sms(to: str, message: str, *, otp: bool = False) -> dict:
     }
 
 
+def otp_message(code: str, *, minutes: int) -> str:
+    """The admin sign-in code message (0.1.91, Steward 2026-10-07: "don't you think its the
+    content that makes them suspect its otp, so lets make it normal, it must not be numbers
+    the otp can just be letters or so").
+
+    A text that opens with a bare number reads as an OTP blast to the carrier, so the
+    letters-only code sits inside a plain sentence instead. Kept short: SMS is charged per
+    160 characters.
+    """
+    return ("SteProTECH: your admin sign-in code is %s. It expires in %d minutes."
+            % (code, int(minutes)))
+
+
 def send_otp_code(to: str, code: str, *, minutes: int) -> dict:
-    """The one-time code message. Kept short: SMS is charged per 160 characters."""
-    msg = ("%s is your SteProTECH admin code. It expires in %d minutes. "
-           "Never share it with anyone." % (code, int(minutes)))
-    return send_sms(to, msg, otp=True)
+    return send_sms(to, otp_message(code, minutes=minutes), otp=True)
 
 
 def check_sender(name: str | None = None) -> dict:
@@ -234,5 +244,9 @@ def sms_balance() -> dict:
             return float(v)
         except (TypeError, ValueError):
             return None
+    # "balance" is the SMS credit; "wallet" is a separate purse and the OTP route
+    # (sms_type:"otp") bills 0.035 per campaign from it. An empty wallet is why an
+    # OTP-typed send fails while SMS credits look healthy.
     return {"balance": _num(data.get("balance")),
-            "bonus": _num(data.get("bonus") or data.get("bonus_balance"))}
+            "bonus": _num(data.get("bonus") or data.get("bonus_balance")),
+            "wallet": _num(data.get("wallet"))}

@@ -45,6 +45,11 @@ def _client():
     return TestClient(app)
 
 
+def _code_from(message: str) -> str:
+    """Codes are letters since 0.1.91: the message reads "... sign-in code is KRTMXP. It expires"."""
+    return message.split("is ")[1].split(".")[0]
+
+
 def _admin():
     from app.security import create_access_token
     return {"Authorization": "Bearer " + create_access_token("admin")}
@@ -269,9 +274,8 @@ def test_the_sms_code_verifies_the_admin_signin(captured):
     client.post("/api/v1/admin/mfa-send-otp", json={"channel": "sms", "challenge": challenge})
 
     # Recover the code the way the admin would: read what was texted.
-    sent = captured[-1]["json"]["message"]
-    code = sent.split()[0]
-    assert code.isdigit() and len(code) == 6
+    code = _code_from(captured[-1]["json"]["message"])
+    assert len(code) == 6 and code.isalnum()
 
     r = client.post("/api/v1/admin/mfa-verify", json={"challenge": challenge, "code": code})
     assert r.status_code == 200, r.text
@@ -314,7 +318,7 @@ def test_enabling_sms_needs_a_code_that_arrived(captured):
     assert wrong.status_code == 400
     assert "sms" not in (db.get_setting("admin_2fa") or "")
 
-    code = captured[-1]["json"]["message"].split()[0]
+    code = _code_from(captured[-1]["json"]["message"])
     ok = client.post("/api/v1/admin/security/sms/enable", headers=_admin(), json={"code": code})
     assert ok.status_code == 200, ok.text
     assert "sms" in (db.get_setting("admin_2fa") or "").split(",")
@@ -401,8 +405,8 @@ def test_the_versions_match_the_compose_image():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     html = open(os.path.join(root, "static", "index.html"), encoding="utf-8").read()
     compose = open(os.path.join(root, "docker-compose.yml"), encoding="utf-8").read()
-    assert "app.js?v=0.1.90" in html and "styles.css?v=0.1.90" in html
-    assert "n8n-portal-backend:0.1.90" in compose
+    assert "app.js?v=0.1.91" in html and "styles.css?v=0.1.91" in html
+    assert "n8n-portal-backend:0.1.91" in compose
 
 
 def test_json_body_never_carries_the_key_in_a_logged_url():
