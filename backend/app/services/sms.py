@@ -141,17 +141,26 @@ def mask_phone(raw: str) -> str:
 
 # ---------------------------------------------------------------- transport
 
-def _request(method: str, path: str, *, json_body=None) -> dict:
+def _request(method: str, path: str, *, json_body=None, params=None) -> dict:
+    """One mNotify call. Extra query parameters MUST come through `params`.
+
+    Never bake "?from=..&to=.." into `path`: httpx percent-encodes the "?" in a path and mNotify
+    answers `422 Validation error`, which is exactly how the delivery lookup first shipped broken
+    (0.1.92), with the unit test blind to it because it stubbed the URL away.
+    """
     key = api_key()
     if not key:
         raise SmsError("No mNotify API key has been saved yet. Add it in Settings.")
     url = "%s/%s" % (API_BASE, path.lstrip("/"))
+    query = {"key": key}
+    if params:
+        query.update(params)
     try:
         with _quiet_httpx():
             if method == "GET":
-                res = httpx.get(url, params={"key": key}, timeout=_TIMEOUT)
+                res = httpx.get(url, params=query, timeout=_TIMEOUT)
             else:
-                res = httpx.post(url, params={"key": key}, json=json_body or {},
+                res = httpx.post(url, params=query, json=json_body or {},
                                  timeout=_TIMEOUT)
     except httpx.HTTPError as e:
         # str(e) can carry the URL with the key, so the class name only.
@@ -253,7 +262,7 @@ def delivery_report(days: int = 2) -> list:
     rows = []
     for back in range(max(1, days)):
         day = (today - datetime.timedelta(days=back)).isoformat()
-        data = _request("GET", "report?from=%s&to=%s" % (day, day))
+        data = _request("GET", "report", params={"from": day, "to": day})
         rows.extend(data.get("report") or [])
     return rows
 

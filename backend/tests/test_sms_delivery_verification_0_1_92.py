@@ -124,6 +124,23 @@ def test_a_campaign_without_a_report_is_reported_honestly(monkeypatch):
     assert "no report" in out["reason"].lower()
 
 
+def test_the_report_call_sends_from_and_to_as_real_query_params(monkeypatch):
+    """0.1.92 shipped this broken: the dates were baked into the path, httpx encoded the "?",
+    and mNotify answered 422 Validation error. Assert the URL and params, not just the parsing."""
+    seen = []
+
+    def fake_get(url, **kw):
+        seen.append((url, kw.get("params") or {}))
+        return _Res({"status": "success", "report": []})
+
+    monkeypatch.setattr(sms.httpx, "get", fake_get)
+    sms.delivery_report(days=1)
+    url, params = seen[-1]
+    assert url == "https://api.mnotify.com/api/report"
+    assert "from" in params and "to" in params and params.get("key")
+    assert "?" not in url
+
+
 def test_delivery_status_without_a_campaign_id_says_so():
     out = sms.delivery_status("")
     assert out["found"] is False and "campaign id" in out["reason"].lower()
