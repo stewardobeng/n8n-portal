@@ -44,19 +44,15 @@ class SecurityError(Exception):
     pass
 
 
-# Letters a person never confuses with a digit when reading it off a phone screen.
-OTP_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ"
-
-
 def _rand_otp() -> str:
-    """Numeric code: the email channel keeps the familiar six digits."""
+    """The one code format, six digits (0.1.92, Steward: "can we bring back the numbers only otp").
+
+    0.1.91 briefly used letters on the theory that a numeric code in a text looks like an OTP
+    blast. The controlled A/B on 2026-10-08 settled it the other way: from a working Sender ID
+    the numeric message DELIVERED, and from the OTP-purpose sender the letters one was REJECTED.
+    Content was never the blocker, so the codes are digits again and the ordinary wording stays.
+    """
     return "".join(secrets.choice(string.digits) for _ in range(OTP_LEN))
-
-
-def _rand_word() -> str:
-    """Letters-only code for SMS (0.1.91, Steward): "it must not be numbers the otp can just
-    be letters or so" - a numeric code in a text message looks like an OTP blast."""
-    return "".join(secrets.choice(OTP_ALPHABET) for _ in range(OTP_LEN))
 
 
 def _new_reset_token() -> str:
@@ -353,7 +349,7 @@ def admin_send_otp(channel: str = "email") -> dict:
             raise SecurityError("Add your phone number in Settings before using SMS codes.")
         if not sms.configured():
             raise SecurityError("No mNotify API key has been saved yet. Add it in Settings.")
-        code = _rand_word()          # letters: ordinary-looking SMS content
+        code = _rand_otp()
         _store_otp(code, "sms")
         try:
             info = sms.send_otp_code(to, code, minutes=max(1, OTP_TTL // 60))

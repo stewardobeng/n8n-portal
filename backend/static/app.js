@@ -30,7 +30,8 @@
     mfa: null,             // 2FA challenge in-flight (email, challenge, methods)
     adminMfa: null,
     adminMfaSent: null,
-    smsStatus: null,        // admin 2FA challenge in-flight (challenge, methods)
+    smsStatus: null,
+    smsTest: null,        // admin 2FA challenge in-flight (challenge, methods)
     security2fa: null,     // 2FA setup state (GET /me/security or /admin/security)
     adminInstances: [],    // admin: all instances (GET /admin/instances) for backup/update triggers
     adminInstancesLoaded: false,
@@ -1824,6 +1825,25 @@ var ICONS = {
 
   /* mNotify SMS delivery (0.1.90). The API key is write-only: it goes up, and only
    * "saved ... last four" ever comes back, so a screenshot of this page leaks nothing. */
+  /* The verdict on the last test send, read from mNotify's own delivery report (0.1.92).
+   * "Accepted by the API" is not delivery: a rejected message still costs a credit. */
+  function testOutcome() {
+    var t = state.smsTest;
+    if (!t) return "";
+    var map = {
+      DELIVERED: ["", "check", "Delivered", "The handset acknowledged it."],
+      SUBMITTED: [" warning", "bell", "Submitted", "Handed to the carrier, not acknowledged yet. Give it a minute."],
+      REJECTED: [" warning", "error", "Rejected", "The gateway dropped it. Check the Sender ID's registered purpose against the routing mode above."],
+    };
+    if (t.checking) {
+      return '<p class="small muted" style="margin:0 0 12px">Test message sent. Checking delivery' +
+        " with mNotify" + " ..." + "</p>";
+    }
+    var m = map[t.status] || ["", "bell", t.status || "No report yet", t.reason || "mNotify has no verdict yet."];
+    return '<div class="banner' + m[0] + '" style="margin:12px 0">' + icon(m[1]) +
+      "<div><strong>Test message: " + esc(m[2]) + "</strong><br><span class=\"small\">" + esc(m[3]) + "</span></div></div>";
+  }
+
   function mnotifyCard() {
     var s = state.adminSettings || {};
     var st = state.smsStatus || null;
@@ -1838,6 +1858,11 @@ var ICONS = {
       } else {
         var sender = st.sender || {};
         var bal = st.balance || {};
+        var mismatch = st.purpose_mismatch
+          ? '<div class="banner warning" style="margin:0 0 12px">' + icon("error") +
+            '<div><strong>Sender ID and routing mode disagree</strong><br><span class="small">' +
+            esc(st.purpose_mismatch) + "</span></div></div>"
+          : "";
         status = '<div class="banner' + (sender.approved ? "" : " warning") + '" style="margin:12px 0">' + icon(sender.approved ? "check" : "error") +
           "<div><strong>Sender ID " + esc(sender.sender || st.sender_id || "") + ": " + esc(sender.status || "unknown") + "</strong><br>" +
           '<span class="small">' + (sender.approved
@@ -1850,6 +1875,8 @@ var ICONS = {
             ? '<p class="small muted" style="margin:0 0 12px">Main wallet: <strong>' + esc(String(bal.wallet)) +
               "</strong>" + (bal.wallet > 0 ? "" : " - empty, so OTP-typed sends will be refused. Top it up or turn the OTP route off.") + "</p>"
             : "") +
+          (sender.purpose ? '<p class="small muted" style="margin:0 0 12px">Registered for: ' +
+            esc(sender.purpose) + "</p>" : "") + mismatch +
           (st.sender_error ? '<p class="small muted" style="margin:0 0 12px">Sender check: ' + esc(st.sender_error) + "</p>" : "") +
           (st.balance_error ? '<p class="small muted" style="margin:0 0 12px">Balance check: ' + esc(st.balance_error) + "</p>" : "");
       }
@@ -1863,12 +1890,14 @@ var ICONS = {
       '<p class="small muted" style="margin:6px 0 0">Stored on the portal server and never shown again.</p></div>' +
       '<div class="field"><label for="sms-sender-id">Sender ID</label>' +
       '<input id="sms-sender-id" type="text" maxlength="11" value="' + esc(s.sms_sender_id || "StePro-OTP") + '">' +
-      '<p class="small muted" style="margin:6px 0 0">Must be approved in mNotify. Up to 11 characters.</p></div>' +
+      '<p class="small muted" style="margin:6px 0 0">Must be approved in mNotify, up to 11 characters. ' +
+      "Letters and digits only is safest: a hyphenated name was rejected by the gateway on this account " +
+      "while the same name without the hyphen delivers.</p></div>" +
       '<label class="env-check" style="margin-bottom:12px"><input type="checkbox" id="sms-otp-type"' + (s.sms_otp_type === "otp" ? " checked" : "") + ">" +
       '<span class="check-ui"></span><span><strong>Route as an OTP</strong><span class="small muted">' +
       "Off (plain) is what you chose. The OTP route bills 0.035 per campaign from your MAIN WALLET " +
       "(a separate purse from these SMS credits), so it fails if that wallet is empty.</span></span></label>" +
-      status +
+      status + testOutcome() +
       '<div class="actions end"><button class="button secondary" data-action="sms-status">' + icon("bell") + " Check connection</button>" +
       '<button class="button secondary" data-action="sms-test">' + icon("phone") + " Send test SMS</button>" +
       '<button class="button" data-action="save-sms">' + icon("check") + " Save SMS settings</button></div></section>";
@@ -3584,7 +3613,25 @@ var ICONS = {
           try {
             var r = await api("/admin/sms/test", { method: "POST" });
             showToast("Test text sent", "Sent to " + (r.to || "your phone") +
-              (r.credit_left !== null && r.credit_left !== undefined ? " - " + r.credit_left + " credits left." : "."));
+              (r.credit_left !== null && r.credit_left !== undefined ? " - " + r.credit_left + " credits left." : ".") +
+              " Checking whether it actually delivers.");
+            state.smsTest = { checking: true };
+            render();
+            // mNotify takes a moment to report, so ask a few times before giving a verdict.
+            for (var i = 0; i < 4; i++) {
+              await new Promise(function (res) { setTimeout(res, i === 0 ? 6000 : 10000); });
+              try {
+                var d = await api("/admin/sms/delivery?campaign_id=" + encodeURIComponent(r.campaign_id || ""));
+                if (d && d.found) {
+                  state.smsTest = d;
+                  if (d.status === "REJECTED" || d.status === "DELIVERED") break;
+                }
+              } catch (e) { /* keep waiting */ }
+            }
+            if (state.smsTest && state.smsTest.checking) {
+              state.smsTest = { status: "", reason: "mNotify has not reported yet. Check connection again in a minute." };
+            }
+            render();
           } catch (err) { showToast("Test failed", err.message); }
         })();
       }

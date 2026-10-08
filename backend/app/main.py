@@ -1561,16 +1561,39 @@ def admin_sms_test():
     return {"ok": True, **info}
 
 
+@app.get("/api/v1/admin/sms/delivery", dependencies=[Depends(verify_admin)])
+def admin_sms_delivery(campaign_id: str = ""):
+    """What actually happened to a message we sent (0.1.92, Steward: "is there a way to verify").
+
+    The API answering 200 and a credit being deducted says nothing about delivery, so the
+    Settings card asks mNotify's own report for the verdict after a test send.
+    """
+    return sms.delivery_status(campaign_id)
+
+
 @app.get("/api/v1/admin/sms/status", dependencies=[Depends(verify_admin)])
 def admin_sms_status():
-    """Sender-ID approval + SMS credits, so an empty wallet is visible before it bites."""
+    """Sender-ID approval + purpose + SMS credits, so an empty wallet is visible before it bites."""
     out = {"configured": sms.configured(), "sender_id": sms.sender_id(),
            "otp_typing": sms.otp_typing()}
     if not out["configured"]:
         out["error"] = "No mNotify API key saved yet."
         return out
     try:
-        out["sender"] = sms.check_sender()
+        snd = sms.check_sender()
+        out["sender"] = snd
+        # A sender registered for OTP traffic and plain sending (or the reverse) is exactly the
+        # mismatch that silently dropped his messages, so name it rather than let it hide.
+        if snd.get("otp_purpose") and not out["otp_typing"]:
+            out["purpose_mismatch"] = ("This Sender ID is registered for OTP traffic while plain "
+                                       "sending is on. That combination has delivered on this "
+                                       "account, so treat this as a note: if texts ever stop "
+                                       "arriving, switch the route on (and fund the main wallet) "
+                                       "or use a sender registered for ordinary notifications.")
+        elif (not snd.get("otp_purpose")) and out["otp_typing"]:
+            out["purpose_mismatch"] = ("The OTP route is on while this Sender ID is registered for "
+                                       "ordinary notifications. If texts stop arriving, turn the "
+                                       "route off or use the sender registered for OTP traffic.")
     except sms.SmsError as e:
         out["sender_error"] = str(e)
     try:

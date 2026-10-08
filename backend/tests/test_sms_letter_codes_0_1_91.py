@@ -1,23 +1,18 @@
-"""SMS codes are letters, and the message reads like an ordinary text (0.1.91).
+"""The code format, and everything that must not depend on it (0.1.91 -> 0.1.92).
 
-Steward, after the rejected sends: "don't you think its the content that makes them suspect
-its otp, so lets make it normal, it must not be numbers the otp can just be letters or so".
+History worth keeping: 0.1.91 made SMS codes letters on the theory that a numeric code in a text
+message reads as an OTP blast and gets dropped. The controlled A/B on 2026-10-08 disproved it -
+from a working Sender ID the numeric-leading message DELIVERED, while from the OTP-purpose sender
+even the lettered message was REJECTED - so 0.1.92 put the digits back (Steward: "can we bring back
+the numbers only otp").
 
-The A/B proof behind this file is in the portal record: the same plain message that mNotify
-REJECTED from the OTP-purpose sender `StePro-OTP` was DELIVERED from `Uptime` and accepted from
-`SteProTECH` in the same minute, so the Sender ID was the real blocker. The letters-only code and
-the plain wording are the extra precaution he asked for: an SMS that opens with a bare number is
-what a spam filter reads as an OTP blast.
-
-Rules pinned here:
-  * the SMS code is letters only, six of them, from an alphabet with no look-alike letters;
-  * a lower-case code typed by hand still verifies;
-  * the email channel keeps its familiar six digits;
-  * the message text contains no numeric run that could be read as a code;
-  * the code fields in the UI are not numeric-keypad fields any more.
+What survives, and what this file pins:
+  * the format is not load-bearing: the message builder and the verifier work with any code;
+  * verification is case-insensitive, so a lettered code typed in lower case would still work;
+  * the code is stored only as a salted hash, in one slot, and is consumed on use;
+  * the two code fields accept either format, so a future format change needs no UI work;
+  * the customer code field keeps its numeric keypad, because customer codes are digits.
 """
-import re
-
 import pytest
 
 from app import db
@@ -30,9 +25,16 @@ def code_from(message: str) -> str:
     return message.split("is ")[1].split(".")[0]
 
 
+class _Res:
+    status_code = 200
+
+    def json(self):
+        return {"status": "success", "code": "2000", "summary": {"_id": "C1", "credit_left": 9}}
+
+
 @pytest.fixture(autouse=True)
 def _fresh(tmp_path, monkeypatch):
-    monkeypatch.setattr(settings, "db_path", str(tmp_path / "letters.db"))
+    monkeypatch.setattr(settings, "db_path", str(tmp_path / "format.db"))
     db.init_db()
     yield
 
@@ -41,13 +43,6 @@ def _fresh(tmp_path, monkeypatch):
 def sent(monkeypatch):
     """Catch the outbound SMS; nothing is really sent."""
     calls = []
-
-    class _Res:
-        status_code = 200
-
-        def json(self):
-            return {"status": "success", "code": "2000", "summary": {"_id": "C1", "credit_left": 9}}
-
     monkeypatch.setattr(sms.httpx, "post", lambda url, **kw: (calls.append(kw.get("json") or {}), _Res())[1])
     monkeypatch.setattr(sms.httpx, "get", lambda url, **kw: _Res())
     db.set_setting(sms.SMS_KEY, "test-key")
@@ -56,65 +51,48 @@ def sent(monkeypatch):
     return calls
 
 
-# ------------------------------------------------------------------ the code itself
+# ------------------------------------------------------------------ the format today
 
-def test_the_sms_code_is_letters_only():
-    for _ in range(40):
-        code = ac._rand_word()
-        assert len(code) == ac.OTP_LEN
-        assert code.isalpha() and code.isupper()
-        assert not any(ch.isdigit() for ch in code)
-
-
-def test_the_letters_avoid_the_ones_people_read_as_digits():
-    alphabet = ac.OTP_ALPHABET
-    for confusing in ("I", "L", "O"):
-        assert confusing not in alphabet
-    assert len(alphabet) == 23
-
-
-def test_the_email_code_still_uses_digits():
-    code = ac._rand_otp()
-    assert len(code) == ac.OTP_LEN and code.isdigit()
+def test_the_live_code_is_six_digits():
+    for _ in range(30):
+        code = ac._rand_otp()
+        assert len(code) == ac.OTP_LEN and code.isdigit()
 
 
 def test_two_codes_are_not_the_same_code():
-    assert len({ac._rand_word() for _ in range(50)}) > 40
-
-
-# ------------------------------------------------------------------ the message
-
-def test_the_message_does_not_look_like_a_numeric_otp_blast():
-    msg = sms.otp_message("KRTMXP", minutes=5)
-    assert "KRTMXP" in msg
-    assert not msg[0].isdigit()                       # a leading number is the tell
-    assert not re.search(r"\d{4,}", msg)              # no four-digit run anywhere
-    assert "SteProTECH" in msg
-    assert "one-time" not in msg.lower() and "OTP" not in msg
+    assert len({ac._rand_otp() for _ in range(50)}) > 40
 
 
 def test_the_texted_code_reaches_the_phone(sent):
     out = ac.admin_send_otp("sms")
     assert out["channel"] == "sms" and out["sent"] is True
-    msg = sent[-1]["message"]
-    code = code_from(msg)
-    assert code.isalpha() and len(code) == ac.OTP_LEN
+    code = code_from(sent[-1]["message"])
+    assert code.isdigit() and len(code) == ac.OTP_LEN
     assert sent[-1]["sender"] == "SteProTECH"
 
 
-# ------------------------------------------------------------------ verifying it
+# ------------------------------------------------------------------ format independence
 
-def test_a_lettered_code_verifies_even_typed_in_lower_case(sent):
+@pytest.mark.parametrize("code", ["482915", "KRTMXP", "A1B2C3"])
+def test_the_message_builder_takes_any_code(code):
+    msg = sms.otp_message(code, minutes=5)
+    assert code in msg
+    assert msg.startswith("SteProTECH:")        # the code never leads the message
+    assert "OTP" not in msg
+
+
+def test_verification_does_not_care_about_case(sent):
+    """Digits are unaffected by .upper(), but the verifier must not break if letters ever return."""
     ac.admin_send_otp("sms")
     code = code_from(sent[-1]["message"])
     assert ac.admin_otp_verify(code.lower()) is True
-    # and it is consumed: the same code cannot be used twice
-    assert ac.admin_otp_verify(code) is False
+    assert ac.admin_otp_verify(code) is False    # consumed: one use per code
 
 
-def test_a_wrong_lettered_code_is_still_refused(sent):
+def test_a_wrong_code_is_refused(sent):
     ac.admin_send_otp("sms")
-    assert ac.admin_otp_verify("ZZZZZZ") is False
+    wrong = "999999" if code_from(sent[-1]["message"]) != "999999" else "111111"
+    assert ac.admin_otp_verify(wrong) is False
 
 
 def test_the_code_is_stored_as_a_hash_not_as_text(sent):
@@ -133,17 +111,16 @@ def _js():
     return open(os.path.join(root, "static", "app.js"), encoding="utf-8").read()
 
 
-def test_the_admin_code_field_is_not_a_numeric_keypad_field():
+def test_the_admin_code_field_accepts_either_format():
     js = _js()
     i = js.find('id="admin-mfa-code"')
     assert i > 0
     field = js[i - 20:i + 320]
-    assert 'inputmode="text"' in field
-    assert 'inputmode="numeric"' not in field
+    assert 'inputmode="text"' in field          # not a numeric keypad, so letters would work too
     assert 'placeholder="123456"' not in field
 
 
-def test_the_sms_setup_field_takes_letters_too():
+def test_the_sms_setup_field_accepts_either_format():
     js = _js()
     i = js.find('data-form="sec-sms-enable"')
     assert i > 0
@@ -153,8 +130,8 @@ def test_the_sms_setup_field_takes_letters_too():
     assert "6-digit" not in block
 
 
-def test_the_customer_code_field_is_left_alone():
-    """Customer email codes are still digits, so that field keeps its numeric keypad."""
+def test_the_customer_code_field_keeps_its_numeric_keypad():
+    """Customer email codes are digits, so that field is left alone."""
     js = _js()
     i = js.find('id="mfa-code"')
     assert i > 0
@@ -170,9 +147,9 @@ def test_the_otp_toggle_warns_about_the_separate_wallet():
 
 def test_the_versions_match_the_compose_image():
     import os
+    import re as _re
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     html = open(os.path.join(root, "static", "index.html"), encoding="utf-8").read()
     compose = open(os.path.join(root, "docker-compose.yml"), encoding="utf-8").read()
-    import re
-    tag = re.search(r"n8n-portal-backend:([0-9.]+)", compose).group(1)
+    tag = _re.search(r"n8n-portal-backend:([0-9.]+)", compose).group(1)
     assert "app.js?v=%s" % tag in html and "styles.css?v=%s" % tag in html

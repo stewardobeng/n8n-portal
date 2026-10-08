@@ -27,6 +27,7 @@ Two things that matter here:
 """
 from __future__ import annotations
 
+import datetime
 import logging
 import re
 from contextlib import contextmanager
@@ -229,12 +230,49 @@ def check_sender(name: str | None = None) -> dict:
     data = _request("POST", "senderid/status/", json_body={"sender_name": wanted})
     summary = data.get("summary") or {}
     state = str(summary.get("status") or summary.get("sender_status") or "").strip()
+    purpose = str(summary.get("purpose") or "").strip()
     return {
         "sender": str(summary.get("sender_name") or wanted),
         "status": state,
         "approved": state.lower() == "approved",
+        # The purpose decides which traffic the gateway lets through, so never judge delivery
+        # by "approved" alone: an OTP-purpose sender rejects ordinary plain messages.
+        "purpose": purpose,
+        "otp_purpose": "otp" in purpose.lower(),
         "message": str(data.get("message") or "").strip(),
     }
+
+
+def delivery_report(days: int = 2) -> list:
+    """mNotify's own delivery report: one row per recipient per send.
+
+    This is the only honest way to call an SMS delivered: `status` is DELIVERED, SUBMITTED (sent,
+    not yet acknowledged) or REJECTED (the gateway dropped it after accepting and charging).
+    """
+    today = datetime.date.today()
+    rows = []
+    for back in range(max(1, days)):
+        day = (today - datetime.timedelta(days=back)).isoformat()
+        data = _request("GET", "report?from=%s&to=%s" % (day, day))
+        rows.extend(data.get("report") or [])
+    return rows
+
+
+def delivery_status(campaign_id: str, days: int = 2) -> dict:
+    """What happened to a campaign we just sent? Used by the Settings card's test button."""
+    if not campaign_id:
+        return {"found": False, "status": "", "reason": "No campaign id to look up."}
+    try:
+        rows = delivery_report(days=days)
+    except SmsError as e:
+        return {"found": False, "status": "", "reason": str(e)}
+    for row in rows:
+        if str(row.get("campaign_id")) == str(campaign_id):
+            return {"found": True, "status": str(row.get("status") or "").upper(),
+                    "sender": str(row.get("sender") or ""), "date_sent": str(row.get("date_sent") or ""),
+                    "reason": ""}
+    return {"found": False, "status": "",
+            "reason": "mNotify has no report for it yet. Give it a moment."}
 
 
 def sms_balance() -> dict:
