@@ -225,8 +225,10 @@ def otp_message(code: str, *, minutes: int) -> str:
     letters-only code sits inside a plain sentence instead. Kept short: SMS is charged per
     160 characters.
     """
-    return ("SteProTECH: your admin sign-in code is %s. It expires in %d minutes."
-            % (code, int(minutes)))
+    # Steward's own template (2026-10-08). It is also the exact text the A/B sent from a working
+    # Sender ID, so it is proven as well as chosen: content never decided delivery.
+    return ("%s is your SteProTECH admin code. It expires in %d minutes. "
+            "Never share it with anyone." % (code, int(minutes)))
 
 
 def send_otp_code(to: str, code: str, *, minutes: int) -> dict:

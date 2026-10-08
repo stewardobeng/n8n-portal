@@ -47,7 +47,10 @@ def _client():
 
 def _code_from(message: str) -> str:
     """Codes are letters since 0.1.91: the message reads "... sign-in code is KRTMXP. It expires"."""
-    return message.split("is ")[1].split(".")[0]
+    import re
+    m = re.match(r"^([A-Za-z0-9]{6})\b", message)
+    assert m, "the code should lead the message: %r" % message
+    return m.group(1)
 
 
 def _admin():

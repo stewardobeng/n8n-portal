@@ -22,7 +22,10 @@ from app.services import account_security as ac, sms
 
 def code_from(message: str) -> str:
     """Pull the code out of the texted message, the way Steward reads it off his phone."""
-    return message.split("is ")[1].split(".")[0]
+    import re
+    m = re.match(r"^([A-Za-z0-9]{6})\b", message)
+    assert m, "the code should lead the message: %r" % message
+    return m.group(1)
 
 
 class _Res:
@@ -77,8 +80,7 @@ def test_the_texted_code_reaches_the_phone(sent):
 def test_the_message_builder_takes_any_code(code):
     msg = sms.otp_message(code, minutes=5)
     assert code in msg
-    assert msg.startswith("SteProTECH:")        # the code never leads the message
-    assert "OTP" not in msg
+    assert msg.endswith("Never share it with anyone.")
 
 
 def test_verification_does_not_care_about_case(sent):

@@ -58,7 +58,8 @@ def test_the_sms_code_is_six_digits_again(monkeypatch):
     monkeypatch.setattr(sms.httpx, "post",
                         lambda url, **kw: (sent.append(kw.get("json") or {}), _Res({"status": "success", "code": "2000", "summary": {"_id": "C1"}}))[1])
     ac.admin_send_otp("sms")
-    code = sent[-1]["message"].split("is ")[1].split(".")[0]
+    import re as _re
+    code = _re.match(r"^([A-Za-z0-9]{6})\b", sent[-1]["message"]).group(1)
     assert code.isdigit() and len(code) == ac.OTP_LEN
 
 
@@ -67,13 +68,12 @@ def test_the_letter_generator_is_gone():
     assert not hasattr(ac, "OTP_ALPHABET")
 
 
-def test_the_wording_stays_ordinary_even_with_digits():
-    """The A/B showed content does not decide delivery, so the plain wording is kept on its merits:
-    it does not open with a bare number."""
+def test_the_message_is_stewards_exact_template():
+    """He supplied this text himself (2026-10-08) and the A/B sent it from a working sender, so it is
+    both chosen and proven."""
     msg = sms.otp_message("482915", minutes=5)
-    assert msg.startswith("SteProTECH:")
-    assert "482915" in msg
-    assert "OTP" not in msg
+    assert msg == ("482915 is your SteProTECH admin code. It expires in 5 minutes. "
+                   "Never share it with anyone.")
 
 
 # ------------------------------------------------------------------ the purpose matters
