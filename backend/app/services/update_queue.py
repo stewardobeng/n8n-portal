@@ -852,9 +852,9 @@ def verify_update(inst, target_version: str, *, from_image: str = "",
     Two rules this cost real damage to learn (endpoint 4, 2026-10-08):
       * Only a LIVE read counts. A version taken from the portal's own row always
         claims what we were trying to do, never what is true.
-      * A first-time image download is not a failure. When the tag had to be fetched
-        the budget is much larger, because the download (about eight minutes on the
-        busiest server) happens before the container is recreated at all.
+      * A first-time image download is not a failure. When the tag had to be fetched the
+        budget is larger, because the download happens before the container is recreated
+        at all. Pulls here measure 72-91s, so this is headroom, not the usual path.
     """
     if image_was_local is False:
         budget = max(int(VERIFY_FLOOR_SECONDS), int(settings.update_verify_timeout_pull_seconds))

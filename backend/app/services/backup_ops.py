@@ -385,10 +385,9 @@ def update_instance_image(instance, image: str) -> None:
             raise ValueError(
                 "Cannot update image: this workspace has no Portainer stack "
                 "record. Attach it again or update it manually.")
-    # Pull only when the tag is genuinely missing on that server. A blind
-    # pullImage=true re-downloads roughly 1.8 GB per workspace even when the image is
-    # already cached, which is what made the env 4 batch take longer than the whole
-    # verification window and fail every workspace in it (2026-10-08).
+    # Pull only when the tag is genuinely missing on that server: a blind pullImage=true
+    # re-downloads roughly 1.8 GB per workspace even when the image is cached (72-91s each
+    # here), so a batch pays that cost for every workspace for nothing.
     try:
         needs_pull = not pc.image_present(env, full_image)
     except Exception as e:  # noqa: BLE001
