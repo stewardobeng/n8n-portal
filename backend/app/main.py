@@ -481,6 +481,50 @@ def _require_update(account_id: int) -> None:
     raise HTTPException(403, "Self-update is not enabled for this account. Contact support.")
 
 
+# Restarting is safe and cheap, but a workspace restarted in a loop never gets to stay
+# up. Customers are paced; the admin is not (Steward, 2026-10-08: the option is for both).
+RESTART_COOLDOWN_SECONDS = 120
+
+
+def _restart_instance(inst: dict, *, actor: str) -> dict:
+    """Restart one workspace container in place, for the admin or its own customer.
+
+    Not an update: the image is untouched, so this cannot change a version or roll
+    anything back. The server refuses while an update is queued or running for the same
+    workspace, because restarting in the middle of one would fight that update.
+    """
+    iid = int(inst["id"])
+    try:
+        conn = db.get_conn()
+        try:
+            busy = conn.execute(
+                "SELECT 1 FROM update_queue WHERE instance_id = ? AND status IN ('queued','running')"
+                " LIMIT 1", (iid,)).fetchone()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 - the queue table is best effort here
+        busy = None
+    if busy:
+        raise HTTPException(409, "This workspace is being updated right now. Restart it after that finishes.")
+
+    key = f"restart_at:{iid}"
+    if actor == "customer":
+        try:
+            last = int(db.get_setting(key) or 0)
+        except (TypeError, ValueError):
+            last = 0
+        wait = RESTART_COOLDOWN_SECONDS - (int(_time.time()) - last)
+        if last and wait > 0:
+            raise HTTPException(429, "This workspace was restarted a moment ago. Try again in %d seconds." % wait)
+    try:
+        container = backup_ops.restart_workspace(inst)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, "The workspace could not be restarted because " + str(e)[:180] + ".")
+    db.set_setting(key, str(int(_time.time())))
+    return {"ok": True, "instance_id": iid, "container": container[:12], "status": "restarting",
+            "message": "Restarting now. It is usually back in about half a minute."}
+
+
 def _run_backup(backup_id: int, instance: dict, kind: str) -> None:
     """Background task wrapper for a backup job (called via BackgroundTasks)."""
     try:
@@ -1026,6 +1070,18 @@ def my_request_update(instance_id: int, account_id: int = Depends(verify_client)
     return {"ok": True, "queue_id": row["queue_id"], "target_version": row["target_version"],
             "position": pos.get("position"), "eta_minutes": pos.get("eta_minutes"),
             "status": "queued"}
+
+
+@app.post("/api/v1/me/instances/{instance_id}/restart", status_code=202,
+          dependencies=[Depends(verify_client)])
+def my_restart_instance(instance_id: int, account_id: int = Depends(verify_client)):
+    """Restart my own workspace: same version, same data, back in about half a minute.
+
+    Available to every customer on their own workspace (Steward, 2026-10-08). Paced, so
+    it cannot be used to keep a workspace down, and refused mid-update.
+    """
+    inst = _get_owned_instance(account_id, instance_id)
+    return _restart_instance(inst, actor="customer")
 
 
 @app.get("/api/v1/me/backups/{backup_id}/download", dependencies=[Depends(verify_client)])
@@ -2404,6 +2460,15 @@ def admin_update_image(instance_id: int, payload: UpdateImageIn):
     update_queue.complete_manual(_manual_q, True, note="manual update from the dashboard",
                                  result_version=update_queue.tag_to_version(payload.image))
     return {"ok": True, "instance_id": instance_id, "image": new_image}
+
+
+@app.post("/api/v1/admin/instances/{instance_id}/restart", dependencies=[Depends(verify_admin)])
+def admin_restart_instance(instance_id: int):
+    """Restart any workspace in place. The admin is not paced and acts whenever needed."""
+    inst = db.get_instance(instance_id)
+    if not inst:
+        raise HTTPException(404, "Workspace not found.")
+    return _restart_instance(inst, actor="admin")
 
 
 @app.get("/api/v1/admin/instances/{instance_id}/image", dependencies=[Depends(verify_admin)])

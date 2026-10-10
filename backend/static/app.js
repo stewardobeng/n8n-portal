@@ -52,6 +52,7 @@
     n8nLatestTag: "",        // latest n8n release tag seen (admin update watch)
     n8nVersions: {},         // admin: instanceId -> {version, source} actually running (0.1.80)
     instUpdating: {},        // instanceId -> target tag while an n8n update runs
+    instRestarting: {},      // instanceId -> true while a restart is in flight (0.1.96)
     runnerBusy: {},          // instanceId -> "attach"|"detach" while a python-runner change runs
     busyModal: false         // true while a long-running action modal is open (render must not wipe it)
   };
@@ -715,7 +716,8 @@ var ICONS = {
     }
     return '<article class="workspace-item"><span class="workspace-logo">' + icon("workspace") + "</span>" +
       "<div><h3>" + esc(titleCase(inst.stack_name)) + " workspace" + wsPlanTag(inst) + "</h3><p>" + esc(inst.domain || "") + "</p></div>" +
-      (badgeHtml || "") + (actionHtml || "") + (inst ? selfUpdateHtml(inst) : "") + "</article>";
+      (badgeHtml || "") + (actionHtml || "") + (inst ? selfUpdateHtml(inst) : "") +
+      (inst ? restartHtml(inst) : "") + "</article>";
   }
 
   /* ---- self-update (0.1.85) ----------------------------------------------------
@@ -776,6 +778,20 @@ var ICONS = {
     }
     return "";
   }
+  function restartHtml(inst) {
+    /* Restart is NOT an update (Steward, 2026-10-08): the same container starts again on
+     * the same image with the same data, so it is offered to everyone on their own
+     * workspace and needs no permission and no release check. Nothing is offered while an
+     * update is queued or running for it, because the server refuses that on purpose, nor
+     * for a switched-off workspace, which has no container to start.
+     */
+    if (!inst || inst.locked) return "";
+    var info = myUpdateFor(inst);
+    if (info && info.queued) return "";
+    return '<button class="button secondary small-btn" data-action="ws-restart" data-id="' +
+      inst.id + '">' + icon("refresh") + " Restart</button>";
+  }
+
   async function ensureMyUpdates(force) {
     if (state.myUpdatesLoaded && !force) return;
     try {
@@ -1680,6 +1696,7 @@ var ICONS = {
               '<div class="wi-actions">' +
               '<button class="button secondary small-btn" data-action="admin-backup" data-id="' + i.id + '">' + icon("archive") + " Back up</button>" +
               '<button class="button secondary small-btn" data-action="admin-update-image" data-id="' + i.id + '"' + updDisabled(i) + '>' + icon("refresh") + (state.instUpdating[i.id] ? " Updating..." : " Update n8n") + "</button>" +
+              '<button class="button secondary small-btn" data-action="admin-restart" data-id="' + i.id + '"' + (state.instRestarting[i.id] ? " disabled" : "") + '>' + icon("refresh") + (state.instRestarting[i.id] ? " Restarting..." : " Restart") + "</button>" +
               '<button class="button secondary small-btn" data-action="runner-toggle" data-id="' + i.id + '"' + runDisabled(i) + '>' + icon(i.python_runner ? "close" : "spark") + (state.runnerBusy[i.id] ? (i.python_runner ? " Removing..." : " Attaching...") : (i.python_runner ? " Remove Python" : " Attach Python")) + "</button>" +
               "</div></article>";
         }).join("") : (wsKnown
@@ -2399,6 +2416,7 @@ var ICONS = {
         : '<button class="button secondary" data-action="reset-password" data-id="' + inst.id + '">' + icon("lock") + " Reset workspace password</button>") +
       '<button class="button secondary" data-action="admin-backup" data-id="' + inst.id + '">' + icon("archive") + " Back up</button>" +
       (inst ? '<button class="button secondary" data-action="admin-update-image" data-id="' + inst.id + '"' + updDisabled(inst) + '>' + icon("refresh") + (state.instUpdating[inst.id] ? " Updating..." : " Update n8n") + "</button>" : "") +
+      (inst ? '<button class="button secondary" data-action="admin-restart" data-id="' + inst.id + '"' + (state.instRestarting[inst.id] ? " disabled" : "") + '>' + icon("refresh") + (state.instRestarting[inst.id] ? " Restarting..." : " Restart") + "</button>" : "") +
       (inst ? '<button class="button secondary" data-action="runner-toggle" data-id="' + inst.id + '"' + runDisabled(inst) + '>' + icon(inst.python_runner ? "close" : "spark") + (inst.python_runner ? " Remove Python runner" : " Attach Python runner") + "</button>" : "") +
       "</div>");
   }
@@ -3391,6 +3409,39 @@ var ICONS = {
           .catch(function (e) {
             act.disabled = false;
             showToast("Could not request the update", (e && e.message) || "Try again later.");
+          });
+      }
+      else if (action === "ws-restart") {
+        // Same container, same version, same data: the customer is told what to expect
+        // and the server paces it, refusing with its own reason when it does not agree.
+        act.disabled = true;
+        api("/me/instances/" + Number(act.dataset.id) + "/restart", { method: "POST" })
+          .then(function (r) {
+            showToast("Restarting your workspace", (r && r.message) || "It is usually back in about half a minute.");
+            state.myUpdatesLoaded = false;
+            return ensureMyUpdates(true);
+          })
+          .catch(function (e) {
+            act.disabled = false;
+            showToast("Could not restart", (e && e.message) || "Try again in a moment.");
+          });
+      }
+      else if (action === "admin-restart") {
+        // The admin is not paced: restart is available whenever it is needed, and the
+        // workspace it applies to is named so a wrong click is visible immediately.
+        var rid = Number(act.dataset.id);
+        state.instRestarting[rid] = true;
+        render();
+        api("/admin/instances/" + rid + "/restart", { method: "POST" })
+          .then(function (r) {
+            state.instRestarting[rid] = false;
+            showToast("Restarting workspace", (r && r.message) || "It is usually back in about half a minute.");
+            return refreshAdminData().then(function () { render(); });
+          })
+          .catch(function (e) {
+            state.instRestarting[rid] = false;
+            render();
+            showToast("Could not restart", (e && e.message) || "Try again in a moment.");
           });
       }
       else if (action === "admin-attach") {

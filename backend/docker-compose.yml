@@ -3,7 +3,7 @@
 
 services:
   n8n-portal-backend:
-    image: n8n-portal-backend:0.1.95
+    image: n8n-portal-backend:0.1.96
     restart: unless-stopped
     ports:
       - "127.0.0.1:8788:8000"   # loopback-only binding (2026-09-03): NPM reaches us over my-main-net; no public exposure
@@ -68,6 +68,9 @@ services:
       - UPDATE_SELF_SERVICE_PLAN=${UPDATE_SELF_SERVICE_PLAN:-b}
       - UPDATE_CUSTOMER_COOLDOWN_HOURS=${UPDATE_CUSTOMER_COOLDOWN_HOURS:-24}
       - UPDATE_VERIFY_TIMEOUT_SECONDS=${UPDATE_VERIFY_TIMEOUT_SECONDS:-420}
+      # 0.1.95: budget when the update includes a first-time image download (~1.8 GB), which
+      # measured about eight minutes on the busiest server and overran the window above.
+      - UPDATE_VERIFY_TIMEOUT_PULL_SECONDS=${UPDATE_VERIFY_TIMEOUT_PULL_SECONDS:-1800}
     volumes:
       - portal_data:/data
     extra_hosts:

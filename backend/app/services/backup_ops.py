@@ -107,6 +107,27 @@ def _tag_version(ref: str) -> str:
     return m.group(1) if m else ""
 
 
+def restart_workspace(instance) -> str:
+    """Start this workspace's container again: same image, same volume, no update.
+
+    Restart is deliberately not an update path. It resolves the container (never
+    trusting a stored id, see resolve_container), asks Docker to restart that one
+    container, and returns its id. The stack is not touched, so nothing is pulled,
+    replaced or recreated, and the workspace keeps every byte of its data.
+
+    Raises RuntimeError with a plain-language message when there is nothing to
+    restart, because that is what the person who clicked needs to read.
+    """
+    pc = PortainerClient()
+    resolved = resolve_container(instance)
+    if not resolved:
+        raise RuntimeError("its container is not running at the moment")
+    env, cid = resolved
+    pc.restart_container(env, cid)
+    log.info("restarted workspace %s (container %s)", instance["stack_name"], cid[:12])
+    return cid
+
+
 def current_version(instance, allow_exec: bool = False) -> dict:
     """What this workspace is actually running: {version, source}.
 
