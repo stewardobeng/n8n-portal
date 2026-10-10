@@ -72,6 +72,42 @@ class PortainerClient:
             params={"all": "false"},
         ).json()
 
+    def image_present(self, endpoint_id: int, image: str) -> bool:
+        """Is this exact tag already on the environment?
+
+        Used to skip Portainer's pullImage on a stack update: with `pullImage=true`
+        the compose plugin re-fetches ~1.8 GB per workspace even when the tag is
+        cached, which is what turned a 12-workspace batch into hours of pulls and
+        pushed the busiest server past the verification window (2026-10-08).
+        """
+        want = image.strip()
+        if not want:
+            return False
+        try:
+            for img in self.list_images(endpoint_id):
+                for tag in (img.get("RepoTags") or []):
+                    if tag == want:
+                        return True
+        except Exception as e:  # noqa: BLE001 - unknown means "pull to be safe"
+            log.warning("image_present(%s, %s) failed: %s", endpoint_id, want, e)
+            raise
+        return False
+
+    def restart_container(self, endpoint_id: int, container_id: str, timeout: int = 30) -> None:
+        """Restart one container in place (no pull, no stack change).
+
+        Portainer forwards this to the Docker daemon, so the workspace comes back on
+        the same image and the same volume: a restart, not an update. Docker answers
+        204 and may return an empty body, which httpx must not try to parse.
+        """
+        self._req(
+            "POST",
+            f"/endpoints/{endpoint_id}/docker/containers/{container_id}/restart",
+            params={"t": str(int(timeout))},
+            json={},
+            timeout=float(timeout) + 60.0,
+        )
+
     def get_container(self, endpoint_id: int, container_id: str) -> dict:
         """Full container inspect (env vars, labels) on an environment."""
         return self._req(

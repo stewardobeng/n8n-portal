@@ -792,6 +792,15 @@ def process_row(qid: int) -> dict:
                     from_image=from_image, from_version=from_version)
         return {"ok": True, "note": "already current"}
 
+    # Does this server already have the tag? If not, the update includes a download and
+    # verification needs the larger budget.
+    image_was_local: bool | None = None
+    try:
+        from .portainer_client import PortainerClient
+        image_was_local = PortainerClient().image_present(env, target_image)
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not check whether %s is local to env %s: %s", target_image, env, e)
+
     try:
         backup_ops.update_instance_image(inst, target_image)
     except Exception as e:  # noqa: BLE001
@@ -800,9 +809,16 @@ def process_row(qid: int) -> dict:
         log.error("update failed for %s: %s", row["stack_name"], msg)
         return {"ok": False, "error": msg}
 
-    ok, detail, result_version = verify_update(inst, target_version, from_image=from_image,
-                                               from_version=from_version)
+    ok, detail, result_version, live_read = verify_update(
+        inst, target_version, from_image=from_image, from_version=from_version,
+        image_was_local=image_was_local)
     if not ok:
+        if not live_read:
+            # We never saw the container. Rolling back would recreate the workspace
+            # again on an unread state, so leave it exactly as it is and say so.
+            _finish_row(qid, "failed", error=detail[:400], note="unverified, left as it is",
+                        from_image=from_image, from_version=from_version)
+            return {"ok": False, "error": detail, "rolled_back": False, "unverified": True}
         rolled = _rollback(inst, from_image)
         _finish_row(qid, "failed",
                     error=detail[:400] + (" | rolled back to " + (from_version or from_image) if rolled
@@ -817,31 +833,59 @@ def process_row(qid: int) -> dict:
     return {"ok": True, "version": result_version, "note": detail}
 
 
-def verify_update(inst, target_version: str, *, from_image: str = "", from_version: str = "") -> tuple:
-    """Is the workspace it was asked to be, and is it alive? (0.1.85)
+# A version read that proves anything must come from the container itself:
+# "image-label" off the running container's image, or "exec" inside it. The "tag"
+# source reads the portal's OWN instances row, which is written before verification
+# runs, so accepting it is how a rollback could be triggered by a record we wrote.
+LIVE_VERSION_SOURCES = ("image-label", "exec")
 
-    Container running + the version the container really runs must both match. The
-    HTTP probe is recorded but not fatal: a workspace whose version answered cannot
-    be written off as broken just because the portal could not reach its domain.
+
+def verify_update(inst, target_version: str, *, from_image: str = "",
+                  from_version: str = "", image_was_local: bool | None = None) -> tuple:
+    """Is the workspace it was asked to be, and is it alive?
+
+    Returns (ok, detail, version, live_read). `live_read` is False when the portal
+    could not read the container at all, which callers must treat differently from
+    "the container is running the wrong version": one means the update may well have
+    landed, the other means it did not.
+
+    Two rules this cost real damage to learn (endpoint 4, 2026-10-08):
+      * Only a LIVE read counts. A version taken from the portal's own row always
+        claims what we were trying to do, never what is true.
+      * A first-time image download is not a failure. When the tag had to be fetched
+        the budget is much larger, because the download (about eight minutes on the
+        busiest server) happens before the container is recreated at all.
     """
-    deadline = _now() + max(int(VERIFY_FLOOR_SECONDS), int(settings.update_verify_timeout_seconds))
+    if image_was_local is False:
+        budget = max(int(VERIFY_FLOOR_SECONDS), int(settings.update_verify_timeout_pull_seconds))
+    else:
+        budget = max(int(VERIFY_FLOOR_SECONDS), int(settings.update_verify_timeout_seconds))
+    deadline = _now() + budget
     last = {}
+    saw_live = False
     while _now() < deadline:
         try:
             ver = backup_ops.current_version(inst, allow_exec=True) or {}
         except Exception as e:  # noqa: BLE001
             ver = {"version": "", "source": "unknown", "error": str(e)}
         last = ver
-        if (ver.get("version") or "") == target_version:
+        if (ver.get("source") or "") in LIVE_VERSION_SOURCES:
+            saw_live = True
+        if saw_live and (ver.get("version") or "") == target_version:
             http = _http_ok(inst)
             note = "verified running " + target_version
             if not http:
                 note += " (the portal could not reach its web address after the restart, worth a look)"
-            return True, note, target_version
+            return True, note, target_version, True
         time.sleep(8)
+    minutes = str(max(1, int(budget // 60)))
+    if not saw_live:
+        return False, ("the portal could not read this workspace's container at all after " + minutes +
+                       " minutes, so the running version is unknown (the update may have landed; "
+                       "nothing was rolled back)"), "", False
     seen = last.get("version") or "unknown"
-    return False, ("expected " + target_version + " but the workspace reports " + seen +
-                   " after " + str(max(1, int(settings.update_verify_timeout_seconds) // 60)) + " minutes"), seen
+    return False, ("expected " + target_version + " but the workspace is running " + seen +
+                   " after " + minutes + " minutes"), seen, True
 
 
 def _http_ok(inst) -> bool:

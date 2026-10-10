@@ -117,6 +117,12 @@ class Settings:
     update_self_service_plan: str = os.getenv("UPDATE_SELF_SERVICE_PLAN", "any")
     update_customer_cooldown_hours: int = int(os.getenv("UPDATE_CUSTOMER_COOLDOWN_HOURS", "24"))
     update_verify_timeout_seconds: int = int(os.getenv("UPDATE_VERIFY_TIMEOUT_SECONDS", "420"))
+    # When the target image is NOT on the server yet, the stack update has to download it
+    # (~1.8 GB) before the container can be recreated, so verification gets a bigger budget.
+    # Measured live on 2026-10-08: the busiest server needed about eight minutes for that
+    # download, which the 7-minute window above could not cover.
+    update_verify_timeout_pull_seconds: int = int(
+        os.getenv("UPDATE_VERIFY_TIMEOUT_PULL_SECONDS", "1800"))
     # Plan B stack = chibz/bigcroc owner tier (0.50 CPU / 1 GiB / heap 768)
     plan_b_compose_template_path: str = os.getenv(
         "PLAN_B_COMPOSE_TEMPLATE_PATH", "/app/templates/n8n-stack-compose-plus.yml"

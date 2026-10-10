@@ -220,6 +220,7 @@ def lock_instance(account_id: int) -> bool:
     forgot-password, no API). Absolute lock, per Steward 2026-09-01.
     Admin-attached stacks (managed=0, no Portainer stack record) are stopped at
     the container level via their recorded container_id (2026-09-02)."""
+    from . import backup_ops
     from .portainer_client import PortainerClient
 
     inst = db.get_active_instance(account_id)
@@ -230,8 +231,12 @@ def lock_instance(account_id: int) -> bool:
         return True  # already locked
     pc = PortainerClient()
     try:
-        if inst["managed"] == 0 and inst["container_id"]:
-            pc.stop_container(inst["environment_id"], inst["container_id"])
+        # Resolve rather than trust the stored id: it goes stale on every recreate, and
+        # stopping a container that no longer exists fails silently while the workspace
+        # keeps serving (found 2026-10-08).
+        resolved = backup_ops.resolve_container(inst, require_running=False)
+        if inst["managed"] == 0 and resolved:
+            pc.stop_container(resolved[0], resolved[1])
         else:
             pc.stop_stack(inst["stack_id"], inst["environment_id"])
     except Exception as e:
@@ -245,6 +250,7 @@ def lock_instance(account_id: int) -> bool:
 def unlock_instance(account_id: int) -> bool:
     """Start the tenant's stack again. Owner password is untouched, so the
     user logs in with their original credentials."""
+    from . import backup_ops
     from .portainer_client import PortainerClient
 
     inst = db.get_active_instance(account_id)
@@ -254,8 +260,9 @@ def unlock_instance(account_id: int) -> bool:
         return True  # already unlocked
     pc = PortainerClient()
     try:
-        if inst["managed"] == 0 and inst["container_id"]:
-            pc.start_container(inst["environment_id"], inst["container_id"])
+        resolved = backup_ops.resolve_container(inst, require_running=False)
+        if inst["managed"] == 0 and resolved:
+            pc.start_container(resolved[0], resolved[1])
         else:
             pc.start_stack(inst["stack_id"], inst["environment_id"])
     except Exception as e:

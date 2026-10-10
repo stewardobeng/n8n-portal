@@ -187,17 +187,32 @@ def true_versions(instances, pc: PortainerClient | None = None) -> dict:
     return out
 
 
-def resolve_container(instance) -> tuple[int, str] | None:
+def resolve_container(instance, require_running: bool = True) -> tuple[int, str] | None:
     """Return (endpoint_id, container_id) for an instance row, or None if the
-    container cannot be located (e.g. stopped stack on a live env)."""
+    container cannot be located (e.g. stopped stack on a live env).
+
+    A stored ``container_id`` is only a HINT, never the truth. Every recreate (an
+    image update, an environment change) replaces the container with a NEW id, and
+    trusting the old one had exactly one observable effect: Portainer answered
+    ``404 No such container``, the version read fell back to the portal's own
+    ``instances.image`` row, and that row always named the version we were updating
+    FROM or TO rather than what was live. So verification could never succeed and
+    the queue rolled a good update back, while a manual update (which never verifies)
+    looked fine. This hit every ``managed=0`` workspace on endpoint 4 and was found
+    on 2026-10-08 after seven recorded failures.
+    """
     pc = PortainerClient()
     env = int(instance["environment_id"])
-    # Admin-attached pre-existing stacks record the container directly.
     cid = _row_get(instance, "container_id", "")
-    if _row_get(instance, "managed", 1) == 0 and cid:
-        return env, cid
-    # Portal-provisioned / stack-managed: find the container whose compose
-    # project == stack_name on that environment.
+    if cid:
+        try:
+            insp = pc.get_container(env, cid)
+            running = bool((insp.get("State") or {}).get("Running"))
+            if running or not require_running:
+                return env, cid
+        except Exception:  # noqa: BLE001 - stale id or unreadable: fall through
+            pass
+    # Find the container whose compose project == stack_name on that environment.
     try:
         containers = pc.list_containers(env, all=True)
     except Exception as e:
@@ -210,9 +225,16 @@ def resolve_container(instance) -> tuple[int, str] | None:
             nm = n.lstrip("/")
             # container is named "<stack>-n8n-1" or "<stack>-n8n-2"
             if nm == f"{stack}-n8n-1" or nm.startswith(f"{stack}-n8n-"):
-                # only a running container can be archived/exec'd
-                if c.get("State") == "running":
-                    return env, c["Id"]
+                # only a running container can be archived/exec'd by default
+                if c.get("State") == "running" or not require_running:
+                    found = c["Id"]
+                    if found != cid:
+                        # self-heal, so the next call does not need the list scan
+                        try:
+                            db.update_instance(instance["id"], container_id=found)
+                        except Exception as e:  # noqa: BLE001
+                            log.warning("could not refresh container id for %s: %s", stack, e)
+                    return env, found
     return None
 
 
@@ -310,13 +332,15 @@ def update_instance_image(instance, image: str) -> None:
     image = image.strip()
     if not image:
         raise ValueError("Image tag is required.")
-    if ":" in image and not image.startswith("n8nio/n8n") and not image.startswith("n8n/n8n"):
-        # allow "n8nio/n8n:2.31.6" or "2.31.6"; strip a bare tag to n8nio/n8n:<tag>
-        pass
+    # Normalise to n8nio/n8n:<tag>. The old expression took the last PATH segment of
+    # "n8nio/n8n:2.43.2" (that is "n8n:2.43.2") and prefixed it again, so every
+    # workspace the QUEUE updated was recorded as "n8nio/n8n:n8n:2.43.2". The manual
+    # path passes a bare tag, which is why its rows looked clean, and the doubled
+    # value made the stored record disagree with what the stack really runs.
     tag = image.split("/")[-1]
-    full_image = f"n8nio/n8n:{tag}" if ":" in tag or not tag.startswith("latest") else image
-    if not full_image.startswith("n8nio/n8n") and not full_image.startswith("n8n/n8n"):
-        full_image = f"n8nio/n8n:{image}"
+    if ":" in tag:
+        tag = tag.split(":")[-1]
+    full_image = f"n8nio/n8n:{tag or 'latest'}"
 
     pc = PortainerClient()
     env = int(instance["environment_id"])
@@ -340,9 +364,19 @@ def update_instance_image(instance, image: str) -> None:
             raise ValueError(
                 "Cannot update image: this workspace has no Portainer stack "
                 "record. Attach it again or update it manually.")
-    pc.update_stack_image(int(stack_id), env, full_image)
+    # Pull only when the tag is genuinely missing on that server. A blind
+    # pullImage=true re-downloads roughly 1.8 GB per workspace even when the image is
+    # already cached, which is what made the env 4 batch take longer than the whole
+    # verification window and fail every workspace in it (2026-10-08).
+    try:
+        needs_pull = not pc.image_present(env, full_image)
+    except Exception as e:  # noqa: BLE001
+        log.warning("image presence check failed for %s: %s (pulling to be safe)", full_image, e)
+        needs_pull = True
+    pc.update_stack_image(int(stack_id), env, full_image, pull=needs_pull)
     db.update_instance(instance["id"], image=full_image)
-    log.info("instance %s image updated to %s", instance["stack_name"], full_image)
+    log.info("instance %s image updated to %s (pull=%s)",
+             instance["stack_name"], full_image, needs_pull)
     return full_image
 
 
