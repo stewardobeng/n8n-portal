@@ -139,7 +139,11 @@ def test_overview_counters_do_not_print_zero_before_the_lists_arrive():
     flat = _flat()
     assert "var acctKnown = state.adminAccountsLoaded;" in flat
     assert "var reqKnown = state.requestsLoaded;" in flat
-    for var, flag in (("awaiting", "reqKnown"), ("pastDue", "acctKnown"),
+    # 0.1.98: the first counter is people who opened the form and have not finished
+    # registering ('approved'/'token_sent' rows), because nothing waits for an
+    # approval any more and the old 'requested' counter would sit at zero forever.
+    assert "var pendingSignup = requests.filter" in flat
+    for var, flag in (("pendingSignup", "reqKnown"), ("pastDue", "acctKnown"),
                       ("locked", "acctKnown"), ("total", "acctKnown")):
         assert '+ (' + flag + ' ? ' + var + ' : "...") +' in flat, var
 

@@ -322,6 +322,9 @@ var ICONS = {
     );
   }
 
+  // Fallback only since 0.1.98: nothing sends a visitor here any more, because a
+  // first-time email opens the create-account form immediately. It is kept so an
+  // unexpected status still renders a real page instead of a blank screen.
   function requestPage() {
     var email = state.gateEmail || "your address";
     return authLayout(
@@ -346,11 +349,13 @@ var ICONS = {
 
   function codePage() {
     var email = state.gateEmail || "";
+    // 0.1.98 (Steward, 2026-10-11): this page is now the FIRST step of onboarding,
+    // not the result of an approval, so nothing here talks about being approved.
     return authLayout(
-      '<div class="eyebrow">Approved</div><h1>Create your account</h1>' +
-      '<p class="muted">Your request for <strong>' + esc(email) + '</strong> has been approved. Add your name and a password to create your account, then choose a plan. No code is needed.</p>' +
+      '<div class="eyebrow">Get started</div><h1>Create your account</h1>' +
+      '<p class="muted">Add your name and a password, then choose a plan to set up your first workspace. Your account will use <strong>' + esc(email) + '</strong>.</p>' +
       '<form data-form="code"><div class="form-grid">' +
-        '<div class="field full"><label>Email address</label><input value="' + esc(email) + '" readonly><span class="hint">This email is already approved for you.</span></div>' +
+        '<div class="field full"><label>Email address</label><input value="' + esc(email) + '" readonly><span class="hint">This is the email address you entered.</span></div>' +
         '<div class="field"><label>First name</label><input name="first_name" required maxlength="50"></div>' +
         '<div class="field"><label>Last name</label><input name="last_name" required maxlength="50"></div>' +
         '<div class="field"><label>Password</label><div class="input-row">' +
@@ -1146,7 +1151,10 @@ var ICONS = {
   function adminOverview() {
     var accounts = state.adminAccounts || [];
     var requests = state.requests || [];
-    var awaiting = requests.filter(function (r) { return r.status === "requested"; }).length;
+    // 0.1.98: nobody waits for an approval, so the useful number here is how many
+    // people opened the form and have not finished registering. The old counter
+    // (status 'requested') is dead and would sit at 0 forever.
+    var pendingSignup = requests.filter(function (r) { return r.status === "approved" || r.status === "token_sent"; }).length;
     var pastDue = accounts.filter(function (a) { return a.subscription_status === "past_due"; }).length;
     var locked = accounts.filter(function (a) { return a.subscription_status === "locked" || a.subscription_status === "canceled"; }).length;
     var total = accounts.length;
@@ -1160,8 +1168,8 @@ var ICONS = {
     return appLayout("admin", "Overview", "overview",
       '<main class="page">' + pageHead("Today at a glance", "See what needs attention and jump directly to the right task.") +
       '<div class="grid cols-4">' +
-        '<article class="card metric"><div class="metric-top"><span class="metric-icon">' + icon("requests") + "</span>" + statusBadge("awaiting", "Needs review") + "</div>" +
-          '<div class="metric-value">' + (reqKnown ? awaiting : "...") + '</div><p class="muted">Access requests awaiting approval</p><a href="#/admin/requests">Review requests ' + icon("arrow") + '</a></article>' +
+        '<article class="card metric"><div class="metric-top"><span class="metric-icon">' + icon("requests") + "</span>" + statusBadge("approved", "Not registered yet") + "</div>" +
+          '<div class="metric-value">' + (reqKnown ? pendingSignup : "...") + '</div><p class="muted">Opened the form, not yet registered</p><a href="#/admin/requests">Review requests ' + icon("arrow") + '</a></article>' +
         '<article class="card metric"><div class="metric-top"><span class="metric-icon" style="background:var(--amber-100);color:var(--amber-700)">' + icon("warning") + "</span></div>" +
           '<div class="metric-value">' + (acctKnown ? pastDue : "...") + '</div><p class="muted">Accounts past due</p><a href="#/admin/accounts">View accounts ' + icon("arrow") + '</a></article>' +
         '<article class="card metric"><div class="metric-top"><span class="metric-icon" style="background:var(--green-100);color:var(--green-700)">' + icon("workspace") + "</span></div>" +

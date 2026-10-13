@@ -13,7 +13,7 @@
 #      -> the registration form opens (email locked).
 #   5. Registration consumes the token; the visitor is auto-logged-in. Returning
 #      users always take the "login" branch (email + password), never a token.
-
+#
 # 0.1.77 (Steward, 2026-10-01): THE CODE IS GONE. An admin APPROVAL is the gate.
 #   3'. The admin clicks Approve -> status 'approved', no token is generated and
 #       none is emailed; the person is told their access has been approved.
@@ -21,6 +21,14 @@
 #       form opens and no code is typed. Rows left in 'token_sent' were approved
 #       before 0.1.77, so they take the same branch.
 #   5'. Registration signs them in directly (create_client_token).
+#
+# 0.1.98 (Steward, 2026-10-11): THE APPROVAL QUEUE IS GONE TOO. A first-time email
+#   opens the create-account form immediately; the request row is created already
+#   approved, so the audit trail and the Disapprove/Delete controls remain and
+#   'denied' still blocks an address permanently. Waiting for a human is no longer
+#   part of onboarding, and payment is the gate that matters: a registered account
+#   is born unpaid (subscription_status 'none') and cannot provision a workspace
+#   until a verified payment sets it active.
 
 import secrets
 import string
@@ -45,6 +53,24 @@ def _generate_token() -> str:
     return f"{raw[:4]}-{raw[4:]}"
 
 
+def _auto_approve(request_id: int, email: str) -> dict:
+    """Open registration for this address without a human approval (0.1.98).
+
+    The approval row is still created and kept, stamped exactly as the admin's own
+    approve action stamps it (approved, no code, no expiry), so the audit trail and
+    the admin's Disapprove/Delete controls survive. What is gone is the WAIT: the
+    visitor reaches the create-account form on their first visit.
+    """
+    db.update_access_request(
+        request_id,
+        status="approved",
+        token_hash="",
+        token_sent_at=int(time.time()),
+        token_expires_at=None,
+    )
+    return {"action": "approved", "email": email}
+
+
 def check_email(email: str) -> dict:
     """Branch decision for the email-only first page."""
     email = email.strip().lower()
@@ -52,23 +78,21 @@ def check_email(email: str) -> dict:
         return {"action": "login", "email": email}
     req = db.get_access_request(email)
     if not req:
-        db.create_access_request(email)
-        return {"action": "requested", "email": email}
-    if req["status"] == "registered":
-        # registered but account missing is an inconsistency; treat as new request
-        db.update_access_request(req["id"], status="requested", token_hash="",
-                                 token_sent_at=None, token_expires_at=None)
-        return {"action": "requested", "email": email}
-    if req["status"] == "canceled":
-        db.update_access_request(req["id"], status="requested", token_hash="")
-        return {"action": "requested", "email": email}
-    if req["status"] in ("approved", "token_sent"):
-        # 0.1.77 (Steward): approval is the gate, so both the new 'approved' state
-        # and rows issued a code before this change open the registration form.
-        return {"action": "approved", "email": email}
+        # 0.1.98 (Steward, 2026-10-11): no approval queue. A first-time email goes
+        # straight to the registration form; payment is what gates a workspace, not
+        # an admin click.
+        return _auto_approve(db.create_access_request(email), email)
     if req["status"] == "denied":
+        # Kept deliberately: Disapprove is still the one thing that blocks an
+        # address, and it stays blocked however many times it asks again.
         return {"action": "denied", "email": email}
-    return {"action": "waiting", "email": email}
+    if req["status"] in ("approved", "token_sent"):
+        # 'token_sent' rows are pre-0.1.77 approvals and open the same page.
+        return {"action": "approved", "email": email}
+    # request rows left over from the approval era ('requested'), a cancelled row,
+    # or a 'registered' row whose account is missing: approve now rather than make
+    # the person wait for a human who is no longer in the path.
+    return _auto_approve(req["id"], email)
 
 
 def deny_request(request_id: int) -> None:

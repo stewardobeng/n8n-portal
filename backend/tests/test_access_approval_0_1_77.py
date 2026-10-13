@@ -60,12 +60,16 @@ def test_email_failure_is_reported_and_not_fatal(tmp_path, monkeypatch):
 
 
 def test_gate_opens_for_new_and_pre_change_approvals(tmp_path, monkeypatch):
+    """0.1.98: a first-time address needs no human, so it opens registration at once.
+    The admin Approve action and pre-0.1.77 'token_sent' rows still work, which is
+    what keeps old rows and the Disapprove/Delete controls meaningful."""
     rid = _seed(tmp_path, monkeypatch, "gate@steprotech.com")
     db.create_access_request("legacy@steprotech.com")
     client = _client()
 
+    # a request nobody approved opens the form anyway
     assert client.post("/api/v1/auth/check",
-                       json={"email": "gate@steprotech.com"}).json()["action"] == "waiting"
+                       json={"email": "gate@steprotech.com"}).json()["action"] == "approved"
     access_gate.approve_request(rid)
     assert client.post("/api/v1/auth/check",
                        json={"email": "gate@steprotech.com"}).json()["action"] == "approved"
