@@ -60,6 +60,54 @@ class PortainerClient:
             params={"all": "true" if all else "false"},
         ).json()
 
+    def list_images(self, endpoint_id: int) -> list[dict]:
+        """Images on an environment (tags, repo digests, labels).
+
+        Needed because a container's ``Image`` field is only a NAME while its
+        image still carries tags: an untagged image is reported as a bare
+        ``sha256:...`` id, which no name-based n8n check can recognise.
+        """
+        return self._req(
+            "GET", f"/endpoints/{endpoint_id}/docker/images/json",
+            params={"all": "false"},
+        ).json()
+
+    def image_present(self, endpoint_id: int, image: str) -> bool:
+        """Is this exact tag already on the environment?
+
+        Used to skip Portainer's pullImage on a stack update: with `pullImage=true`
+        the compose plugin re-fetches ~1.8 GB per workspace even when the tag is
+        cached, which is what turned a 12-workspace batch into hours of pulls and
+        pushed the busiest server past the verification window (2026-10-08).
+        """
+        want = image.strip()
+        if not want:
+            return False
+        try:
+            for img in self.list_images(endpoint_id):
+                for tag in (img.get("RepoTags") or []):
+                    if tag == want:
+                        return True
+        except Exception as e:  # noqa: BLE001 - unknown means "pull to be safe"
+            log.warning("image_present(%s, %s) failed: %s", endpoint_id, want, e)
+            raise
+        return False
+
+    def restart_container(self, endpoint_id: int, container_id: str, timeout: int = 30) -> None:
+        """Restart one container in place (no pull, no stack change).
+
+        Portainer forwards this to the Docker daemon, so the workspace comes back on
+        the same image and the same volume: a restart, not an update. Docker answers
+        204 and may return an empty body, which httpx must not try to parse.
+        """
+        self._req(
+            "POST",
+            f"/endpoints/{endpoint_id}/docker/containers/{container_id}/restart",
+            params={"t": str(int(timeout))},
+            json={},
+            timeout=float(timeout) + 60.0,
+        )
+
     def get_container(self, endpoint_id: int, container_id: str) -> dict:
         """Full container inspect (env vars, labels) on an environment."""
         return self._req(
@@ -113,6 +161,12 @@ class PortainerClient:
         # still PUT + pull. Only raise when the image line is not present at all.
         new_content, n_subs = re.subn(r"(image:\s*n8nio/n8n:)[^\s]+",
                                       r"\g<1>" + tag, content)
+        if n_subs:
+            # Keep an attached Python-runner sidecar version-locked to n8n
+            # (n8n requires the runners image tag to match). Absent line = no
+            # sidecar on this stack; the substitution simply does not fire.
+            from .python_runner import sync_runner_image
+            new_content = sync_runner_image(new_content)
         if n_subs == 0:
             raise RuntimeError(f"Image '{image}' not found in stack {stack_id} compose.")
         detail = self.get_stack(stack_id)
@@ -207,6 +261,22 @@ class PortainerClient:
         }
         self._req(
             "PUT", f"/stacks/{stack_id}?endpointId={endpoint_id}", json=payload
+        )
+
+    def update_stack_file(self, stack_id: int, endpoint_id: int,
+                          stack_file_content: str, env_vars: list[dict],
+                          prune: bool = False, timeout: float = 600.0) -> None:
+        """PUT a fully-composed stack file + env (the python-runner attach/
+        detach path). Long timeout: first deploy of n8nio/runners pulls the
+        image over the internet and can take minutes."""
+        payload = {
+            "env": env_vars,
+            "prune": prune,
+            "stackFileContent": stack_file_content,
+        }
+        self._req(
+            "PUT", f"/stacks/{stack_id}?endpointId={endpoint_id}",
+            json=payload, timeout=timeout,
         )
 
     def delete_stack(self, stack_id: int, endpoint_id: int) -> None:

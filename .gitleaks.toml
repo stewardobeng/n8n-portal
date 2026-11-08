@@ -1,0 +1,21 @@
+# Gitleaks config for the portal repo.
+#
+# Kept deliberately narrow. Only test fixtures and the .env *example* template are allowlisted, both
+# of which hold made-up values by design. Nothing under app/, static/ or scripts/ is exempt, so a real
+# key pasted into application code still fails the scan.
+#
+# Scan with:  gitleaks git --redact --no-banner -c .gitleaks.toml .
+# Lesson that produced this file: the example template carried a real-looking 40-char sample under
+# N8N_ENCRYPTION_KEY, which gitleaks flagged and which cost a hash-by-hash check across the live fleet
+# to clear. A placeholder is cheaper to reason about than a sample that looks like a key.
+
+title = "n8n portal"
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test fixtures and the example env template hold invented values"
+paths = [
+  '''backend/tests/.*\.py''',
+  '''templates/.*\.env\.example''',
+]

@@ -18,7 +18,7 @@ import qrcode
 from .. import db
 from ..security import hash_password, verify_password
 from .emailer import send_email, EmailError
-from . import passkeys
+from app.services import passkeys, sms
 
 RESET_TOKEN_TTL = 3600 * 1          # reset link valid 1 hour
 OTP_TTL = 300                        # email OTP valid 5 minutes
@@ -45,6 +45,13 @@ class SecurityError(Exception):
 
 
 def _rand_otp() -> str:
+    """The one code format, six digits (0.1.92, Steward: "can we bring back the numbers only otp").
+
+    0.1.91 briefly used letters on the theory that a numeric code in a text looks like an OTP
+    blast. The controlled A/B on 2026-10-08 settled it the other way: from a working Sender ID
+    the numeric message DELIVERED, and from the OTP-purpose sender the letters one was REJECTED.
+    Content was never the blocker, so the codes are digits again and the ordinary wording stays.
+    """
     return "".join(secrets.choice(string.digits) for _ in range(OTP_LEN))
 
 
@@ -219,11 +226,27 @@ def enabled_methods(account_id: int) -> list[dict]:
 
 # ---------- admin 2FA (single shared admin, stored in settings) ----------
 
-ADMIN_2FA_SETTING = "admin_2fa"          # "totp,email" | "totp" | "email" | ""
+ADMIN_2FA_SETTING = "admin_2fa"          # any combination of "totp,email,sms"
 ADMIN_TOTP_SECRET = "admin_totp_secret"
 ADMIN_OTP_HASH = "admin_otp_hash"
 ADMIN_OTP_EXPIRES = "admin_otp_expires"
-ADMIN_EMAIL = "admin@steprotech.com"
+ADMIN_OTP_CHANNEL = "admin_otp_channel"  # which way the live code went: "email" | "sms"
+ADMIN_EMAIL = "admin@steprotech.com"     # the original hardcoded address, kept as fallback
+ADMIN_EMAIL_SETTING = "admin_email"      # Steward's own address (editable, 0.1.90)
+ADMIN_PHONE_SETTING = "admin_phone"      # where SMS codes go (editable, 0.1.90)
+
+
+def admin_email() -> str:
+    """Where an admin email code goes: Steward's setting, else the original address."""
+    return (db.get_setting(ADMIN_EMAIL_SETTING) or "").strip() or ADMIN_EMAIL
+
+
+def admin_phone() -> str:
+    return (db.get_setting(ADMIN_PHONE_SETTING) or "").strip()
+
+
+def admin_phone_ok() -> bool:
+    return sms.normalise_phone(admin_phone()) is not None
 
 
 def _admin_methods() -> list[dict]:
@@ -232,19 +255,43 @@ def _admin_methods() -> list[dict]:
     if "totp" in val:
         out.append({"method": "totp", "label": "Authenticator app", "enabled": True})
     if "email" in val:
-        out.append({"method": "email", "label": "Email code", "enabled": True})
+        out.append({"method": "email", "label": "Email code", "enabled": True,
+                    "to": mask_email(admin_email())})
+    # SMS shows up only when it is switched on AND there is a number to send to, so the
+    # login screen never offers a channel that cannot deliver (0.1.90).
+    if "sms" in val and admin_phone_ok():
+        out.append({"method": "sms", "label": "Text message (SMS)", "enabled": True,
+                    "to": sms.mask_phone(admin_phone())})
     # passkey as a second factor for the admin (registered credential)
     if passkeys.list_passkeys_for("admin"):
         out.append({"method": "passkey", "label": "Passkey", "enabled": True})
     return out
 
 
+def mask_email(addr: str) -> str:
+    """Show just enough of an address to recognise it: g****@gmail.com."""
+    addr = (addr or "").strip()
+    if "@" not in addr:
+        return addr
+    name, _, domain = addr.partition("@")
+    keep = name[:1]
+    return "%s%s@%s" % (keep, "*" * max(3, len(name) - 1), domain)
+
+
 def admin_2fa_state() -> dict:
+    val = db.get_setting(ADMIN_2FA_SETTING) or ""
     return {
         "methods": _admin_methods(),
-        "totp_enabled": "totp" in (db.get_setting(ADMIN_2FA_SETTING) or ""),
-        "email_2fa": "email" in (db.get_setting(ADMIN_2FA_SETTING) or ""),
+        "totp_enabled": "totp" in val,
+        "email_2fa": "email" in val,
+        "sms_2fa": "sms" in val,
         "has_totp_secret": bool(db.get_setting(ADMIN_TOTP_SECRET)),
+        "admin_email": admin_email(),
+        "admin_email_masked": mask_email(admin_email()),
+        "has_phone": admin_phone_ok(),
+        "admin_phone_masked": sms.mask_phone(admin_phone()),
+        # The Security page needs to explain why SMS cannot be switched on yet.
+        "sms_can_enable": admin_phone_ok() and sms.configured(),
     }
 
 
@@ -253,7 +300,7 @@ def admin_totp_setup() -> dict:
     if not secret:
         secret = pyotp.random_base32()
         db.set_setting(ADMIN_TOTP_SECRET, secret)
-    uri = pyotp.totp.TOTP(secret).provisioning_uri(ADMIN_EMAIL, issuer_name="SteProTECH Portal")
+    uri = pyotp.totp.TOTP(secret).provisioning_uri(admin_email(), issuer_name="SteProTECH Portal")
     return {"secret": secret, "uri": uri, "qr": _qr_data_uri(uri)}
 
 
@@ -283,26 +330,94 @@ def admin_totp_verify_code(code: str) -> bool:
     return pyotp.totp.TOTP(secret).verify(code.strip(), valid_window=1)
 
 
-def admin_email_send_otp() -> dict:
-    code = _rand_otp()
+def _store_otp(code: str, channel: str) -> None:
+    """One code slot for the admin, with the channel recorded, so a resend goes the same
+    way and only the newest code is ever valid."""
     db.set_setting(ADMIN_OTP_HASH, hash_password(code))
     db.set_setting(ADMIN_OTP_EXPIRES, str(int(time.time()) + OTP_TTL))
-    _send_otp_email(ADMIN_EMAIL, "Administrator", code)
-    return {"sent": True, "ttl_seconds": OTP_TTL}
+    db.set_setting(ADMIN_OTP_CHANNEL, channel)
+
+
+def admin_send_otp(channel: str = "email") -> dict:
+    """Send the admin one-time code by email or by SMS (0.1.90)."""
+    channel = (channel or "email").strip().lower()
+    if channel not in ("email", "sms"):
+        raise SecurityError("Unknown code channel.")
+    if channel == "sms":
+        to = admin_phone()
+        if not admin_phone_ok():
+            raise SecurityError("Add your phone number in Settings before using SMS codes.")
+        if not sms.configured():
+            raise SecurityError("No mNotify API key has been saved yet. Add it in Settings.")
+        code = _rand_otp()
+        _store_otp(code, "sms")
+        try:
+            info = sms.send_otp_code(to, code, minutes=max(1, OTP_TTL // 60))
+        except sms.SmsError as e:
+            # Nothing was delivered, so do not leave a live code sitting in the slot.
+            db.set_setting(ADMIN_OTP_HASH, "")
+            db.set_setting(ADMIN_OTP_EXPIRES, "0")
+            raise SecurityError(str(e)) from None
+        return {"sent": True, "channel": "sms", "ttl_seconds": OTP_TTL,
+                "to": info.get("to") or sms.mask_phone(to),
+                "credit_left": info.get("credit_left")}
+    code = _rand_otp()
+    _store_otp(code, "email")
+    _send_otp_email(admin_email(), "Administrator", code)
+    return {"sent": True, "channel": "email", "ttl_seconds": OTP_TTL,
+            "to": mask_email(admin_email())}
+
+
+def admin_email_send_otp() -> dict:
+    """Kept for the existing call sites: the emailed code."""
+    return admin_send_otp("email")
+
+
+def admin_sms_send_otp() -> dict:
+    return admin_send_otp("sms")
+
+
+def admin_otp_channel() -> str:
+    """Which channel the live code went out on, so resend uses the same one."""
+    return (db.get_setting(ADMIN_OTP_CHANNEL) or "email").strip() or "email"
 
 
 def admin_email_otp_verify(code: str) -> bool:
+    """Verify the live admin code. Channel-agnostic on purpose: the code in the slot is
+    the code, whichever way it was delivered."""
     if int(db.get_setting(ADMIN_OTP_EXPIRES) or 0) < time.time():
         return False
-    if not verify_password(code.strip(), db.get_setting(ADMIN_OTP_HASH) or ""):
+    # .upper() so a lettered code typed in lower case still works (SMS codes are letters).
+    if not verify_password(code.strip().upper(), db.get_setting(ADMIN_OTP_HASH) or ""):
         return False
     db.set_setting(ADMIN_OTP_HASH, "")
     db.set_setting(ADMIN_OTP_EXPIRES, "0")
     return True
 
 
+admin_otp_verify = admin_email_otp_verify
+
+
 def admin_email_enable() -> None:
     cur = db.get_setting(ADMIN_2FA_SETTING) or ""
     if "email" not in cur:
         db.set_setting(ADMIN_2FA_SETTING, (cur + ",email").strip(","))
+
+
+def admin_sms_enable() -> None:
+    """Turn SMS on for the admin. The caller must have verified a code first, and the
+    number must exist - otherwise login would offer a channel that cannot deliver."""
+    if not admin_phone_ok():
+        raise SecurityError("Add your phone number in Settings before turning on SMS 2FA.")
+    if not sms.configured():
+        raise SecurityError("No mNotify API key has been saved yet. Add it in Settings.")
+    cur = db.get_setting(ADMIN_2FA_SETTING) or ""
+    if "sms" not in cur:
+        db.set_setting(ADMIN_2FA_SETTING, (cur + ",sms").strip(","))
+
+
+def admin_sms_disable() -> None:
+    cur = db.get_setting(ADMIN_2FA_SETTING) or ""
+    cur = ",".join(x for x in cur.split(",") if x != "sms")
+    db.set_setting(ADMIN_2FA_SETTING, cur)
 

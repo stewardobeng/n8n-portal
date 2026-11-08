@@ -115,15 +115,26 @@ def ensure_plan_b() -> str:
 
 
 def initialize_checkout(account_id: int, email: str, plan: str = "a") -> dict:
-    """Create a Paystack transaction for the annual plan. Returns
-    {authorization_url, reference, access_code} for the client redirect."""
+    """Create a Paystack transaction for the annual charge. Returns
+    {authorization_url, reference, access_code} for the client redirect.
+
+    NO PLAN OBJECT (0.1.75, Steward 2026-09-28): attaching a Paystack plan turns
+    the transaction into a SUBSCRIPTION, and a subscription checkout is card-only
+    (recurring charges cannot run on mobile money, so Paystack withholds that
+    channel). Without the plan this is a plain one-off annual charge, which
+    offers every channel the account has enabled: card, mobile money and bank
+    transfer. Renewal then belongs to the portal: the customer repays from the
+    billing page (or from a renewal link) and charge.success EXTENDS paid_until.
+
+    Package resolution is unaffected: `_resolve_plan` matches the plan code when
+    one is configured and otherwise falls back to the amount (50000 minor units
+    is package b), and `_check_amount` still gates live money.
+    """
     is_b = plan == "b"
-    plan_code = ensure_plan_b() if is_b else ensure_plan()
     payload = {
         "email": email,
         "amount": settings.plan_b_amount_minor if is_b else settings.plan_amount_minor,
         "currency": settings.plan_currency,
-        "plan": plan_code,
         # `app` tags this transaction so the shared Paystack webhook router can
         # route it to the correct website (Steward 2026-09-03: one account, many
         # sites -> a single router fans events out by this tag).
@@ -162,7 +173,11 @@ def handle_event(event: dict) -> dict:
     ROUTER GUARD (2026-09-03, Steward): the portal shares one Paystack account
     with other websites via a webhook router. Events are tagged with `metadata.app`.
     Ignore any event not tagged for this portal so a misrouted event can never
-    touch portal billing state."""
+    touch portal billing state.
+
+    IDEMPOTENCY (0.1.67): charge.success is claimed by (gateway, event, reference)
+    before any state change; a duplicate delivery is a recorded no-op, so a
+    router re-drive or replay can never extend a subscription twice."""
     from . import billing
 
     event_type = event.get("event", "")
@@ -175,6 +190,17 @@ def handle_event(event: dict) -> dict:
         return {"status": "ignored", "event": event_type}
 
     if event_type == "charge.success":
+        reference = data.get("reference") or ""
+        if not db.claim_event("paystack", event_type, reference):
+            log.warning("Duplicate Paystack charge.success ref=%s; ignoring "
+                        "(already processed)", reference)
+            return {"status": "duplicate_ignored", "reference": reference}
+        amount_error = _check_amount(data)
+        if amount_error:
+            log.error("Paystack charge.success ref=%s rejected: %s",
+                      reference, amount_error)
+            return {"status": "amount_mismatch", "reference": reference,
+                    "error": amount_error}
         return _on_charge_success(data)
     if event_type == "invoice.payment_failed":
         return _on_payment_failed(data)
@@ -194,6 +220,29 @@ def handle_event(event: dict) -> dict:
             )
         return {"status": "subscription_created"}
     return {"status": "ignored", "event": event_type}
+
+
+def _check_amount(data: dict) -> str:
+    """Reject a charge whose amount does not match either plan price when
+    expectations are configured. Returns '' when acceptable, else a reason."""
+    amount = data.get("amount")
+    if not amount:
+        return ""
+    try:
+        amount = int(amount)
+    except (TypeError, ValueError):
+        return "event amount is not an integer"
+    exp_a = settings.paystack_expected_amount_a
+    exp_b = settings.paystack_expected_amount_b
+    allowed = set()
+    if exp_a:
+        allowed.add(int(exp_a))
+    if exp_b and settings.plan_b_active:
+        allowed.add(int(exp_b))
+    if allowed and amount not in allowed:
+        return (f"amount {amount} does not match any plan price "
+                f"({sorted(allowed)})")
+    return ""
 
 
 def _resolve_plan(data: dict) -> str:
@@ -241,8 +290,14 @@ def _on_charge_success(data: dict) -> dict:
             "Paystack charge.success for %s account %s; NOT reactivating (admin state)",
             billing._row_get(account, "account_state", "active"), account["id"])
         return {"status": "ignored_suspended", "account_id": account["id"]}
-    # annual: paid_until = now + 1 year (Paystack renews yearly on the plan)
-    paid_until = int(time.time()) + 365 * 24 * 3600
+    # Annual term, and a payment EXTENDS the term instead of resetting it
+    # (0.1.75): with the Paystack plan gone, renewal is a customer action, so
+    # paying while still active must ADD a year to the remaining time, and
+    # paying after expiry starts a fresh year from today. Same rule the admin
+    # free-extend already uses.
+    now = int(time.time())
+    current_until = int(billing._row_get(account, "paid_until", 0) or 0)
+    paid_until = max(now, current_until) + 365 * 24 * 3600
     customer = data.get("customer") or {}
     sub = data.get("subscription") or {}
     db.set_subscription(
@@ -253,6 +308,20 @@ def _on_charge_success(data: dict) -> dict:
         paid_until=paid_until,
     )
     billing.unlock_instance(account["id"])
+    # AUTO-PROVISION (0.1.71, Steward): a paid customer with NO workspace yet
+    # gets one created immediately from their signup details (name, username,
+    # password already on the account) - no extra click needed. Existing
+    # workspaces are untouched; extra workspaces still go through the admin /
+    # explicit request flow.
+    try:
+        if db.count_instances(account["id"]) == 0:
+            from . import provisioner as _prov
+            _prov.provision_account(account["id"])
+            log.info("Auto-provisioned first workspace for account %s after payment",
+                     account["id"])
+    except Exception as e:
+        log.error("Auto-provision after payment failed for account %s: %s",
+                  account["id"], e)
     log.info("Paystack charge success; account %s active until %s",
              account["id"], paid_until)
     return {"status": "active", "account_id": account["id"], "paid_until": paid_until}

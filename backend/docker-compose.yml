@@ -3,7 +3,7 @@
 
 services:
   n8n-portal-backend:
-    image: n8n-portal-backend:0.1.62
+    image: n8n-portal-backend:0.1.98
     restart: unless-stopped
     ports:
       - "127.0.0.1:8788:8000"   # loopback-only binding (2026-09-03): NPM reaches us over my-main-net; no public exposure
@@ -34,6 +34,13 @@ services:
       - PLAN_CURRENCY=${PLAN_CURRENCY}
       - PLAN_AMOUNT_MINOR=${PLAN_AMOUNT_MINOR}
       - PAYSTACK_SECRET_KEY=${PAYSTACK_SECRET_KEY}
+      # live-money guards (2026-09-27 go-live): the router already sends
+      # x-router-secret, so setting the matching value here makes the second
+      # lock active, and the expected amounts reject any charge that is not
+      # exactly a plan price.
+      - PAYSTACK_ROUTER_SECRET=${PAYSTACK_ROUTER_SECRET}
+      - PAYSTACK_EXPECTED_AMOUNT_A=${PAYSTACK_EXPECTED_AMOUNT_A}
+      - PAYSTACK_EXPECTED_AMOUNT_B=${PAYSTACK_EXPECTED_AMOUNT_B}
       - PAYSTACK_PLAN_CODE=${PAYSTACK_PLAN_CODE}
       - PAYSTACK_PLAN_CODE_B=${PAYSTACK_PLAN_CODE_B}
       - PLAN_B_ACTIVE=${PLAN_B_ACTIVE}
@@ -41,9 +48,29 @@ services:
       - PLAN_B_AMOUNT_MINOR=${PLAN_B_AMOUNT_MINOR}
       - PAYSTACK_CALLBACK_URL=${PAYSTACK_CALLBACK_URL}
       - LOCK_GRACE_DAYS=${LOCK_GRACE_DAYS}
+      # Renewal reminders (0.1.76): OFF unless the stack env sets it, so a
+      # recreate can never email customers before Steward approves the wording.
+      - RENEWAL_REMINDERS_ENABLED=${RENEWAL_REMINDERS_ENABLED:-false}
       - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
       - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET}
       - STRIPE_PRICE_ID=${STRIPE_PRICE_ID}
+      # Workspace update queue (0.1.85, Steward 2026-10-07): one workspace at a time
+      # PER SERVER with a five minute quiet gap after each one is verified stable, so
+      # three servers mean three streams. An admin batch goes ahead of customer
+      # requests; a manual admin update still runs immediately (it takes that host's
+      # slot). No safety backup is taken before an update, by Steward's instruction (it
+      # would fill the server's own storage); the previous version is recorded so a
+      # workspace can be pinned back, and external backup storage can be added later.
+      # The report address is an env setting so it changes without a release.
+      - UPDATE_WORKER_ENABLED=${UPDATE_WORKER_ENABLED:-true}
+      - UPDATE_INTERVAL_MINUTES=${UPDATE_INTERVAL_MINUTES:-5}
+      - UPDATE_REPORT_TO=${UPDATE_REPORT_TO:-stewardobeng@gmail.com}
+      - UPDATE_SELF_SERVICE_PLAN=${UPDATE_SELF_SERVICE_PLAN:-b}
+      - UPDATE_CUSTOMER_COOLDOWN_HOURS=${UPDATE_CUSTOMER_COOLDOWN_HOURS:-24}
+      - UPDATE_VERIFY_TIMEOUT_SECONDS=${UPDATE_VERIFY_TIMEOUT_SECONDS:-420}
+      # 0.1.95: budget when the update includes a first-time image download (~1.8 GB), so a
+      # slow registry cannot be mistaken for a failed update (pulls here measure 72-91s).
+      - UPDATE_VERIFY_TIMEOUT_PULL_SECONDS=${UPDATE_VERIFY_TIMEOUT_PULL_SECONDS:-1800}
     volumes:
       - portal_data:/data
     extra_hosts:

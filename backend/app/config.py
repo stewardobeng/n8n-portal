@@ -60,6 +60,20 @@ class Settings:
     compose_template_path: str = os.getenv(
         "COMPOSE_TEMPLATE_PATH", "/app/templates/n8n-stack-compose.yml"
     )
+    # --- Which n8n version NEW workspaces get (0.1.81) ---
+    # A new workspace is pinned to a real release tag, never the floating
+    # `latest` tag: `latest` is resolved per host at every container recreate,
+    # so attaching a Python runner or any Portainer redeploy could silently
+    # move a customer onto a newer n8n and run its one-way DB migrations with
+    # nobody deciding it (Steward, 2026-10-06).
+    # Default: pin the newest release published on Docker Hub at provision
+    # time, so a new customer still starts current.
+    # N8N_PROVISION_TAG (optional) holds new workspaces on a chosen version and
+    # wins over the lookup; N8N_FALLBACK_TAG is used when the lookup cannot be
+    # reached, so provisioning never falls back to a floating tag.
+    n8n_provision_tag: str = os.getenv("N8N_PROVISION_TAG", "").strip()
+    n8n_fallback_tag: str = os.getenv("N8N_FALLBACK_TAG", "2.43.1").strip()
+
     data_dir: str = "/data"
     backup_dir: str = os.getenv("BACKUP_DIR", "/data/backups")
 
@@ -77,6 +91,39 @@ class Settings:
     plan_b_name: str = os.getenv("PLAN_B_NAME", "n8n Workspace Plus")
     plan_b_amount_minor: int = int(os.getenv("PLAN_B_AMOUNT_MINOR", "50000"))  # GHS 500 / year
     plan_b_active: bool = os.getenv("PLAN_B_ACTIVE", "false").lower() == "true"
+    # Renewal reminders (0.1.76): with the Paystack plan removed there is no
+    # automatic renewal, so the portal emails the customer before and after the
+    # term ends, each mail carrying a login-free renewal link. Sending stays OFF
+    # until Steward approves the wording, so the copy can be previewed on live
+    # data without a single customer being emailed.
+    renewal_reminders_enabled: bool = \
+        os.getenv("RENEWAL_REMINDERS_ENABLED", "false").lower() == "true"
+    portal_base_url: str = os.getenv("PORTAL_BASE_URL", "https://portal.steprotech.com")
+
+    # ---- Workspace update queue (0.1.85, Steward 2026-10-07) ----------------
+    # One update at a time PER SERVER (three servers therefore three streams), and
+    # after each workspace is verified stable the host waits the quiet gap before
+    # the next one starts. Admin batches jump ahead of customer requests, while a
+    # manual admin update still runs immediately (it takes the same host slot, so
+    # nothing else can start on that server while it runs).
+    update_interval_minutes: int = int(os.getenv("UPDATE_INTERVAL_MINUTES", "5"))
+    update_worker_enabled: bool = os.getenv("UPDATE_WORKER_ENABLED", "true").lower() == "true"
+    update_report_to: str = os.getenv("UPDATE_REPORT_TO", "stewardobeng@gmail.com")
+    # Who may self-update, on top of the per-account permission (accounts.update_enabled):
+    #   "none" = nobody (global kill switch)   "any" = no plan restriction
+    #   "b"    = Workspace Plus (GHS 500) only
+    # The PERMISSION is the real gate (0.1.88, Steward 2026-10-07: "let it only be available
+    # to the accounts that are permitted"); this switch only narrows it further.
+    update_self_service_plan: str = os.getenv("UPDATE_SELF_SERVICE_PLAN", "any")
+    update_customer_cooldown_hours: int = int(os.getenv("UPDATE_CUSTOMER_COOLDOWN_HOURS", "24"))
+    update_verify_timeout_seconds: int = int(os.getenv("UPDATE_VERIFY_TIMEOUT_SECONDS", "420"))
+    # When the target image is NOT on the server yet, the stack update downloads it (~1.8 GB)
+    # before the container can be recreated, so verification gets a bigger budget than the
+    # window above. Measured pulls on this estate run 72-91s, so this is headroom for a slow
+    # registry rather than the normal case: it is NOT the cause of any past update failure
+    # (the server 4 failures were a stale container id, see backup_ops.resolve_container).
+    update_verify_timeout_pull_seconds: int = int(
+        os.getenv("UPDATE_VERIFY_TIMEOUT_PULL_SECONDS", "1800"))
     # Plan B stack = chibz/bigcroc owner tier (0.50 CPU / 1 GiB / heap 768)
     plan_b_compose_template_path: str = os.getenv(
         "PLAN_B_COMPOSE_TEMPLATE_PATH", "/app/templates/n8n-stack-compose-plus.yml"
@@ -88,6 +135,14 @@ class Settings:
     # Paystack
     paystack_secret_key: str = os.getenv("PAYSTACK_SECRET_KEY", "")
     paystack_plan_code: str = os.getenv("PAYSTACK_PLAN_CODE", "")  # auto-created if empty
+    # Webhook router shared secret (0.1.67): when set, /webhook/paystack ALSO
+    # requires x-router-secret to match, so only OUR router can deliver events
+    # (a stolen Paystack signature alone is not enough). Empty = feature off.
+    paystack_router_secret: str = os.getenv("PAYSTACK_ROUTER_SECRET", "")
+    # Amount enforcement (minor units): charge.success must match the plan
+    # price. Empty amount = check disabled (not recommended).
+    paystack_expected_amount_a: str = os.getenv("PAYSTACK_EXPECTED_AMOUNT_A", "")
+    paystack_expected_amount_b: str = os.getenv("PAYSTACK_EXPECTED_AMOUNT_B", "")
     paystack_plan_code_b: str = os.getenv("PAYSTACK_PLAN_CODE_B", "")  # Plan B (500), auto-created if empty
     paystack_callback_url: str = os.getenv(
         "PAYSTACK_CALLBACK_URL", "https://portal.steprotech.com/?status=success"

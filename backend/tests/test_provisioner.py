@@ -42,21 +42,16 @@ class FakeNPM:
 
 
 def make_account(client, email, username, password="TestPass123"):
-    """Full gated onboarding: request access -> admin issues token -> register.
-    Returns (account_dict, portal_token)."""
+    """Onboarding since 0.1.98 (Steward 2026-10-11): the email-only page opens the
+    create-account form at once, so there is no request to review and no code to
+    enter. Returns (account_dict, portal_token)."""
     r = client.post("/api/v1/auth/check", json={"email": email})
     assert r.status_code == 200, r.text
-    assert r.json()["action"] == "requested", r.text
-    # admin issues a token (no admin auth on this helper: call the gate directly)
-    from app import db as db_mod
-    req = db_mod.get_access_request(email)
-    from app.services import access_gate
-    token = access_gate.issue_token(req["id"])
-    # registration with the token
+    assert r.json()["action"] == "approved", r.text
     r = client.post("/api/v1/accounts", json={
         "email": email, "username": username,
         "first_name": "Test", "last_name": "User",
-        "password": password, "access_token": token,
+        "password": password,
     })
     assert r.status_code == 201, r.text
     return r.json()["account"], r.json()["token"]
@@ -552,8 +547,9 @@ def test_lock_stops_stack_and_unlock_starts_it(monkeypatch):
 
 
 def test_access_gate_full_flow():
-    """Gate E2E: email-only page -> requested -> admin token -> verify -> register
-    -> auto-login token -> returning user logs in with password (no token)."""
+    """Gate E2E: the email-only page opens the create-account form at once (0.1.98),
+    the legacy code path still registers a pre-change row, registration signs the
+    person in, and a returning user logs in with a password."""
     from app.main import app
     from fastapi.testclient import TestClient
     from app import db as db_mod
@@ -561,22 +557,26 @@ def test_access_gate_full_flow():
 
     client = TestClient(app)
 
-    # 1. email-only first page: no account, no request -> "requested"
+    # 1. email-only first page: since 0.1.98 there is nothing to approve and nothing
+    #    to wait for, so registration opens on the first visit
     r = client.post("/api/v1/auth/check", json={"email": "gated@steprotech.com"})
-    assert r.status_code == 200 and r.json()["action"] == "requested"
+    assert r.status_code == 200 and r.json()["action"] == "approved"
 
-    # repeat check -> "waiting" (request exists, admin hasn't issued yet)
+    # asking again is stable and does not create a second request row
     r = client.post("/api/v1/auth/check", json={"email": "gated@steprotech.com"})
-    assert r.json()["action"] == "waiting"
+    assert r.json()["action"] == "approved"
+    assert len([q for q in db_mod.list_access_requests()
+                if q["email"] == "gated@steprotech.com"]) == 1
 
-    # 2. admin issues a token
+    # 2. the legacy path still works for a row that ever carried a code
     req = db_mod.get_access_request("gated@steprotech.com")
     token = access_gate.issue_token(req["id"])
     assert len(token) == 9 and "-" in token  # K7FQ-2MXP style
 
-    # 3. visitor re-enters email -> now "token"
+    # 3. visitor re-enters email -> "approved" (0.1.77: the code is gone; an
+    #    approval, including one issued before this change, opens registration)
     r = client.post("/api/v1/auth/check", json={"email": "gated@steprotech.com"})
-    assert r.json()["action"] == "token"
+    assert r.json()["action"] == "approved"
 
     # 4. wrong token rejected, right token verified
     r = client.post("/api/v1/auth/verify-token",
@@ -586,22 +586,19 @@ def test_access_gate_full_flow():
                     json={"email": "gated@steprotech.com", "token": token})
     assert r.status_code == 200 and r.json()["action"] == "verified"
 
-    # 5. registration without a token is refused
+    # 5. registration needs NO code (0.1.77): no access_token is sent at all
     r = client.post("/api/v1/accounts", json={
         "email": "gated@steprotech.com", "username": "gated",
         "first_name": "Gate", "last_name": "User",
         "password": "GatePass123",
     })
-    assert r.status_code == 403, r.text
-
-    # 6. registration with the token succeeds + returns a session token
-    r = client.post("/api/v1/accounts", json={
-        "email": "gated@steprotech.com", "username": "gated",
-        "first_name": "Gate", "last_name": "User",
-        "password": "GatePass123", "access_token": token,
-    })
     assert r.status_code == 201, r.text
     assert r.json()["token"]
+
+    # 6. that token IS a live session: the person is signed in straight after
+    #    creating the account, with no separate sign-in step
+    me = client.get("/api/v1/me", headers={"Authorization": "Bearer " + r.json()["token"]})
+    assert me.status_code == 200 and me.json()["account"]["email"] == "gated@steprotech.com"
     # The access request is DELETED once the person becomes a member (Steward
     # 2026-09-03): their record now lives under the account, not the request list.
     req = db_mod.get_access_request("gated@steprotech.com")

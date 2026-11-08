@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS accounts (
     password_hash TEXT DEFAULT '',   -- PBKDF2 hash (never plaintext)
     status TEXT NOT NULL DEFAULT 'pending',   -- pending | provisioned | failed | disabled
     quota INTEGER NOT NULL DEFAULT 1,         -- max n8n instances for this account (admin-raisable)
+    quota_a INTEGER NOT NULL DEFAULT 1,       -- per-plan allowance: package A (GHS 300)
+    quota_b INTEGER NOT NULL DEFAULT 1,       -- per-plan allowance: package B (GHS 500)
     -- Stripe billing
     stripe_customer_id TEXT DEFAULT '',
     subscription_id TEXT DEFAULT '',
@@ -32,6 +34,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     paid_from INTEGER,               -- subscription start (admin mark-paid backdating)
     account_state TEXT NOT NULL DEFAULT 'active', -- active | suspended | archived (admin lifecycle)
     backup_enabled INTEGER NOT NULL DEFAULT 0, -- customer may self-service backup (admin-set; 0=hidden)
+    update_enabled INTEGER NOT NULL DEFAULT 0, -- customer may self-update a workspace (admin-set; 0=hidden, 0.1.88)
     totp_secret TEXT DEFAULT '',     -- authenticator-app secret (2FA)
     totp_enabled INTEGER DEFAULT 0,  -- authenticator 2FA active
     email_2fa INTEGER DEFAULT 0,     -- email one-time-code 2FA active
@@ -74,6 +77,7 @@ CREATE TABLE IF NOT EXISTS instances (
     lock_secret TEXT DEFAULT '',                -- random owner pw while locked (for unlock)
     container_id TEXT DEFAULT '',               -- fallback for admin-attached stacks w/o stack record
     managed INTEGER NOT NULL DEFAULT 1,         -- 1 = portal-provisioned; 0 = admin-attached pre-existing
+    plan TEXT NOT NULL DEFAULT 'a',             -- workspace package: 'a' GHS 300 | 'b' GHS 500 Plus (0.1.70)
     error TEXT,
     created_at INTEGER NOT NULL,
     FOREIGN KEY (account_id) REFERENCES accounts(id)
@@ -167,6 +171,63 @@ def init_db(db_path: str | None = None) -> None:
         ic2 = [r[1] for r in cur.execute("PRAGMA table_info(instances)")]
         if "image" not in ic2:
             cur.execute('ALTER TABLE instances ADD COLUMN image TEXT DEFAULT "n8nio/n8n:latest"')
+        # Migration: instances track an attached Python task-runner sidecar
+        # (admin one-click feature, 0.1.63): 0 = none, 1 = attached. The flag is
+        # the UI state + the detach authority; the stack file itself is the truth
+        # for what actually runs.
+        # Idempotency ledger (0.1.67): one row per processed gateway event
+        # reference; a duplicate delivery becomes a recorded no-op instead of a
+        # second subscription extension.
+        cur.executescript("""
+        CREATE TABLE IF NOT EXISTS processed_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            gateway TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            reference TEXT NOT NULL,
+            processed_at INTEGER NOT NULL,
+            note TEXT DEFAULT '',
+            UNIQUE(gateway, event_type, reference)
+        );
+        """)
+        # Renewal reminders + login-free renewal links (0.1.76): with the Paystack
+        # plan gone, renewal is a customer action, so the portal remembers which
+        # notice it already sent for which TERM (`period` = the paid_until that
+        # notice was about, so next year's reminders are not suppressed by this
+        # year's) and the random links it has emailed out.
+        cur.executescript("""
+        CREATE TABLE IF NOT EXISTS renewal_notices (
+            account_id INTEGER NOT NULL,
+            stage TEXT NOT NULL,
+            period INTEGER NOT NULL,
+            sent_at INTEGER NOT NULL,
+            email TEXT DEFAULT '',
+            PRIMARY KEY (account_id, stage, period)
+        );
+        CREATE TABLE IF NOT EXISTS renewal_links (
+            token TEXT PRIMARY KEY,
+            account_id INTEGER NOT NULL,
+            plan TEXT NOT NULL DEFAULT 'a',
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            used_at INTEGER
+        );
+        """)
+        ic3 = [r[1] for r in cur.execute("PRAGMA table_info(instances)")]
+        if "python_runner" not in ic3:
+            cur.execute("ALTER TABLE instances ADD COLUMN python_runner INTEGER NOT NULL DEFAULT 0")
+        try:
+            cur.execute("ALTER TABLE instances ADD COLUMN plan TEXT NOT NULL DEFAULT 'a'")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        # Migration: per-plan workspace quotas (0.1.68, Steward: quota is per
+        # package). `quota` stays the LEGACY single number (fallback); quota_a
+        # seeds from it, quota_b starts at its own 1.
+        acols_q = [r[1] for r in cur.execute("PRAGMA table_info(accounts)")]
+        if "quota_a" not in acols_q:
+            cur.execute("ALTER TABLE accounts ADD COLUMN quota_a INTEGER NOT NULL DEFAULT 1")
+            cur.execute("UPDATE accounts SET quota_a = COALESCE(quota, 1)")
+        if "quota_b" not in acols_q:
+            cur.execute("ALTER TABLE accounts ADD COLUMN quota_b INTEGER NOT NULL DEFAULT 1")
         # Migration: 2FA columns (authenticator TOTP + email OTP) + reset/otp tables
         acols4 = [r[1] for r in cur.execute("PRAGMA table_info(accounts)")]
         for c, ddl in (
@@ -180,6 +241,11 @@ def init_db(db_path: str | None = None) -> None:
         acols5 = [r[1] for r in cur.execute("PRAGMA table_info(accounts)")]
         if "backup_enabled" not in acols5:
             cur.execute("ALTER TABLE accounts ADD COLUMN backup_enabled INTEGER NOT NULL DEFAULT 0")
+        # Migration: per-account self-update permission (admin-gated, same shape as backups).
+        # Default 0, so nobody can self-update until the admin allows it for that account.
+        acols6 = [r[1] for r in cur.execute("PRAGMA table_info(accounts)")]
+        if "update_enabled" not in acols6:
+            cur.execute("ALTER TABLE accounts ADD COLUMN update_enabled INTEGER NOT NULL DEFAULT 0")
         cur.executescript("""
         CREATE TABLE IF NOT EXISTS password_resets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -242,6 +308,51 @@ def init_db(db_path: str | None = None) -> None:
             kind TEXT DEFAULT 'register',  -- 'register' | 'login'
             created_at INTEGER NOT NULL,
             expires_at INTEGER NOT NULL
+        );
+        -- Workspace update queue (0.1.85). One row per requested update; the worker
+        -- moves one row per SERVER at a time and the host waits its quiet gap
+        -- between rows. requested_by: admin | customer | admin-manual.
+        CREATE TABLE IF NOT EXISTS update_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            instance_id INTEGER NOT NULL,
+            account_id INTEGER,
+            environment_id INTEGER NOT NULL,
+            stack_name TEXT DEFAULT '',
+            target_image TEXT NOT NULL,
+            target_version TEXT DEFAULT '',
+            from_image TEXT DEFAULT '',
+            from_version TEXT DEFAULT '',
+            result_version TEXT DEFAULT '',
+            requested_by TEXT NOT NULL DEFAULT 'admin',
+            requested_account INTEGER,
+            batch_id TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'queued',   -- queued|running|done|failed|skipped|canceled
+            priority INTEGER NOT NULL DEFAULT 100,   -- 10 = admin batch, 100 = customer
+            attempts INTEGER NOT NULL DEFAULT 0,
+            error TEXT DEFAULT '',
+            note TEXT DEFAULT '',
+            created_at INTEGER NOT NULL,
+            started_at INTEGER,
+            finished_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_update_queue_pick
+            ON update_queue(status, environment_id, priority, id);
+        -- Per-server pacing: when the next update may start, plus what is running.
+        CREATE TABLE IF NOT EXISTS update_host_state (
+            environment_id INTEGER PRIMARY KEY,
+            next_allowed_at INTEGER NOT NULL DEFAULT 0,
+            last_finished_at INTEGER,
+            last_instance_id INTEGER,
+            busy_since INTEGER
+        );
+        -- One row per report email already sent, so a batch can never be reported twice.
+        CREATE TABLE IF NOT EXISTS update_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id TEXT NOT NULL,
+            kind TEXT NOT NULL,             -- batch | failure | customer
+            sent_at INTEGER NOT NULL,
+            summary TEXT DEFAULT '',
+            UNIQUE(batch_id, kind)
         );
         """)
         conn.commit()
@@ -358,12 +469,40 @@ def set_account_status(account_id: int, status: str) -> None:
 
 
 def set_account_quota(account_id: int, quota: int) -> None:
-    """Admin raises/lowers the max-instance quota for an account."""
+    """Admin raises/lowers the max-instance quota for an account.
+
+    0.1.73: the provisioning gate reads the PER-PACKAGE allowance, so a legacy
+    write also raises the allowance of the package the account currently holds.
+    Without this an admin could "raise the quota" on an account and still see the
+    next workspace refused, because only quota_a/quota_b are consulted. The
+    legacy column is kept in step for older callers and for the admin UI.
+    """
+    value = max(1, quota)
     conn = get_conn()
     try:
         conn.execute(
-            "UPDATE accounts SET quota = ? WHERE id = ?",
-            (max(1, quota), account_id),
+            "UPDATE accounts SET quota = ?, "
+            "quota_a = CASE WHEN COALESCE(plan, 'a') = 'b' THEN quota_a ELSE ? END, "
+            "quota_b = CASE WHEN COALESCE(plan, 'a') = 'b' THEN ? ELSE quota_b END "
+            "WHERE id = ?",
+            (value, value, value, account_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_account_update(account_id: int, enabled: bool) -> None:
+    """Admin grants/revokes the customer's self-update permission (0.1.88).
+
+    Mirrors set_account_backup: when False the customer sees NO update UI at all, and the
+    API refuses the request as well (defense in depth). The admin can always update a
+    workspace from the portal regardless."""
+    conn = get_conn()
+    try:
+        conn.execute(
+            "UPDATE accounts SET update_enabled = ? WHERE id = ?",
+            (1 if enabled else 0, account_id),
         )
         conn.commit()
     finally:
@@ -423,6 +562,32 @@ def count_instances(account_id: int) -> int:
             (account_id,),
         ).fetchone()
         return int(row["n"])
+    finally:
+        conn.close()
+
+
+def count_instances_by_plan(account_id: int, plan: str | None = None) -> dict | int:
+    """Live instance counts per package for an account (0.1.70). Rows with a
+    NULL/missing plan (pre-0.1.70) count toward plan 'a'.
+
+    Contract: returns the whole {"a": n, "b": n} mapping when `plan` is None,
+    and a single int for that package when a plan is given (the provisioning
+    gates rely on the int form)."""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT COALESCE(NULLIF(plan, ''), 'a') AS p, COUNT(*) AS n "
+            "FROM instances WHERE account_id = ? AND status NOT IN ('deleted', 'failed') "
+            "GROUP BY p",
+            (account_id,),
+        ).fetchall()
+        counts = {"a": 0, "b": 0}
+        for r in rows:
+            p = r["p"] if r["p"] in ("a", "b") else "a"
+            counts[p] = int(r["n"])
+        if plan is None:
+            return counts
+        return counts.get(plan if plan in ("a", "b") else "a", 0)
     finally:
         conn.close()
 
@@ -489,17 +654,18 @@ def create_instance(
     container_id: str = "",
     managed: int = 1,
     status: str = "provisioning",
+    plan: str = "a",
 ) -> int:
     conn = get_conn()
     try:
         cur = conn.execute(
             "INSERT INTO instances (account_id, stack_name, environment_id, environment_name, "
             "port, domain, basic_auth_user, basic_auth_password, n8n_encryption_key, "
-            "stack_id, container_id, managed, status, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "stack_id, container_id, managed, status, plan, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (account_id, stack_name, environment_id, environment_name, port, domain,
              basic_auth_user, basic_auth_password, n8n_encryption_key,
-             stack_id, container_id, managed, status, now()),
+             stack_id, container_id, managed, status, plan, now()),
         )
         conn.commit()
         return cur.lastrowid
@@ -546,6 +712,59 @@ def get_active_instance(account_id: int) -> sqlite3.Row | None:
             "ORDER BY id DESC LIMIT 1",
             (account_id,),
         ).fetchone()
+    finally:
+        conn.close()
+
+
+def account_quota_for(account, plan: str | None = None) -> int:
+    """The account's workspace allowance for a plan ('a'|'b'). Falls back to
+    the legacy single quota when the per-plan value is missing."""
+    if plan is None:
+        try:
+            plan = account["plan"] or "a"
+        except (KeyError, IndexError):
+            plan = "a"
+    col = "quota_b" if plan == "b" else "quota_a"
+    try:
+        v = account[col]
+        if v:
+            return int(v)
+    except (KeyError, IndexError):
+        pass
+    try:
+        return int(account["quota"] or 1)
+    except (KeyError, IndexError):
+        return 1
+
+
+def set_account_quota_for(account_id: int, plan: str, quota: int) -> None:
+    """Set the per-plan workspace allowance ('a'|'b')."""
+    col = "quota_b" if plan == "b" else "quota_a"
+    conn = get_conn()
+    try:
+        conn.execute(f"UPDATE accounts SET {col} = ? WHERE id = ?",
+                     (max(1, quota), account_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def claim_event(gateway: str, event_type: str, reference: str) -> bool:
+    """True = this event was never processed before and is now claimed.
+    False = duplicate delivery; the caller must treat it as a no-op."""
+    if not reference:
+        return True  # nothing to dedupe on (should not happen for charge events)
+    conn = get_conn()
+    try:
+        try:
+            conn.execute(
+                "INSERT INTO processed_events (gateway, event_type, reference, processed_at) "
+                "VALUES (?,?,?,?)",
+                (gateway, event_type, reference, now()))
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
     finally:
         conn.close()
 
@@ -1034,6 +1253,94 @@ def consume_passkey_challenge(challenge_id: int) -> None:
     conn = get_conn()
     try:
         conn.execute("DELETE FROM passkey_challenges WHERE id=?", (challenge_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ---------- renewal reminders + login-free renewal links (0.1.76) ----------
+
+def renewal_link_for_account(account_id: int, plan: str, min_expires: int):
+    """A still-live link token for this account+package, else None."""
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT token FROM renewal_links WHERE account_id=? AND plan=? "
+            "AND expires_at >= ? ORDER BY created_at DESC LIMIT 1",
+            (int(account_id), plan, int(min_expires))).fetchone()
+        return row["token"] if row else None
+    finally:
+        conn.close()
+
+
+def renewal_candidates(now: int, horizon_days: int = 31) -> list:
+    """Accounts whose term is inside the reminder horizon (near OR past).
+
+    Admin-suspended and archived accounts are excluded (payment must never talk
+    them into a state an admin took away), as is anything with no paid_until.
+    """
+    conn = get_conn()
+    try:
+        return conn.execute(
+            "SELECT * FROM accounts WHERE paid_until IS NOT NULL AND paid_until <= ? "
+            "AND COALESCE(account_state, 'active') = 'active' "
+            "AND COALESCE(subscription_status, 'none') "
+            "IN ('active', 'past_due', 'unpaid', 'locked') "
+            "ORDER BY paid_until ASC",
+            (now + horizon_days * 86400,)).fetchall()
+    finally:
+        conn.close()
+
+
+def notice_sent(account_id: int, stage: str, period: int) -> bool:
+    conn = get_conn()
+    try:
+        return conn.execute(
+            "SELECT 1 FROM renewal_notices WHERE account_id=? AND stage=? AND period=?",
+            (account_id, stage, period)).fetchone() is not None
+    finally:
+        conn.close()
+
+
+def record_notice(account_id: int, stage: str, period: int, sent_at: int,
+                  email: str = "") -> None:
+    conn = get_conn()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO renewal_notices "
+            "(account_id, stage, period, sent_at, email) VALUES (?, ?, ?, ?, ?)",
+            (account_id, stage, period, sent_at, email))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def create_renewal_link(token: str, account_id: int, plan: str, created_at: int,
+                        expires_at: int) -> None:
+    conn = get_conn()
+    try:
+        conn.execute(
+            "INSERT INTO renewal_links (token, account_id, plan, created_at, expires_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (token, account_id, plan, created_at, expires_at))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_renewal_link(token: str):
+    conn = get_conn()
+    try:
+        return conn.execute("SELECT * FROM renewal_links WHERE token=?",
+                            (token,)).fetchone()
+    finally:
+        conn.close()
+
+
+def mark_renewal_link_used(token: str, used_at: int) -> None:
+    conn = get_conn()
+    try:
+        conn.execute("UPDATE renewal_links SET used_at=? WHERE token=?", (used_at, token))
         conn.commit()
     finally:
         conn.close()

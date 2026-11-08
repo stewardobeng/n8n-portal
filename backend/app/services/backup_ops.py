@@ -34,6 +34,8 @@
 import gzip
 import logging
 import os
+import re
+import time
 import datetime
 import tarfile
 import io
@@ -60,17 +62,178 @@ def _row_get(row, key, default=None):
 
 # ---------- container resolution ----------
 
-def resolve_container(instance) -> tuple[int, str] | None:
+# ---------- true running version (0.1.80) ----------
+#
+# The image REFERENCE says nothing reliable: every workspace stack is written
+# `image: n8nio/n8n:latest`, and "latest" is not a version. Comparing that string
+# with the newest release made the update dialog claim "already on the latest
+# release" for workspaces actually running 2.31.6 (Steward, 2026-10-06). So ask
+# the image/binary what it really is.
+
+_VERSION_RE = re.compile(r"^(\d+\.\d+\.\d+)")
+_IMAGE_CACHE: dict[int, tuple[float, dict]] = {}
+_IMAGE_TTL = 60.0
+
+
+def _image_versions(pc: PortainerClient, env: int) -> dict:
+    """image id -> version, from the image's own OCI label, cached ~60s.
+
+    One call per environment per minute, whatever the number of workspaces.
+    """
+    hit = _IMAGE_CACHE.get(env)
+    now = time.time()
+    if hit and now - hit[0] < _IMAGE_TTL:
+        return hit[1]
+    out: dict = {}
+    try:
+        for im in pc.list_images(env) or []:
+            labels = im.get("Labels") or {}
+            ver = str(labels.get("org.opencontainers.image.version") or "").strip()
+            iid = im.get("Id") or im.get("ID") or ""
+            if ver and iid and _VERSION_RE.match(ver):
+                out[iid] = ver
+    except Exception as e:
+        log.warning("image versions env %s failed: %s", env, e)
+    _IMAGE_CACHE[env] = (now, out)
+    return out
+
+
+def _tag_version(ref: str) -> str:
+    """Explicit version from an image reference; '' for latest/<none>/sha256."""
+    if not ref:
+        return ""
+    tag = ref.split(":")[-1] if ":" in ref else ""
+    m = _VERSION_RE.match(tag)
+    return m.group(1) if m else ""
+
+
+def restart_workspace(instance) -> str:
+    """Start this workspace's container again: same image, same volume, no update.
+
+    Restart is deliberately not an update path. It resolves the container (never
+    trusting a stored id, see resolve_container), asks Docker to restart that one
+    container, and returns its id. The stack is not touched, so nothing is pulled,
+    replaced or recreated, and the workspace keeps every byte of its data.
+
+    Raises RuntimeError with a plain-language message when there is nothing to
+    restart, because that is what the person who clicked needs to read.
+    """
+    pc = PortainerClient()
+    resolved = resolve_container(instance)
+    if not resolved:
+        raise RuntimeError("its container is not running at the moment")
+    env, cid = resolved
+    pc.restart_container(env, cid)
+    log.info("restarted workspace %s (container %s)", instance["stack_name"], cid[:12])
+    return cid
+
+
+def current_version(instance, allow_exec: bool = False) -> dict:
+    """What this workspace is actually running: {version, source}.
+
+    source is one of image-label | exec | tag | unknown. A floating tag never
+    yields a version, and callers must treat '' as unknown rather than current.
+    """
+    resolved = resolve_container(instance)
+    stored = _row_get(instance, "image", "") or ""
+    tag_ver = _tag_version(stored)
+    if not resolved:
+        return {"version": tag_ver, "source": "tag" if tag_ver else "unknown"}
+    env, cid = resolved
+    pc = PortainerClient()
+    try:
+        insp = pc.get_container(env, cid)
+    except Exception as e:
+        log.warning("version inspect %s/%s failed: %s", env, cid, e)
+        return {"version": tag_ver, "source": "tag" if tag_ver else "unknown"}
+    image_id = insp.get("Image") or ""
+    ref = (insp.get("Config") or {}).get("Image") or stored
+    found = _image_versions(pc, env).get(image_id)
+    if found:
+        return {"version": found, "source": "image-label"}
+    if allow_exec:
+        try:
+            out = pc.exec_in_container(env, cid, ["n8n", "--version"], timeout=30.0)
+            text = (out or b"").decode("utf-8", "replace")
+            m = _VERSION_RE.search(text.strip())
+            if m:
+                return {"version": m.group(1), "source": "exec"}
+        except Exception as e:
+            log.warning("version exec %s/%s failed: %s", env, cid, e)
+    return {"version": _tag_version(ref), "source": "tag" if _tag_version(ref) else "unknown"}
+
+
+def true_versions(instances, pc: PortainerClient | None = None) -> dict:
+    """{instance_id: {version, source}} for a batch, without per-instance calls.
+
+    One container list and one image list per environment, so the admin UI can
+    show real versions for every workspace cheaply.
+    """
+    pc = pc or PortainerClient()
+    by_env: dict = {}
+    for inst in instances or []:
+        try:
+            by_env.setdefault(int(inst["environment_id"]), []).append(inst)
+        except Exception:
+            continue
+    out: dict = {}
+    for env, rows in by_env.items():
+        try:
+            containers = pc.list_containers(env, all=True)
+        except Exception as e:
+            log.warning("version scan env %s failed: %s", env, e)
+            containers = []
+        versions = _image_versions(pc, env)
+        for inst in rows:
+            name = f"{inst['stack_name']}-n8n-1"
+            cont = None
+            for c in containers:
+                if any((n or "").lstrip("/") == name for n in (c.get("Names") or [])):
+                    cont = c
+                    break
+            if cont is None:
+                cid = _row_get(inst, "container_id", "")
+                cont = next((c for c in containers if cid and c.get("Id") == cid), None)
+            stored = _row_get(inst, "image", "") or ""
+            if cont is None:
+                tv = _tag_version(stored)
+                out[inst["id"]] = {"version": tv, "source": "tag" if tv else "unknown"}
+                continue
+            ver = versions.get(cont.get("ImageID") or "") or versions.get(cont.get("Image") or "")
+            if ver:
+                out[inst["id"]] = {"version": ver, "source": "image-label"}
+            else:
+                tv = _tag_version(cont.get("Image") or stored)
+                out[inst["id"]] = {"version": tv, "source": "tag" if tv else "unknown"}
+    return out
+
+
+def resolve_container(instance, require_running: bool = True) -> tuple[int, str] | None:
     """Return (endpoint_id, container_id) for an instance row, or None if the
-    container cannot be located (e.g. stopped stack on a live env)."""
+    container cannot be located (e.g. stopped stack on a live env).
+
+    A stored ``container_id`` is only a HINT, never the truth. Every recreate (an
+    image update, an environment change) replaces the container with a NEW id, and
+    trusting the old one had exactly one observable effect: Portainer answered
+    ``404 No such container``, the version read fell back to the portal's own
+    ``instances.image`` row, and that row always named the version we were updating
+    FROM or TO rather than what was live. So verification could never succeed and
+    the queue rolled a good update back, while a manual update (which never verifies)
+    looked fine. This hit every ``managed=0`` workspace on endpoint 4 and was found
+    on 2026-10-08 after seven recorded failures.
+    """
     pc = PortainerClient()
     env = int(instance["environment_id"])
-    # Admin-attached pre-existing stacks record the container directly.
     cid = _row_get(instance, "container_id", "")
-    if _row_get(instance, "managed", 1) == 0 and cid:
-        return env, cid
-    # Portal-provisioned / stack-managed: find the container whose compose
-    # project == stack_name on that environment.
+    if cid:
+        try:
+            insp = pc.get_container(env, cid)
+            running = bool((insp.get("State") or {}).get("Running"))
+            if running or not require_running:
+                return env, cid
+        except Exception:  # noqa: BLE001 - stale id or unreadable: fall through
+            pass
+    # Find the container whose compose project == stack_name on that environment.
     try:
         containers = pc.list_containers(env, all=True)
     except Exception as e:
@@ -83,9 +246,16 @@ def resolve_container(instance) -> tuple[int, str] | None:
             nm = n.lstrip("/")
             # container is named "<stack>-n8n-1" or "<stack>-n8n-2"
             if nm == f"{stack}-n8n-1" or nm.startswith(f"{stack}-n8n-"):
-                # only a running container can be archived/exec'd
-                if c.get("State") == "running":
-                    return env, c["Id"]
+                # only a running container can be archived/exec'd by default
+                if c.get("State") == "running" or not require_running:
+                    found = c["Id"]
+                    if found != cid:
+                        # self-heal, so the next call does not need the list scan
+                        try:
+                            db.update_instance(instance["id"], container_id=found)
+                        except Exception as e:  # noqa: BLE001
+                            log.warning("could not refresh container id for %s: %s", stack, e)
+                    return env, found
     return None
 
 
@@ -183,13 +353,15 @@ def update_instance_image(instance, image: str) -> None:
     image = image.strip()
     if not image:
         raise ValueError("Image tag is required.")
-    if ":" in image and not image.startswith("n8nio/n8n") and not image.startswith("n8n/n8n"):
-        # allow "n8nio/n8n:2.31.6" or "2.31.6"; strip a bare tag to n8nio/n8n:<tag>
-        pass
+    # Normalise to n8nio/n8n:<tag>. The old expression took the last PATH segment of
+    # "n8nio/n8n:2.43.2" (that is "n8n:2.43.2") and prefixed it again, so every
+    # workspace the QUEUE updated was recorded as "n8nio/n8n:n8n:2.43.2". The manual
+    # path passes a bare tag, which is why its rows looked clean, and the doubled
+    # value made the stored record disagree with what the stack really runs.
     tag = image.split("/")[-1]
-    full_image = f"n8nio/n8n:{tag}" if ":" in tag or not tag.startswith("latest") else image
-    if not full_image.startswith("n8nio/n8n") and not full_image.startswith("n8n/n8n"):
-        full_image = f"n8nio/n8n:{image}"
+    if ":" in tag:
+        tag = tag.split(":")[-1]
+    full_image = f"n8nio/n8n:{tag or 'latest'}"
 
     pc = PortainerClient()
     env = int(instance["environment_id"])
@@ -213,9 +385,18 @@ def update_instance_image(instance, image: str) -> None:
             raise ValueError(
                 "Cannot update image: this workspace has no Portainer stack "
                 "record. Attach it again or update it manually.")
-    pc.update_stack_image(int(stack_id), env, full_image)
+    # Pull only when the tag is genuinely missing on that server: a blind pullImage=true
+    # re-downloads roughly 1.8 GB per workspace even when the image is cached (72-91s each
+    # here), so a batch pays that cost for every workspace for nothing.
+    try:
+        needs_pull = not pc.image_present(env, full_image)
+    except Exception as e:  # noqa: BLE001
+        log.warning("image presence check failed for %s: %s (pulling to be safe)", full_image, e)
+        needs_pull = True
+    pc.update_stack_image(int(stack_id), env, full_image, pull=needs_pull)
     db.update_instance(instance["id"], image=full_image)
-    log.info("instance %s image updated to %s", instance["stack_name"], full_image)
+    log.info("instance %s image updated to %s (pull=%s)",
+             instance["stack_name"], full_image, needs_pull)
     return full_image
 
 

@@ -28,14 +28,32 @@
     pollTimer: null,
     provisioningPw: null, // signup password held in-session for owner auto-create
     mfa: null,             // 2FA challenge in-flight (email, challenge, methods)
-    adminMfa: null,        // admin 2FA challenge in-flight (challenge, methods)
+    adminMfa: null,
+    adminMfaSent: null,
+    smsStatus: null,
+    smsTest: null,        // admin 2FA challenge in-flight (challenge, methods)
     security2fa: null,     // 2FA setup state (GET /me/security or /admin/security)
     adminInstances: [],    // admin: all instances (GET /admin/instances) for backup/update triggers
     adminInstancesLoaded: false,
+    sessionLoaded: false, // customer: /me has answered (or failed) at least once
+    requestsLoaded: false,       // admin: the access-request list has answered
+    myUpdates: [],               // customer: version/self-update state per workspace (0.1.85)
+    myUpdatesLoaded: false,      // customer: /me/updates has answered
+    myUpdatesAllowed: false,     // customer: the admin allowed self-update for this account (0.1.88)
+    adminUpdates: null,          // admin: the update queue overview (0.1.85)
+    adminUpdatesLoaded: false,
+    updSel: {},                  // admin: workspaces ticked on the Updates page
+    adminArchivedLoaded: false,  // admin: the archived-account list has answered
+    adminEnvsLoaded: false,      // admin: the per-server environment list has answered
+    adminAccountsLoaded: false,
+    accountDetailTried: {}, // admin: accountId -> the per-account read has finished (ok or failed)
     impersonation: null,     // admin login-as: {id, label} while viewing a customer
     impTtlMinutes: 60,       // lifetime of the impersonation session (server-set)
     n8nLatestTag: "",        // latest n8n release tag seen (admin update watch)
+    n8nVersions: {},         // admin: instanceId -> {version, source} actually running (0.1.80)
     instUpdating: {},        // instanceId -> target tag while an n8n update runs
+    instRestarting: {},      // instanceId -> true while a restart is in flight (0.1.96)
+    runnerBusy: {},          // instanceId -> "attach"|"detach" while a python-runner change runs
     busyModal: false         // true while a long-running action modal is open (render must not wipe it)
   };
 
@@ -95,6 +113,8 @@ var ICONS = {
   accounts: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /> <circle cx="9" cy="7" r="4" /> <path d="M22 21v-2a4 4 0 0 0-3-3.87" /> <path d="M16 3.13a4 4 0 0 1 0 7.75" />',
   arrow: '<path d="M5 12h14" /> <path d="m12 5 7 7-7 7" />',
   "arrow-left": '<path d="m12 19-7-7 7-7" /> <path d="M19 12H5" />',
+  phone: '<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />',
+  message: '<path d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.86 9.86 0 0 1-4-.84L3 21l1.05-4.2A7.7 7.7 0 0 1 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />',
   archive: '<rect width="20" height="5" x="2" y="3" rx="1" /> <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" /> <path d="M10 12h4" />',
   pause: '<rect x="14" y="4" width="4" height="16" rx="1" /> <rect x="6" y="4" width="4" height="16" rx="1" />',
   bell: '<path d="M10.268 21a2 2 0 0 0 3.464 0" /> <path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326" />',
@@ -137,6 +157,19 @@ var ICONS = {
   function icon(name) {
     var inner = ICONS[name] || ICONS.plus;
     return '<svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true">' + inner + '</svg>';
+  }
+
+  /* Loading placeholders (0.1.84). A table or list that is still being fetched must
+   * SAY so, and must never print its "nothing here" message, because the user reads
+   * that as fact (Steward: almost every table claimed there was nothing until it
+   * loaded). The frame matches .empty-state exactly, so nothing shifts when the real
+   * rows arrive. */
+  function loadingBlock(title, hint, minHeight) {
+    return '<div class="empty-state" style="min-height:' + (minHeight || 180) + 'px" role="status" aria-live="polite">' +
+      "<div><h3>" + esc(title) + "</h3>" + (hint ? '<p class="muted">' + esc(hint) + "</p>" : "") + "</div></div>";
+  }
+  function loadingRow(colspan, title, hint, minHeight) {
+    return '<tr><td colspan="' + colspan + '">' + loadingBlock(title, hint, minHeight) + "</td></tr>";
   }
 
   function statusBadge(type, label) {
@@ -185,6 +218,7 @@ var ICONS = {
     ["requests", "Access requests", "/admin/requests"],
     ["accounts", "Accounts", "/admin/accounts"],
     ["backup", "Backups", "/admin/backups"],
+    ["updates", "Updates", "/admin/updates"],
     ["maintenance", "Billing maintenance", "/admin/maintenance"],
     ["settings", "Settings", "/admin/settings"],
     ["security", "Security", "/admin/security"]
@@ -193,7 +227,7 @@ var ICONS = {
   function profileChip() {
     var isAdmin = currentKind() === "admin";
     var acc = state.session && state.session.account ? state.session.account : null;
-    var name = isAdmin ? "Administrator" : (acc ? (acc.display_name || cap(acc.username)) : "Account");
+    var name = isAdmin ? "Administrator" : (acc ? firstNameOf(acc) : "Account");
     var sub = isAdmin ? "SteProTECH staff" : (acc ? acc.email : "");
     var initials = isAdmin ? "SO" : (acc ? initialsOf(acc.display_name || acc.username) : "?");
     // Interactive account chip (Steward 2026-09-04): toggles a drop-up menu
@@ -201,11 +235,22 @@ var ICONS = {
     // (admin clears + goes to admin sign-in, customer confirms + goes to entry,
     // impersonation exits first) so behavior stays identical to the topbar icon.
     return '<div class="profile-chip" role="button" tabindex="0" aria-haspopup="menu" aria-expanded="false" aria-controls="profile-chip-menu" data-action="profile-menu" title="Account menu">' +
-      '<span class="avatar">' + esc(initials) + '</span><span><strong>' + esc(name) + '</strong><small>' + esc(sub) + '</small></span>' +
+      '<span class="avatar">' + esc(initials) + '</span><span class="chip-text"><strong>' + esc(name) + '</strong><small>' + esc(sub) + '</small></span>' +
       '<svg class="chip-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></div>' +
       '<div class="chip-menu" id="profile-chip-menu" role="menu" aria-label="Account menu">' +
         '<button class="chip-menu-item" role="menuitem" data-action="signout-route">' + icon("signout") + " Log out</button>" +
       "</div>";
+  }
+  function firstNameOf(acc) {
+    // First name only (0.1.74, Steward): the chip is 216px wide, so a full name
+    // pushed the email into a hard clip at the container edge. `first_name` is
+    // the real field; older rows fall back to the first token of the display
+    // name ("Olisaemeka Ekwenem" -> "Olisaemeka"), then to the username.
+    var first = String((acc && acc.first_name) || "").trim();
+    if (first) return first;
+    var dn = String((acc && acc.display_name) || "").trim();
+    if (dn) return dn.split(/\s+/)[0];
+    return cap((acc && acc.username) || "");
   }
   function initialsOf(name) {
     var words = String(name || "?").split(/[\s._-]+/).filter(function (w) { return w.length; });
@@ -260,8 +305,8 @@ var ICONS = {
       "</div></div>";
   }
 
-  function pageHead(title, description, actions) {
-    return '<div class="page-head"><div><h1>' + esc(title) + '</h1><p class="muted">' + esc(description || "") + "</p></div>" + (actions || "") + "</div>";
+  function pageHead(title, description, actions, headCls) {
+    return '<div class="page-head' + (headCls ? " " + headCls : "") + '"><div><h1>' + esc(title) + '</h1><p class="muted">' + esc(description || "") + "</p></div>" + (actions || "") + "</div>";
   }
 
   /* ================= customer pages ================= */
@@ -277,12 +322,15 @@ var ICONS = {
     );
   }
 
+  // Fallback only since 0.1.98: nothing sends a visitor here any more, because a
+  // first-time email opens the create-account form immediately. It is kept so an
+  // unexpected status still renders a real page instead of a blank screen.
   function requestPage() {
     var email = state.gateEmail || "your address";
     return authLayout(
       '<div class="center-state"><div class="state-orb">' + icon("mail") + "</div>" +
       '<div class="eyebrow">Request received</div><h1>Your request is awaiting approval</h1>' +
-      '<p class="muted">A SteProTECH team member will review it shortly. We will email a one-time access code to <strong>' + esc(email) + "</strong>.</p>" +
+      '<p class="muted">A SteProTECH team member will review it shortly. Once approved we will email <strong>' + esc(email) + "</strong> so you can create your account.</p>" +
       '<div class="banner" style="margin:26px 0;text-align:left">' + icon("clock") +
         "<div><strong>Watch your inbox</strong><br><span class=\"small\">Approval is handled by a person. You do not need to submit another request.</span></div></div>" +
       '<div class="actions" style="justify-content:center"><button class="button secondary" data-route="/entry">Use a different email</button></div></div>'
@@ -301,14 +349,13 @@ var ICONS = {
 
   function codePage() {
     var email = state.gateEmail || "";
+    // 0.1.98 (Steward, 2026-10-11): this page is now the FIRST step of onboarding,
+    // not the result of an approval, so nothing here talks about being approved.
     return authLayout(
-      '<div class="eyebrow">Email approved</div><h1>Create your account</h1>' +
-      '<p class="muted">We sent an access code to <strong>' + esc(email) + '</strong> (expires after 72 hours). Enter it below and set your portal password. Your workspace is created after you choose a plan.</p>' +
+      '<div class="eyebrow">Get started</div><h1>Create your account</h1>' +
+      '<p class="muted">Add your name and a password, then choose a plan to set up your first workspace. Your account will use <strong>' + esc(email) + '</strong>.</p>' +
       '<form data-form="code"><div class="form-grid">' +
-        '<div class="field full"><label>Email address</label><input value="' + esc(email) + '" readonly><span class="hint">This email is already verified for you.</span></div>' +
-        '<div class="field full"><label for="access-token">Access code</label>' +
-        '<input id="access-token" name="token" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXX-XXXX" maxlength="9" style="text-transform:uppercase;letter-spacing:.12em;font-family:ui-monospace,monospace;font-weight:700">' +
-        '<span class="hint" id="token-hint">Looks like K7FQ-2MXP. Dashes optional.</span></div>' +
+        '<div class="field full"><label>Email address</label><input value="' + esc(email) + '" readonly><span class="hint">This is the email address you entered.</span></div>' +
         '<div class="field"><label>First name</label><input name="first_name" required maxlength="50"></div>' +
         '<div class="field"><label>Last name</label><input name="last_name" required maxlength="50"></div>' +
         '<div class="field"><label>Password</label><div class="input-row">' +
@@ -325,9 +372,10 @@ var ICONS = {
         '<span class="check" data-check="match" data-label="Passwords match">Passwords match</span></div>' +
       '</div>' +
       '<button class="button primary-wide" type="submit">Create account &amp; continue</button></form>' +
-      '<p class="small muted" style="text-align:center;margin-top:18px">Havent received it? <a href="#/entry">Use a different email</a> or contact support@steprotech.com</p>'
+      '<p class="small muted" style="text-align:center;margin-top:18px">Wrong address? <a href="#/entry">Use a different email</a> or contact support@steprotech.com</p>'
     );
   }
+
 
   function registerPage() {
     var email = state.gateEmail || "";
@@ -415,18 +463,38 @@ var ICONS = {
   function adminMfaPage() {
     var m = state.adminMfa;
     if (!m) { navigate("/admin/signin"); return ""; }
-    var hasEmail = m.methods.some(function (x) { return x.method === "email"; });
-    var hasPasskey = m.methods.some(function (x) { return x.method === "passkey"; });
+    var byMethod = {};
+    m.methods.forEach(function (x) { byMethod[x.method] = x; });
+    var hasEmail = !!byMethod.email;
+    var hasSms = !!byMethod.sms;
+    var hasPasskey = !!byMethod.passkey;
     var labels = m.methods.map(function (x) { return x.label || x.method; });
     var ex = labels.join(" or ");
+    // Nothing is sent automatically: an SMS costs real credits, so the admin presses the
+    // button and sees exactly where the code went. (0.1.90, Steward 2026-10-07.)
+    var senders = "";
+    if (hasSms) {
+      senders += '<button class="button primary-wide" data-action="admin-mfa-send" data-channel="sms">' +
+        icon("phone") + " Text me a code" + (byMethod.sms.to ? ' <span class="small">' + esc(byMethod.sms.to) + "</span>" : "") + "</button>";
+    }
+    if (hasEmail) {
+      senders += '<button class="button ' + (hasSms ? "secondary " : "") + 'primary-wide" style="margin-top:8px" data-action="admin-mfa-send" data-channel="email">' +
+        icon("mail") + " Email me a code" + (byMethod.email.to ? ' <span class="small">' + esc(byMethod.email.to) + "</span>" : "") + "</button>";
+    }
+    var sentNote = state.adminMfaSent
+      ? '<p class="small muted" style="text-align:center;margin-top:12px">Code sent to <b>' +
+        esc(state.adminMfaSent.to || "") + "</b> (" + esc(state.adminMfaSent.channel === "sms" ? "text message" : "email") + ").</p>"
+      : "";
     return authLayout(
       '<div class="eyebrow">Staff verification</div><h1>Enter your code</h1>' +
       '<p class="muted">Use your <b>' + esc(ex) + '</b> to finish signing in.</p>' +
+      (senders ? '<div style="margin-bottom:14px">' + senders + "</div>" : "") +
+      sentNote +
       '<form data-form="admin-mfa"><div class="field"><label>Verification code</label>' +
-      '<input id="admin-mfa-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" required placeholder="123456" maxlength="10"></div>' +
+      '<input id="admin-mfa-code" name="code" type="text" inputmode="text" autocapitalize="characters" ' +
+      'autocorrect="off" spellcheck="false" autocomplete="one-time-code" required placeholder="Code" maxlength="10"></div>' +
       '<button class="button primary-wide" type="submit">Verify &amp; sign in</button></form>' +
       (hasPasskey ? '<div style="text-align:center;margin-top:12px"><button class="button secondary" data-action="admin-mfa-passkey">' + icon("fingerprint") + " Use a passkey</button></div>" : "") +
-      (hasEmail ? '<p class="small muted" style="text-align:center;margin-top:14px"><a href="#" data-action="admin-mfa-resend">Resend email code</a></p>' : "") +
       '<p class="small muted" style="text-align:center;margin-top:20px">Customer? <a href="#/entry">Return to customer portal</a></p>'
     );
   }
@@ -536,7 +604,7 @@ var ICONS = {
     var s = subscriptionState();
     var inst = state.session && state.session.instances ? state.session.instances[0] : null;
     var used = state.session ? (state.session.instances || []).filter(function (i) { return i.status !== "deleted"; }).length : 0;
-    var quota = acc ? (acc.quota || 1) : 1;
+    var quota = allowanceFor(acc, state.session ? state.session.instances : []);
     var name = acc ? cap(acc.display_name || acc.username) : "";
     var running = s === "active";
     var provisionState = inst && inst.status === "provisioning";
@@ -559,9 +627,7 @@ var ICONS = {
       dashboardStatus() +
       '<div class="grid cols-3" style="margin-top:18px">' +
         '<section class="card"><div class="card-head"><h3>Subscription</h3>' + subBadgeFor(s) + "</div>" +
-          '<dl class="info-list"><div class="info-row"><dt>Plan</dt><dd>' + esc(planName(acc)) + "</dd></div>" +
-          '<div class="info-row"><dt>Annual fee</dt><dd>' + esc(planFee()) + "</dd></div>" +
-          '<div class="info-row"><dt>Period end</dt><dd>' + esc(periodEnd) + "</dd></div></dl></section>" +
+          subscriptionsList(acc, state.session ? (state.session.instances || []) : []) + "</section>" +
         '<section class="card"><div class="card-head"><h3>Workspace quota</h3><span class="muted small">' + used + " of " + quota + " used</span></div>" +
           '<div class="quota"><div class="bar"><span style="width:' + Math.min(100, quota ? Math.round(used / quota * 100) : 0) + '%"></span></div><strong>' + Math.round(quota ? used / quota * 100 : 0) + "%</strong></div>" +
           '<p class="small muted" style="margin-top:20px">' + (used < quota ? "You can create another workspace." : "Contact support if your business needs a higher limit.") + "</p>" +
@@ -578,13 +644,73 @@ var ICONS = {
     );
   }
 
-  function planName(acc) {
-    var p = state.plans.find(function (x) { return x.active; }) || state.plans[0];
-    return p ? p.name : "n8n Workspace";
+  /* ---------- package identity (0.1.73) ----------
+     A package is identified by the API's own `key` ('a' | 'b'), never by "the
+     first active plan": that shortcut printed the wrong package on every screen
+     for a Plus customer. Older API responses without `key` fall back to price. */
+  function planKeyOf(x) {
+    var k = x && x.plan;
+    return k === "b" ? "b" : "a";
   }
-  function planFee() {
-    var p = state.plans.find(function (x) { return x.active; }) || state.plans[0];
+  function planByKey(key) {
+    var want = key === "b" ? "b" : "a";
+    var list = state.plans || [];
+    var byKey = list.find(function (p) { return p.key === want; });
+    if (byKey) return byKey;
+    var byPrice = list.find(function (p) {
+      return want === "b" ? p.amount_minor === 50000 : p.amount_minor !== 50000;
+    });
+    return byPrice || null;
+  }
+  function planName(x) {
+    var p = planByKey(planKeyOf(x));
+    return (p && p.name) || (planKeyOf(x) === "b" ? "n8n Workspace Plus" : "n8n Workspace");
+  }
+  function planFee(x) {
+    var p = planByKey(planKeyOf(x));
     return p ? fmtMinor(p.amount_minor, p.currency) + " / year" : "-";
+  }
+  // Which packages does this account HOLD? Its own package plus any package a
+  // live workspace sits on (each workspace carries its own package since 0.1.70).
+  function heldPackages(acc, instances) {
+    var held = { a: false, b: false };
+    if (acc) held[planKeyOf(acc)] = true;
+    (instances || []).forEach(function (i) {
+      if (!i || i.status === "deleted" || i.status === "failed") return;
+      held[planKeyOf(i)] = true;
+    });
+    return held;
+  }
+  function quotaOf(acc, key) {
+    var value = acc ? (key === "b" ? acc.quota_b : acc.quota_a) : null;
+    if (value === null || value === undefined) value = acc ? acc.quota : null;
+    return Number(value || 0) || 1;
+  }
+  // The allowance the customer really has = one allowance per package held (the
+  // provisioning gate is per package). The legacy single `quota` field
+  // understated this for anyone holding both packages.
+  function allowanceFor(acc, instances) {
+    var held = heldPackages(acc, instances);
+    var total = 0;
+    if (held.a) total += quotaOf(acc, "a");
+    if (held.b) total += quotaOf(acc, "b");
+    if (total > 0) return total;
+    return (acc && acc.quota) || 1;
+  }
+  // Per-package usage lines ("n8n Workspace: 1 of 1 used") for the workspace page.
+  function allowanceBreakdown(acc, instances) {
+    var held = heldPackages(acc, instances);
+    var counts = { a: 0, b: 0 };
+    (instances || []).forEach(function (i) {
+      if (!i || i.status === "deleted" || i.status === "failed") return;
+      counts[planKeyOf(i)] += 1;
+    });
+    var rows = [];
+    ["a", "b"].forEach(function (k) {
+      if (!held[k]) return;
+      rows.push(planName({ plan: k }) + ": " + counts[k] + " of " + quotaOf(acc, k) + " used");
+    });
+    return rows;
   }
 
   function workspaceItemHtml(inst, badgeHtml, actionHtml) {
@@ -594,8 +720,123 @@ var ICONS = {
         statusBadge("off", "Not created") + "</article>";
     }
     return '<article class="workspace-item"><span class="workspace-logo">' + icon("workspace") + "</span>" +
-      "<div><h3>" + esc(titleCase(inst.stack_name)) + " workspace</h3><p>" + esc(inst.domain || "") + "</p></div>" +
-      (badgeHtml || "") + (actionHtml || "") + "</article>";
+      "<div><h3>" + esc(titleCase(inst.stack_name)) + " workspace" + wsPlanTag(inst) + "</h3><p>" + esc(inst.domain || "") + "</p></div>" +
+      (badgeHtml || "") + (actionHtml || "") + (inst ? selfUpdateHtml(inst) : "") +
+      (inst ? restartHtml(inst) : "") + "</article>";
+  }
+
+  /* ---- self-update (0.1.85) ----------------------------------------------------
+   * Workspace Plus customers may ask for an update, but it is ALWAYS queued: one
+   * workspace at a time per server, so the row shows where they are in the line
+   * instead of pretending it starts on click. Nothing is claimed before
+   * /me/updates has answered, and a GHS 300 workspace shows nothing at all.
+   */
+  function myUpdateFor(inst) {
+    if (!state.myUpdatesLoaded || !inst) return null;
+    var rows = state.myUpdates || [];
+    for (var i = 0; i < rows.length; i++) if (Number(rows[i].instance_id) === Number(inst.id)) return rows[i];
+    return null;
+  }
+  function fmtClock(ms) {
+    try { return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
+    catch (e) { return ""; }
+  }
+  function etaText(minutes) {
+    if (minutes === null || minutes === undefined) return "";
+    if (minutes <= 1) return "any moment now";
+    return "about " + minutes + " minutes (around " + fmtClock(Date.now() + minutes * 60000) + ")";
+  }
+  function selfUpdateHtml(inst) {
+    // Admin-gated exactly like backups (0.1.88): while the account is not permitted, the
+    // customer sees NO update UI at all, so nothing is claimed and nothing is promised.
+    if (!state.myUpdatesAllowed) return "";
+    var info = myUpdateFor(inst);
+    if (!info) return "";
+    if (info.queued) {
+      var q = info.queued;
+      if (q.status === "running") {
+        return '<span class="status awaiting">Updating now</span>';
+      }
+      return '<span class="status awaiting" title="' + esc(etaText(q.eta_minutes)) + '">Queued: ' +
+        (q.position ? ("position " + q.position + " on your server") : "waiting") + "</span>";
+    }
+    if (info.can_update) {
+      return '<button class="button small-btn" data-action="ws-self-update" data-id="' + inst.id + '">' +
+        icon("download") + " Update to " + esc(info.latest_version || "the latest version") + "</button>";
+    }
+    if (info.updates_unavailable) {
+      // the release check is down: nothing can be compared, so this must not read as
+      // "on the latest version" or offer a button that the server would refuse
+      return '<span class="status muted" title="The version check is unavailable right now.">Version check unavailable</span>';
+    }
+    if (info.blocked_reason) {
+      return '<span class="small muted">' + esc(info.blocked_reason) + "</span>";
+    }
+    if (info.last && info.last.status === "done" && info.last.to_version) {
+      return '<span class="small muted">Updated to ' + esc(info.last.to_version) + "</span>";
+    }
+    if (!info.needs_update && info.current_version) {
+      return '<span class="small muted">On ' + esc(info.current_version) + " (latest)</span>";
+    }
+    if (info.needs_update) {
+      return '<span class="small muted">Update available, ask support</span>';
+    }
+    return "";
+  }
+  function restartHtml(inst) {
+    /* Restart is NOT an update (Steward, 2026-10-08): the same container starts again on
+     * the same image with the same data, so it is offered to everyone on their own
+     * workspace and needs no permission and no release check. Nothing is offered while an
+     * update is queued or running for it, because the server refuses that on purpose, nor
+     * for a switched-off workspace, which has no container to start.
+     */
+    if (!inst || inst.locked) return "";
+    var info = myUpdateFor(inst);
+    if (info && info.queued) return "";
+    return '<button class="button secondary small-btn" data-action="ws-restart" data-id="' +
+      inst.id + '">' + icon("refresh") + " Restart</button>";
+  }
+
+  async function ensureMyUpdates(force) {
+    if (state.myUpdatesLoaded && !force) return;
+    try {
+      var d = await api("/me/updates");
+      state.myUpdates = (d && d.items) || [];
+      state.myUpdatesLatest = (d && d.latest_version) || "";
+      state.myUpdatesAllowed = !!(d && d.update_allowed);
+    } catch (e) { state.myUpdates = state.myUpdates || []; }
+    // marked either way, so a broken read cannot leave the rows blank for ever
+    state.myUpdatesLoaded = true;
+    if (!modalRoot.children.length) render();
+  }
+  async function queueUpdates(ids) {
+    var body = ids ? { instance_ids: ids } : { all_behind: true };
+    try {
+      var r = await api("/admin/updates/queue", { method: "POST", body: body });
+      var n = (r && r.queued ? r.queued.length : 0);
+      var msg = n
+        ? n + " workspace(s) queued. One updates at a time per server, then the report arrives when the run finishes."
+        : "Nothing new to queue.";
+      if (r && r.skipped && r.skipped.length) msg += " Skipped " + r.skipped.length + ".";
+      showToast(n ? "Queue updated" : "Nothing to queue", msg);
+      state.updSel = {};
+      state.adminUpdatesLoaded = false;
+      await ensureAdminUpdates(true);
+    } catch (e) {
+      showToast("Could not queue", (e && e.message) || "Try again.");
+    }
+  }
+  async function ensureAdminUpdates(force) {
+    if (state.adminUpdatesLoaded && !force) return;
+    try {
+      state.adminUpdates = await api("/admin/updates");
+    } catch (e) {
+      // never leave a half-page: an unanswered load says so, it does not look empty
+      state.adminUpdates = state.adminUpdates ||
+        { load_error: (e && e.message) || "The update queue could not be loaded." };
+    }
+    state.adminUpdatesLoaded = true;
+    if (!modalRoot.children.length) render();
   }
 
   function customerWorkspaces() {
@@ -603,7 +844,8 @@ var ICONS = {
     var acc = state.session ? state.session.account : null;
     var insts = state.session ? (state.session.instances || []).filter(function (i) { return i.status !== "deleted"; }) : [];
     var used = insts.length;
-    var quota = acc ? (acc.quota || 1) : 1;
+    var quota = allowanceFor(acc, insts);
+    var allowanceRows = allowanceBreakdown(acc, insts);
     var detail = "";
     if (s === "provisioning") {
       detail = '<section class="card" style="margin-top:18px"><div class="hero-status info"><span class="big-icon">' + icon("clock") + '</span><div><h2>Your workspace is being prepared</h2><p>You can close this page. We will email you the moment it is ready.</p></div></div>' +
@@ -632,8 +874,8 @@ var ICONS = {
         ? '<a class="button small-btn" href="https://' + esc(i.domain) + '/" target="_blank" rel="noopener">Open ' + icon("external") + "</a>"
         : '<button class="button secondary small-btn" data-action="workspace-detail" data-id="' + i.id + '">Details</button>';
       return '<article class="workspace-item"><span class="workspace-logo">' + icon("workspace") + "</span>" +
-        "<div><h3>" + esc(titleCase(i.stack_name)) + " workspace</h3><p>https://" + esc(i.domain) + "<br>Created " + esc(fmtDate(i.created_at)) + "</p></div>" +
-        badge + action + "</article>";
+        "<div><h3>" + esc(titleCase(i.stack_name)) + " workspace" + wsPlanTag(i) + "</h3><p>https://" + esc(i.domain) + "<br>Created " + esc(fmtDate(i.created_at)) + "</p></div>" +
+        badge + action + selfUpdateHtml(i) + "</article>";
     }).join("")
       : '<div class="empty-state" style="min-height:240px"><div><h3>No workspaces yet</h3><p class="muted">' + esc(emptyCopy) + "</p></div></div>";
     return appLayout("customer", "My workspaces", "workspace",
@@ -642,6 +884,7 @@ var ICONS = {
       '<section class="card" style="margin-top:18px"><div class="card-head"><h3>Workspace allowance</h3><strong>' + used + " of " + quota + " used</strong></div>" +
         '<div class="quota"><div class="bar"><span style="width:' + Math.min(100, quota ? Math.round(used / quota * 100) : 0) + '%"></span></div>' +
         '<span>' + Math.max(0, quota - used) + " available</span></div>" +
+        (allowanceRows.length > 1 ? '<p class="small muted" style="margin:14px 0 0">' + esc(allowanceRows.join(" - ")) + "</p>" : "") +
         '<p class="small muted" style="margin:18px 0 0">Each workspace receives its own secure SteProTECH address. Contact support if you need more than your current allowance.</p></section>' +
       "</main>");
   }
@@ -667,8 +910,10 @@ var ICONS = {
         "<p>" + esc(fmtDate(b.created_at)) + " &middot; " + esc(sizeTxt) + (b.error ? " &middot; " + esc(b.error) : "") + "</p></div>" +
         status + dl + "</div>";
     }).join("");
-    var listHtml = rows ? rows : '<div class="empty-state"><div><h3>No backups yet</h3>' +
-      '<p class="muted">Create a backup of your workspace below.</p></div></div>';
+    var listHtml = rows ? rows : (state.backupsLoaded
+      ? '<div class="empty-state"><div><h3>No backups yet</h3>' +
+        '<p class="muted">Create a backup of your workspace below.</p></div></div>'
+      : loadingBlock("Loading backups...", "Fetching your workspace backups.", 240));
 
     var buttonsByInst = insts.map(function (i) {
       var st = i.locked ? "locked" : i.status;
@@ -696,6 +941,83 @@ var ICONS = {
     return (n >= 10 ? Math.round(n) : n.toFixed(1)) + " " + u[i];
   }
 
+  // Package copy (0.1.69): distinct contents per package, keyed by price so it
+  // works whichever Paystack plan id comes back.
+  function isPlusPlan(p) { return !!p && (p.key ? p.key === "b" : p.amount_minor === 50000); }
+  function wsPlanTag(i) {
+    // Package chip for a workspace row (0.1.70): each workspace carries its own package.
+    return i && i.plan === "b" ? ' <span class="status info">Plus</span>' : ' <span class="status neutral">GHS 300</span>';
+  }
+  function planBlurbFor(p) {
+    return isPlusPlan(p)
+      ? '<p class="muted">Everything in n8n Workspace, plus Python and hands-on AI assistant setup help.</p>'
+      : '<p class="muted">A private, managed n8n environment for your business automations.</p>';
+  }
+  function planFeaturesFor(p) {
+    if (isPlusPlan(p)) {
+      return [
+        "Everything in n8n Workspace",
+        "Python code node - managed Python environment attached by our team",
+        "AI assistant setup - guided configuration of your n8n AI Assistant with hands-on help from SteProTECH",
+        "Priority email support",
+        "Automatic annual renewal"
+      ];
+    }
+    return [
+      "Your own private n8n workspace",
+      "Your own secure address (https)",
+      "Full workflow builder - unlimited workflows",
+      "400+ app integrations and AI model nodes",
+      "JavaScript code node",
+      "Email support",
+      "Automatic annual renewal"
+    ];
+  }
+
+  // Resource specs (0.1.73): rendered straight from the API `specs` list, which
+  // the backend derives from the real stack template - so the card can never
+  // advertise resources the workspace does not actually get.
+  function planSpecsBlock(p) {
+    var rows = (p && p.specs) || [];
+    if (!rows.length) return "";
+    return '<div>' +
+      '<p class="small muted" style="margin:24px 0 2px;font-weight:700">Resources included</p>' +
+      '<dl class="info-list">' + rows.map(function (r) {
+        return '<div class="info-row"><dt class="small">' + esc(r.label) + '</dt>' +
+          '<dd class="small" style="text-align:right;margin-left:auto">' + esc(r.value) + "</dd></div>";
+      }).join("") + "</dl></div>";
+  }
+
+  function subscriptionsList(acc, instances) {
+    // One row per package the customer actually holds (0.1.71): account plan +
+    // any workspace whose package differs shows as its own subscription line
+    // with its own renewal date. Annual interval, Paystack - same for all.
+    var live = (instances || []).filter(function (i) { return i.status !== "deleted"; });
+    var accPlan = (acc && acc.plan) === "b" ? "b" : "a";
+    var periodEnd = acc && acc.paid_until ? fmtDate(acc.paid_until) : "not set";
+    var seen = {};
+    var rows = [];
+    function row(planKey, label, note) {
+      if (seen[planKey]) return;
+      seen[planKey] = true;
+      rows.push('<div class="info-row"><dt>' + esc(label) + '</dt><dd>' + esc(note) +
+        '<br><span class="small muted">Annually - renews ' + esc(periodEnd) + ' - Paystack</span></dd></div>');
+    }
+    var accLabel = accPlan === "b" ? "n8n Workspace Plus subscription (GHS 500/yr)" : "n8n Workspace subscription (GHS 300/yr)";
+    row(accPlan, accLabel, "Account package");
+    live.forEach(function (i) {
+      var wp = i.plan === "b" ? "b" : "a";
+      if (wp !== accPlan) {
+        row(wp, wp === "b" ? "n8n Workspace Plus subscription (GHS 500/yr)" : "n8n Workspace subscription (GHS 300/yr)",
+            "Workspace: " + (i.stack_name || "workspace"));
+      }
+    });
+    if (!rows.length) {
+      rows.push('<div class="info-row"><dt>Plan</dt><dd>No active subscription</dd></div>');
+    }
+    return '<dl class="info-list">' + rows.join("") + "</dl>";
+  }
+
   function customerBilling() {
     var acc = state.session ? state.session.account : null;
     var s = subscriptionState();
@@ -707,23 +1029,38 @@ var ICONS = {
     var subscribed = sub === "active" && s !== "expired" && s !== "pastdue" && s !== "cancelled";
     var due = s === "pastdue" || s === "expired" || s === "cancelled" || sub === "locked" || sub === "past_due" || sub === "unpaid";
     var openPay = state.paymentsOpen !== false;
+    var held = heldPackages(acc, state.session ? (state.session.instances || []) : []);
     var planCards = plans.map(function (p) {
+      var key = p.key || (p.amount_minor === 50000 ? "b" : "a");
+      var holdsThis = !!held[key];
       var activePlan = !!p.active;
       if (activePlan) {
+        // Only the package the customer actually holds may read "Already
+        // subscribed" (Steward 2026-09-27); the other one stays actionable so
+        // it can be added later as a second subscription.
         var cta;
-        if (subscribed) {
+        if (holdsThis && subscribed) {
           cta = '<span class="plan-already">' + icon("check") + " Already subscribed</span>";
+        } else if (holdsThis && due) {
+          cta = '<button class="button warning" data-action="pay-now" data-plan="' + key + '">Renew subscription</button>';
         } else if (!openPay) {
           cta = '<button class="button' + (due ? " warning" : "") + '" disabled title="New payments are paused by SteProTECH">Payments on hold</button>';
-        } else if (due) {
-          cta = '<button class="button warning" data-action="pay-now" data-plan="' + (p.amount_minor === 50000 ? "b" : "a") + '">Renew subscription</button>';
         } else {
-          cta = '<button class="button" data-action="pay-now" data-plan="' + (p.amount_minor === 50000 ? "b" : "a") + '">Subscribe</button>';
+          cta = '<button class="button" data-action="pay-now" data-plan="' + key + '">Subscribe</button>';
         }
-        return '<article class="plan-card featured"><div class="eyebrow">Available now</div><h2>' + esc(p.name) + "</h2>" +
+        // NB: read paid_until straight off the account - the page-level
+        // `periodEnd` below is declared later and would be undefined here.
+        var renewal = acc && acc.paid_until ? fmtDate(acc.paid_until) : "";
+        var stateLine = holdsThis
+          ? '<p class="small muted" style="margin:14px 0 0">Your package - ' +
+            (renewal ? "renews on " + esc(renewal) + " at " : "") +
+            esc(fmtMinor(p.amount_minor, p.currency)) + " per year.</p>"
+          : '<p class="small muted" style="margin:14px 0 0">Not subscribed yet - you can add it any time. Each package carries its own workspace allowance.</p>';
+        return '<article class="plan-card featured"><div class="eyebrow">' + (holdsThis ? "Your package" : "Available now") + "</div><h2>" + esc(p.name) + "</h2>" +
           '<div class="plan-price">' + esc(fmtMinor(p.amount_minor, p.currency)) + ' <span>per year</span></div>' +
-          '<p class="muted">A private, managed n8n environment for your business automations.</p>' +
-          '<ul class="feature-list">' + ["Your own private workspace", "Your own secure address", "Email support", "Automatic annual renewal"].map(function (f) { return "<li>" + icon("check") + "<span>" + esc(f) + "</span></li>"; }).join("") + "</ul>" +
+          planBlurbFor(p) + stateLine +
+          '<ul class="feature-list">' + planFeaturesFor(p).map(function (f) { return "<li>" + icon("check") + "<span>" + esc(f) + "</span></li>"; }).join("") + "</ul>" +
+          planSpecsBlock(p) +
           cta + "</article>";
       }
       return '<article class="plan-card disabled"><span class="ribbon">Coming soon</span><div class="eyebrow">Future plan</div><h2>' + esc(p.name) + "</h2>" +
@@ -747,10 +1084,7 @@ var ICONS = {
       '<div class="plan-grid">' + planCards + "</div>" +
       '<div class="grid cols-2" style="margin-top:20px">' +
         '<section class="card"><div class="card-head"><h2>Subscription details</h2>' + statusRow + "</div>" +
-          '<dl class="info-list"><div class="info-row"><dt>Plan</dt><dd>' + esc(planName(acc)) + "</dd></div>" +
-          '<div class="info-row"><dt>Billing interval</dt><dd>Annually</dd></div>' +
-          '<div class="info-row"><dt>Current period end</dt><dd>' + esc(periodEnd) + "</dd></div>" +
-          '<div class="info-row"><dt>Payment method</dt><dd>Paystack</dd></div></dl></section>' +
+          subscriptionsList(acc, state.session ? (state.session.instances || []) : []) + '</section>' +
         '<section class="card"><h2>How renewal works</h2><div class="timeline">' +
           '<div class="timeline-item"><h3>Your card is charged</h3><p>At the end of the 12-month paid period.</p></div>' +
           '<div class="timeline-item"><h3>You receive the result by email</h3><p>Successful renewal keeps everything running.</p></div>' +
@@ -817,24 +1151,31 @@ var ICONS = {
   function adminOverview() {
     var accounts = state.adminAccounts || [];
     var requests = state.requests || [];
-    var awaiting = requests.filter(function (r) { return r.status === "requested"; }).length;
+    // 0.1.98: nobody waits for an approval, so the useful number here is how many
+    // people opened the form and have not finished registering. The old counter
+    // (status 'requested') is dead and would sit at 0 forever.
+    var pendingSignup = requests.filter(function (r) { return r.status === "approved" || r.status === "token_sent"; }).length;
     var pastDue = accounts.filter(function (a) { return a.subscription_status === "past_due"; }).length;
     var locked = accounts.filter(function (a) { return a.subscription_status === "locked" || a.subscription_status === "canceled"; }).length;
     var total = accounts.length;
 
     var requestRows = requests.slice(0, 6);
+    // The four counters below are computed from two lists; before those lists
+    // answer, a 0 is a claim about the business, not a fact (0.1.84).
+    var acctKnown = state.adminAccountsLoaded;
+    var reqKnown = state.requestsLoaded;
 
     return appLayout("admin", "Overview", "overview",
       '<main class="page">' + pageHead("Today at a glance", "See what needs attention and jump directly to the right task.") +
       '<div class="grid cols-4">' +
-        '<article class="card metric"><div class="metric-top"><span class="metric-icon">' + icon("requests") + "</span>" + statusBadge("awaiting", "Needs review") + "</div>" +
-          '<div class="metric-value">' + awaiting + '</div><p class="muted">Access requests awaiting approval</p><a href="#/admin/requests">Review requests ' + icon("arrow") + '</a></article>' +
+        '<article class="card metric"><div class="metric-top"><span class="metric-icon">' + icon("requests") + "</span>" + statusBadge("approved", "Not registered yet") + "</div>" +
+          '<div class="metric-value">' + (reqKnown ? pendingSignup : "...") + '</div><p class="muted">Opened the form, not yet registered</p><a href="#/admin/requests">Review requests ' + icon("arrow") + '</a></article>' +
         '<article class="card metric"><div class="metric-top"><span class="metric-icon" style="background:var(--amber-100);color:var(--amber-700)">' + icon("warning") + "</span></div>" +
-          '<div class="metric-value">' + pastDue + '</div><p class="muted">Accounts past due</p><a href="#/admin/accounts">View accounts ' + icon("arrow") + '</a></article>' +
+          '<div class="metric-value">' + (acctKnown ? pastDue : "...") + '</div><p class="muted">Accounts past due</p><a href="#/admin/accounts">View accounts ' + icon("arrow") + '</a></article>' +
         '<article class="card metric"><div class="metric-top"><span class="metric-icon" style="background:var(--green-100);color:var(--green-700)">' + icon("workspace") + "</span></div>" +
-          '<div class="metric-value">' + locked + '</div><p class="muted">Locked / cancelled accounts</p><a href="#/admin/accounts">Review ' + icon("arrow") + '</a></article>' +
+          '<div class="metric-value">' + (acctKnown ? locked : "...") + '</div><p class="muted">Locked / cancelled accounts</p><a href="#/admin/accounts">Review ' + icon("arrow") + '</a></article>' +
         '<article class="card metric"><div class="metric-top"><span class="metric-icon" style="background:var(--slate-100);color:var(--slate-700)">' + icon("account") + "</span></div>" +
-          '<div class="metric-value">' + total + '</div><p class="muted">Total customer accounts</p><a href="#/admin/accounts">View accounts ' + icon("arrow") + '</a></article>' +
+          '<div class="metric-value">' + (acctKnown ? total : "...") + '</div><p class="muted">Total customer accounts</p><a href="#/admin/accounts">View accounts ' + icon("arrow") + '</a></article>' +
       "</div>" +
       envHealthCards() +
       '<div class="grid cols-3 overview-row" style="margin-top:18px">' +
@@ -842,7 +1183,9 @@ var ICONS = {
           '<div class="table-wrap"><table><thead><tr><th>Email</th><th>Status</th><th>Requested</th></tr></thead><tbody>' +
           (requestRows.length ? requestRows.map(function (r) {
             return "<tr><td><strong>" + esc(r.email) + "</strong></td><td>" + requestStatusLabel(r.status) + "</td><td>" + esc(fmtDateTime(r.created_at)) + "</td></tr>";
-          }).join("") : '<tr><td colspan="3"><div class="empty-state" style="min-height:160px"><div><h3>No access requests</h3><p class="muted">New requests appear here.</p></div></div></td></tr>') +
+          }).join("") : (state.requestsLoaded
+            ? '<tr><td colspan="3"><div class="empty-state" style="min-height:160px"><div><h3>No access requests</h3><p class="muted">New requests appear here.</p></div></div></td></tr>'
+            : loadingRow(3, "Loading access requests...", "", 160))) +
           "</tbody></table></div></section>" +
         '<aside class="card"><h2>Quick actions</h2><div class="grid">' +
           '<a class="button" href="#/admin/requests">Review access requests</a>' +
@@ -855,7 +1198,7 @@ var ICONS = {
 
   function requestStatusLabel(st) {
     if (st === "requested") return statusBadge("awaiting", "Awaiting approval");
-    if (st === "token_sent") return statusBadge("approved", "Code sent");
+    if (st === "approved" || st === "token_sent") return statusBadge("approved", "Approved");
     if (st === "denied") return statusBadge("denied", "Disapproved");
     return statusBadge("registered", "Already registered");
   }
@@ -865,32 +1208,34 @@ var ICONS = {
     var counts = {
       all: requests.length,
       awaiting: requests.filter(function (r) { return r.status === "requested"; }).length,
-      approved: requests.filter(function (r) { return r.status === "token_sent"; }).length,
+      approved: requests.filter(function (r) { return r.status === "approved" || r.status === "token_sent"; }).length,
       denied: requests.filter(function (r) { return r.status === "denied"; }).length
     };
     var filter = state.accessFilter || "all";
     var rows = requests.filter(function (r) {
       if (filter === "all") return true;
       if (filter === "awaiting") return r.status === "requested";
-      if (filter === "approved") return r.status === "token_sent";
+      if (filter === "approved") return r.status === "approved" || r.status === "token_sent";
       return r.status === "denied";
     });
     return appLayout("admin", "Access requests", "requests",
       '<main class="page">' + pageHead("Access requests", "Approve new customers, decline unwanted requests, or remove test/spam entries. Approved members move to the Accounts list once they register.") +
       '<section class="card flush"><div class="tabs">' +
-        [["all", "All"], ["awaiting", "Awaiting approval"], ["approved", "Code sent"], ["denied", "Disapproved"]].map(function (t) {
+        [["all", "All"], ["awaiting", "Awaiting approval"], ["approved", "Approved"], ["denied", "Disapproved"]].map(function (t) {
           return '<button class="tab' + (filter === t[0] ? " active" : "") + '" data-filter="' + t[0] + '">' + t[1] + " (" + counts[t[0]] + ")</button>";
         }).join("") +
       "</div>" +
       '<div class="table-wrap"><table><thead><tr><th>Email</th><th>Requested</th><th>Status</th><th>Action</th></tr></thead><tbody>' +
         (rows.length ? rows.map(function (r) {
-          var canApprove = r.status === "requested";
-          var canCourse = r.status === "requested" || r.status === "token_sent";
+          var canApprove = r.status !== "denied" && r.status !== "registered";
+          var canCourse = r.status === "requested" || r.status === "approved" || r.status === "token_sent";
           var action = (canApprove ? '<button class="button small-btn" data-approve="' + r.id + '">Approve</button>' : "") +
             (canCourse ? '<button class="button ghost small-btn" data-request-deny="' + r.id + '">Disapprove</button>' : "") +
             '<button class="button ghost small-btn" data-request-delete="' + r.id + '">Delete</button>';
           return "<tr><td><strong>" + esc(r.email) + "</strong></td><td>" + esc(fmtDateTime(r.created_at)) + "</td><td>" + requestStatusLabel(r.status) + "</td><td>" + action + "</td></tr>";
-        }).join("") : '<tr><td colspan="4"><div class="empty-state" style="min-height:220px"><div><h3>No matching requests</h3><p class="muted">New requests will appear here after someone enters their email on the portal.</p></div></div></td></tr>') +
+        }).join("") : (state.requestsLoaded
+          ? '<tr><td colspan="4"><div class="empty-state" style="min-height:220px"><div><h3>No matching requests</h3><p class="muted">New requests will appear here after someone enters their email on the portal.</p></div></div></td></tr>'
+          : loadingRow(4, "Loading access requests...", "", 220))) +
       "</tbody></table></div></section></main>");
   }
 
@@ -906,7 +1251,9 @@ var ICONS = {
           "<td>" + esc(a.email) + "</td>" +
           "<td>" + statusBadge("archived", "Archived") + "</td>" +
           '<td><button class="button small-btn" data-action="admin-restore" data-id="' + a.id + '">Restore</button></td></tr>';
-      }).join("") : '<tr><td colspan="4"><div class="empty-state" style="min-height:220px"><div><h3>No archived accounts</h3><p class="muted">Archived accounts move here instead of being deleted.</p></div></div></td></tr>') +
+      }).join("") : (state.adminArchivedLoaded
+        ? '<tr><td colspan="4"><div class="empty-state" style="min-height:220px"><div><h3>No archived accounts</h3><p class="muted">Archived accounts move here instead of being deleted.</p></div></div></td></tr>'
+        : loadingRow(4, "Loading archived accounts...", "", 220))) +
       "</tbody></table></div></section></main>");
   }
 
@@ -951,6 +1298,22 @@ var ICONS = {
       '<button class="button" data-action="sec-passkey-setup" data-kind="' + (isAdmin ? "admin" : "user") + '">' + icon("key") + " Add a passkey</button>" +
       passkeyList +
       "</section>";
+    // SMS card (0.1.90). Admin only in this release: customers keep the two channels
+    // they already have, and SMS needs a phone number per customer plus their opt-in.
+    var smsOn = !!(st && st.sms_2fa);
+    var hasPhone = !!(st && st.has_phone);
+    var smsCard = isAdmin
+      ? '<section class="card"><div class="card-head"><h2>Text message (SMS)</h2>' +
+        (smsOn ? statusBadge("active", "On") : statusBadge("pending", "Off")) + "</div>" +
+        '<p class="muted">We text a 6-digit code to your phone at sign-in' +
+        (hasPhone && st.admin_phone_masked ? " (" + esc(st.admin_phone_masked) + ")" : "") + ".</p>" +
+        (smsOn
+          ? '<button class="button secondary" data-action="sec-sms-disable">Turn off SMS 2FA</button>'
+          : (hasPhone
+            ? '<button class="button" data-action="sec-sms-setup">' + icon("phone") + " Set up SMS 2FA</button>"
+            : '<p class="small muted">Add your phone number in <a href="#/admin/settings">Settings</a> first, then come back here.</p>')) +
+        "</section>"
+      : "";
     var heading = isAdmin ? "Admin security" : "Account security";
     // "How it works" lives in the second row as a real card (2x2 grid) so the
     // page shows four evenly-spaced cards that look identical to their
@@ -962,7 +1325,10 @@ var ICONS = {
     return appLayout(isAdmin ? "admin" : "customer", "Security", "security",
       '<main class="page">' + pageHead(heading, "Add a second factor to your sign-in. You can use any combination; a code from one of them is required at login.") +
       '<div class="grid cols-2" style="margin-top:10px">' + totpCard + emailCard + "</div>" +
-      '<div class="grid cols-2" style="margin-top:10px">' + passkeyCard + howCard + "</div>" +
+      (isAdmin
+        ? '<div class="grid cols-2" style="margin-top:10px">' + smsCard + passkeyCard + "</div>" +
+          '<div style="margin-top:10px">' + howCard + "</div>"
+        : '<div class="grid cols-2" style="margin-top:10px">' + passkeyCard + howCard + "</div>") +
       "</main>");
   }
 
@@ -978,7 +1344,10 @@ var ICONS = {
         (archivedCount ? '<a class="button secondary" href="#/admin/archived">' + icon("archive") + " Archived (" + archivedCount + ")</a>" : "") +
         '<a class="button secondary" href="#/admin/requests">' + icon("requests") + " New requests</a></div>") +
       '<section class="card flush"><div class="table-tools"><div class="search"><input id="account-search" type="search" placeholder="Search name, email, or username" aria-label="Search accounts"></div></div>' +
-      '<div class="table-wrap"><table><thead><tr><th>Customer</th><th>Plan</th><th>Subscription</th><th>Period end</th><th>Quota</th><th>Backup</th><th></th></tr></thead><tbody>' +
+      // The header already says Backup / Update, so the buttons only need the verb: the full
+      // sentence lives in the tooltip, the confirm popup and the accessible name (Steward,
+      // 2026-10-07 - the wide labels were what forced the table to scroll sideways).
+      '<div class="table-wrap"><table class="accounts-table"><thead><tr><th>Customer</th><th>Plan</th><th>Subscription</th><th>Period end</th><th>Quota</th><th>Backup</th><th>Update</th><th></th></tr></thead><tbody>' +
         (accounts.length ? accounts.map(function (a) {
           var badge = a.subscription_status === "active" ? statusBadge("active", "Active")
             : a.subscription_status === "past_due" ? statusBadge("pastdue", "Past due")
@@ -988,18 +1357,187 @@ var ICONS = {
           var stateBadge = a.account_state === "suspended" ? statusBadge("suspended", "Suspended")
             : a.account_state === "archived" ? statusBadge("archived", "Archived") : "";
           var bkBadge = a.backup_enabled ? statusBadge("active", "On") : statusBadge("off", "Off");
+          var updBadge = a.update_enabled ? statusBadge("active", "On") : statusBadge("off", "Off");
           return "<tr data-account-row=\"" + a.id + "\">" +
-            '<td><div class="customer-cell"><span class="avatar">' + esc(initialsOf(a.display_name || a.username)) + '</span><span class="cell-text"><strong>' + esc(a.display_name || cap(a.username)) + "</strong><span>" + esc(a.email) + "</span></span></div></td>" +
+            // The name IS the way into the account (Steward, 2026-10-07): a real link, so
+            // keyboard users can open it too, and the actions cell no longer needs a
+            // "View account" button (which is what pushed the table into a sideways scroll).
+            '<td><a class="customer-cell cell-link" href="#/admin/account/' + a.id + '" data-route="/admin/account/' + a.id + '" title="Open this account"><span class="avatar">' + esc(initialsOf(a.display_name || a.username)) + '</span><span class="cell-text"><strong>' + esc(a.display_name || cap(a.username)) + "</strong><span>" + esc(a.email) + "</span></span></a></td>" +
             "<td>" + esc(planName(a)) + "</td>" +
             "<td>" + badge + (stateBadge ? " " + stateBadge : "") + "</td>" +
             "<td>" + esc(fmtDate(a.paid_until)) + "</td>" +
             "<td>" + (a.quota || 1) + "</td>" +
             '<td class="cell-actions-td"><div class="cell-actions fill">' + bkBadge +
-            '<button class="button secondary small-btn" data-action="admin-backup-toggle" data-id="' + a.id + '" data-on="' + (a.backup_enabled ? "1" : "0") + '">' + (a.backup_enabled ? "Revoke" : "Allow") + " backup</button></div></td>" +
-            '<td class="cell-actions-td"><div class="cell-actions">' + (a.account_state === "active" ? '<button class="button secondary small-btn" data-action="admin-impersonate" data-id="' + a.id + '">' + icon("eye") + " Login as user</button>" : "") +
-            '<button class="button secondary small-btn" data-route="/admin/account/' + a.id + '">View account</button></div></td></tr>';
-        }).join("") : '<tr><td colspan="7"><div class="empty-state" style="min-height:240px"><div><h3>No customer accounts yet</h3><p class="muted">Accounts appear here after registration.</p></div></div></td></tr>') +
+            '<button class="button secondary small-btn" data-action="admin-backup-toggle" data-id="' + a.id + '" data-on="' + (a.backup_enabled ? "1" : "0") + '" title="' + (a.backup_enabled ? "Revoke backup access for this account" : "Allow backup access for this account") + '" aria-label="' + (a.backup_enabled ? "Revoke backup access for this account" : "Allow backup access for this account") + '">' + (a.backup_enabled ? "Revoke" : "Allow") + "</button></div></td>" +
+            '<td class="cell-actions-td"><div class="cell-actions fill">' + updBadge +
+            '<button class="button secondary small-btn" data-action="admin-update-toggle" data-id="' + a.id + '" data-on="' + (a.update_enabled ? "1" : "0") + '" title="' + (a.update_enabled ? "Revoke update access for this account" : "Allow update access for this account") + '" aria-label="' + (a.update_enabled ? "Revoke update access for this account" : "Allow update access for this account") + '">' + (a.update_enabled ? "Revoke" : "Allow") + "</button></div></td>" +
+            '<td class="cell-actions-td"><div class="cell-actions">' + (a.account_state === "active" ? '<button class="button secondary small-btn" data-action="admin-impersonate" data-id="' + a.id + '" title="Login as user" aria-label="Login as user">' + icon("eye") + " Login</button>" : "") +
+            "</div></td></tr>";
+        }).join("") : (state.adminAccountsLoaded
+          ? '<tr><td colspan="8"><div class="empty-state" style="min-height:240px"><div><h3>No customer accounts yet</h3><p class="muted">Accounts appear here after registration.</p></div></div></td></tr>'
+          : loadingRow(8, "Loading customer accounts...", "", 240))) +
       "</tbody></table></div></section></main>");
+  }
+
+  /* ---- admin Updates page (0.1.85, Steward 2026-10-07) -----------------------
+   * This page is where the pacing is explained as well as performed: one workspace
+   * at a time PER SERVER, five minutes of quiet after each one is verified stable,
+   * an admin batch ahead of customer requests, and a single manual update from the
+   * workspace row that never waits (it only holds that server's slot).
+   */
+  function updateStateBadge(w, latestKnown) {
+    if (w.queued) {
+      return w.queued.status === "running" ? statusBadge("provisioning", "Updating now")
+        : statusBadge("awaiting", "Queued" + (w.queued.position ? " (" + w.queued.position + ")" : ""));
+    }
+    if (w.locked) return statusBadge("off", "Locked");
+    if (w.status === "provisioning") return statusBadge("neutral", "Being set up");
+    if (latestKnown === false) return statusBadge("warning", "Cannot compare");
+    if (w.version_unknown) return statusBadge("neutral", "Version unknown");
+    if (w.needs_update) return statusBadge("awaiting", "Needs update");
+    return statusBadge("running", "Up to date");
+  }
+  function updateRowHtml(w, sel, latestKnown) {
+    var host = "server " + w.host;
+    var last = w.last;
+    var lastTxt = last
+      ? (last.status === "done" ? "Updated to " + esc(last.to_version || "") + " on " + esc(fmtDate(last.at || 0))
+        : last.status === "failed" ? "Failed: " + esc((last.error || "see report"))
+        : esc(last.status) + " on " + esc(fmtDate(last.at || 0)))
+      : "Never updated from here";
+    return "<tr>" +
+      '<td style="padding:8px"><input type="checkbox" data-upd-check value="' + w.instance_id + '"' +
+        (sel[w.instance_id] ? " checked" : "") +
+        (w.queued ? " disabled" : "") + ' aria-label="Select ' + esc(w.stack_name) + '"></td>' +
+      "<td style=\"padding:8px\"><b>" + esc(titleCase(w.stack_name)) + "</b><br>" +
+        '<span class="small muted">' + esc(w.domain || "") + "</span></td>" +
+      '<td style="padding:8px">' + esc(w.account) + '<br><span class="small muted">' + esc(w.plan === "b" ? "Plus (GHS 500)" : "GHS 300") + "</span></td>" +
+      '<td style="padding:8px">' + esc(host) + '<br><span class="small muted">' + esc(w.host_name || "") + "</span></td>" +
+      '<td style="padding:8px">' + (w.current_version ? esc(w.current_version) : '<span class="muted">unknown</span>') +
+        (w.floating_tag ? '<br><span class="small muted">floating tag</span>' : "") + "</td>" +
+      '<td style="padding:8px">' + esc(w.latest_version || "") + "</td>" +
+      '<td style="padding:8px">' + updateStateBadge(w, latestKnown) + "</td>" +
+      '<td style="padding:8px"><span class="small muted">' + lastTxt + "</span></td>" +
+      '<td style="padding:8px">' + (w.queued ? ""
+        : '<button class="button secondary small-btn" data-action="updates-queue-one" data-id="' + w.instance_id + '">Update</button>') + "</td>" +
+      "</tr>";
+  }
+  function adminUpdates() {
+    var head = pageHead("Workspace updates",
+      "Move customer workspaces to the latest n8n release, one workspace per server at a time.",
+      '<div class="actions"><button class="button secondary small-btn" data-action="updates-refresh">Refresh</button>' +
+      '<button class="button secondary small-btn" data-action="updates-select-none">Clear selection</button></div>');
+    if (!state.adminUpdatesLoaded) {
+      return appLayout("admin", "Updates", "backup",
+        '<main class="page">' + head +
+        '<section class="card">' +
+        loadingBlock("Loading the update queue...", "Asking each server what it is running.", 220) +
+        "</section></main>");
+    }
+    var d = state.adminUpdates || {};
+    if (d.load_error) {
+      return appLayout("admin", "Updates", "backup",
+        '<main class="page">' + head +
+        '<section class="card"><p class="muted" role="status" style="margin:0">The update queue could not ' +
+        "be loaded: " + esc(d.load_error) + " Use Refresh to try again.</p></section></main>");
+    }
+    var ws = d.workspaces || [];
+    var behind = ws.filter(function (w) { return w.needs_update; });
+    var unknown = ws.filter(function (w) { return w.version_unknown; });
+    var queue = d.queue || [];
+    var waiting = queue.filter(function (q) { return q.status === "queued"; });
+    var sel = state.updSel || {};
+    var selCount = Object.keys(sel).length;
+
+    var compareWarn = d.compare_note
+      ? '<section class="card"><p class="muted" role="status" style="margin:0">' +
+        esc(d.compare_note) + "</p></section>"
+      : "";
+    var ruleCard = compareWarn + '<section class="card"><div class="card-head"><h3>How updates run</h3>' +
+      statusBadge(d.worker_enabled ? "running" : "off", d.worker_enabled ? "Queue running" : "Queue paused") + "</div>" +
+      '<ul class="small muted" style="margin:10px 0 0 18px">' +
+      "<li>One workspace updates at a time <b>on each server</b>, so three servers can move at once and no box ever takes two.</li>" +
+      "<li>After a workspace is verified stable that server rests <b>" + esc(String(d.interval_minutes)) +
+        (Number(d.interval_minutes) === 1 ? " minute</b>" : " minutes</b>") + " before its next one starts.</li>" +
+      "<li>Your batch goes <b>ahead of customer requests</b>.</li>" +
+      "<li>A manual update from a workspace row <b>starts immediately</b> and takes that server's slot while it runs.</li>" +
+      "<li>Latest n8n release right now: <b>" + esc(d.latest_version || "could not be resolved") + "</b>" +
+        (d.latest_source === "release" ? "" : " (source: " + esc(d.latest_source || "unknown") + ")") + "</li>" +
+      "<li>Report emails go to <b>" + esc(d.report_to || "") + "</b> when a run finishes, and immediately when one fails.</li>" +
+      "<li>No safety backup is taken before an update (your instruction), so a failure is rolled back by image tag instead.</li>" +
+      "</ul>" +
+      '<div class="actions" style="margin-top:14px">' +
+      '<button class="button" data-action="updates-queue-all"' + (behind.length && d.latest_known ? "" : " disabled") + ">Update all that need it (" +
+        behind.length + ")</button>" +
+      '<button class="button secondary" data-action="updates-queue-selected"' + (selCount ? "" : " disabled") +
+        ">Update selected (" + selCount + ")</button>" +
+      "</div>" +
+      (unknown.length ? '<p class="small muted" style="margin-top:12px">' + unknown.length +
+        " workspace(s) report an undetermined version, so they are not claimed as behind. Update them by hand if you want them moved.</p>" : "") +
+      "</section>";
+
+    var hostCards = (d.hosts || []).map(function (h) {
+      var per = (d.interval_minutes || 5) + (d.typical_minutes || 3);
+      return '<section class="card"><div class="card-head"><h3>' + esc(h.name || ("server " + h.environment_id)) +
+        ' <span class="muted small">server ' + h.environment_id + "</span></h3>" +
+        (h.running ? statusBadge("provisioning", "Updating now") : statusBadge(h.queued ? "awaiting" : "running", h.queued ? "In line" : "Idle")) +
+        "</div>" +
+        "<p class=\"small muted\" style=\"margin:8px 0 0\">" +
+        (h.running ? "Running: <b>" + esc(titleCase(h.running.stack_name || "")) + "</b> since " +
+            esc(fmtClock(Date.now() - (h.running.elapsed_seconds || 0) * 1000)) +
+            " (" + Math.round((h.running.elapsed_seconds || 0) / 60) + " min)"
+          : "Nothing running on this server.") + "</p>" +
+        '<p class="small muted" style="margin:6px 0 0">In line: <b>' + h.queued + "</b> (" + h.ahead_admin +
+        " from you, " + h.ahead_customer + " from customers)" +
+        (h.queued ? " &middot; finishing in about " + (h.queued * per) + " minutes" : "") + "</p>" +
+        '<p class="small muted" style="margin:6px 0 0">Next update may start: <b>' +
+        (h.next_allowed_at && h.next_allowed_at > Math.floor(Date.now() / 1000)
+          ? esc(fmtClock(h.next_allowed_at * 1000)) : "now") + "</b></p></section>";
+    }).join("");
+
+    var table = '<section class="card" style="margin-top:18px"><div class="card-head"><h3>Workspaces</h3>' +
+      '<span class="small muted">' + ws.length + " total, " + behind.length + " behind</span></div>" +
+      (ws.length ? '<div style="overflow-x:auto"><table style="border-collapse:collapse;width:100%;font-size:13px">' +
+        '<tr style="background:#f9fafb;text-align:left">' +
+        "<th style=\"padding:8px\"> </th><th style=\"padding:8px\">Workspace</th>" +
+        "<th style=\"padding:8px\">Account</th><th style=\"padding:8px\">Server</th>" +
+        "<th style=\"padding:8px\">Running</th><th style=\"padding:8px\">Latest</th>" +
+        "<th style=\"padding:8px\">State</th><th style=\"padding:8px\">Last update</th><th style=\"padding:8px\"></th>" +
+        "</tr>" + ws.map(function (w) { return updateRowHtml(w, sel, d.latest_known); }).join("") + "</table></div>"
+        : loadingBlock("No workspaces found...", "", 160)) + "</section>";
+
+    var queueCard = '<section class="card" style="margin-top:18px"><div class="card-head"><h3>In the line</h3>' +
+      '<span class="small muted">' + waiting.length + " waiting</span></div>" +
+      (waiting.length ? '<ol class="small" style="margin:10px 0 0 18px">' + waiting.map(function (q) {
+          return "<li>server " + q.host + " &middot; <b>" + esc(titleCase(q.stack_name || "")) + "</b> to " +
+            esc(q.target_version || "") + " &middot; " +
+            (q.position === 1 ? "next on that server" : "position " + q.position) +
+            (q.requested_by === "customer" ? " &middot; customer request" : " &middot; your batch") + "</li>";
+        }).join("") + "</ol>" : '<p class="small muted">Nothing is waiting.</p>') +
+      ((d.batches || []).filter(function (b) { return b.open; }).map(function (b) {
+        return '<button class="button secondary small-btn" style="margin-top:12px" data-action="updates-cancel" data-batch="' +
+          esc(b.batch_id) + '">Cancel the remaining ' + b.open + " in your last batch</button>";
+      }).join("")) + "</section>";
+
+    var history = (d.history || []).slice(0, 30);
+    var historyCard = '<section class="card" style="margin-top:18px"><div class="card-head"><h3>Recent updates</h3>' +
+      '<span class="small muted">newest first</span></div>' +
+      (history.length ? '<ul class="small" style="margin:10px 0 0 18px">' + history.map(function (h) {
+          var badge = h.status === "done" ? statusBadge("running", "Done")
+            : h.status === "failed" ? statusBadge("failed", "Failed")
+            : h.status === "canceled" ? statusBadge("off", "Canceled") : statusBadge("neutral", cap(h.status));
+          return "<li>server " + h.host + " &middot; <b>" + esc(titleCase(h.stack_name || "")) + "</b> " +
+            esc(h.from_version || "?") + " to " + esc(h.to_version || "?") + " &middot; " + badge +
+            (h.error ? ' <span class="muted">' + esc(h.error.slice(0, 140)) + "</span>" : "") +
+            ' <span class="muted">' + esc(fmtDate(h.finished_at || 0)) + "</span></li>";
+        }).join("") + "</ul>" : '<p class="small muted">No updates yet.</p>') + "</section>";
+
+    return appLayout("admin", "Updates", "backup",
+      '<main class="page">' + head +
+      ruleCard +
+      '<div class="grid cols-3" style="margin-top:18px">' + hostCards + "</div>" +
+      table + queueCard + historyCard +
+      "</main>");
   }
 
   function adminBackups() {
@@ -1045,9 +1583,13 @@ var ICONS = {
         status + dl + "</div>";
     }).join("");
     var historySection = '<section class="card" style="margin-top:18px"><div class="card-head"><h3>Backup history</h3><p class="small muted" style="margin:0">Completed backups are downloadable in your browser.</p></div>' +
-      (rows || '<div class="empty-state" style="min-height:160px"><div><h3>No backups yet</h3><p class="muted">Create one above and it will appear here.</p></div></div>') + "</section>";
+      (rows || (state.adminBackupsLoaded
+        ? '<div class="empty-state" style="min-height:160px"><div><h3>No backups yet</h3><p class="muted">Create one above and it will appear here.</p></div></div>'
+        : loadingBlock("Loading backups...", "", 160))) + "</section>";
     var triggerSection = '<section class="card"><div class="card-head"><h3>Create a backup</h3><p class="small muted" style="margin:0">Choose what to back up for each workspace.</p></div>' +
-      (creatable || '<p class="muted" style="padding:20px">There are no workspaces to back up right now.</p>') + "</section>";
+      (creatable || (state.adminInstancesLoaded
+        ? '<p class="muted" style="padding:20px">There are no workspaces to back up right now.</p>'
+        : loadingBlock("Loading workspaces...", "", 160))) + "</section>";
 
     // Only load the instance list once per visit (avoid re-fetch churn).
     if (!state.adminInstancesLoaded) {
@@ -1066,8 +1608,22 @@ var ICONS = {
   function adminAccountPage(id) {
     var a = (state.adminAccounts || []).find(function (x) { return x.id === Number(id); });
     var detail = state.accountCache[id];
+    // Fresh page load: the accounts list is still being fetched. Show a loading
+    // state, never the error screen (a blank list on boot is NOT "removed" —
+    // it produced a full second of "Account not found" on every refresh).
+    if (!a && !state.adminAccountsLoaded) {
+      return appLayout("admin", "Account details", "accounts",
+        '<main class="page"><div class="center-state"><div class="spinner"></div>' +
+        '<p class="muted">Loading account...</p></div></main>');
+    }
     if (!a) return appLayout("admin", "Account details", "accounts", "<main class=\"page\">" + pageHead("Account not found", "This account may have been removed.") + "</main>");
     var instances = (detail && detail.instances) || [];
+    // The workspace list arrives in a SECOND request (the per-account read).
+    // Until it lands, the card must not claim the customer has no workspace:
+    // that empty state flashed at admins looking at customers who DO have one
+    // (Steward's report, 2026-10-06). `accountDetailTried` keeps a FAILED read
+    // on the old behaviour instead of loading forever.
+    var wsKnown = !!(detail && detail.instances) || !!(state.accountDetailTried || {})[id];
     var sub = a.subscription_status || "none";
     var subBadge = sub === "active" ? statusBadge("active", "Active")
       : sub === "past_due" ? statusBadge("pastdue", "Past due")
@@ -1094,7 +1650,7 @@ var ICONS = {
     var quota = a.quota || 1;
 
     return appLayout("admin", "Account details", "accounts",
-      '<main class="page">' + pageHead(a.display_name || cap(a.username), esc(a.email) + " · " + esc(a.username), '<div class="actions">' +
+      '<main class="page">' + pageHead(a.display_name || cap(a.username), esc(a.email) + " · " + esc(a.username), '<div class="actions grid-actions">' +
         lifecycleButtons +
         (acctState === "active" ? '<button class="button" data-action="admin-impersonate" data-id="' + a.id + '">' + icon("eye") + " Login as user</button> " +
         '<button class="button secondary" data-action="admin-mark-paid" data-id="' + a.id + '">' + icon("check") + " Mark paid</button>" +
@@ -1104,7 +1660,7 @@ var ICONS = {
         '<button class="button secondary" data-action="admin-backup-toggle" data-id="' + a.id + '" data-on="' + (a.backup_enabled ? "1" : "0") + '">' + icon("archive") + (a.backup_enabled ? " Revoke backup access" : " Allow backup") + "</button>" +
         (sub === "locked" ? '<button class="button" data-action="admin-unlock" data-id="' + a.id + '">' + icon("check") + " Switch workspace on</button>"
                           : '<button class="button secondary" data-action="admin-lock" data-id="' + a.id + '">' + icon("warning") + " Switch workspace off</button>") : "") +
-        "</div>") +
+        "</div>", "wrap") +
       '<div class="grid cols-3">' +
         '<section class="card"><div class="card-head"><h2>Customer profile</h2><span class="badge-stack">' + subBadge + stateBadge + "</span></div>" +
           '<dl class="info-list"><div class="info-row"><dt>Username</dt><dd>' + esc(a.username) + "</dd></div>" +
@@ -1116,9 +1672,10 @@ var ICONS = {
           '<div class="info-row"><dt>Period start</dt><dd>' + esc(fmtDate(a.paid_from)) + "</dd></div>" +
           '<div class="info-row"><dt>Period end</dt><dd>' + esc(fmtDate(a.paid_until)) + "</dd></div>" +
           '<div class="info-row"><dt>Renewal</dt><dd>Automatic</dd></div></dl></section>' +
-        '<section class="card"><div class="card-head"><h2>Quota</h2><strong>' + used + " / " + quota + "</strong></div>" +
-          '<div class="quota"><div class="bar"><span style="width:' + Math.min(100, quota ? Math.round(used / quota * 100) : 0) + '%"></span></div></div>' +
-          '<p class="small muted" style="margin-top:20px">' + (used < quota ? "The customer may provision another workspace." : "Quota fully used.") + "</p>" +
+        '<section class="card"><div class="card-head"><h2>Quota</h2><strong>' + (wsKnown ? used + " / " + quota : "Checking...") + "</strong></div>" +
+          (wsKnown ? '<div class="quota"><div class="bar"><span style="width:' + Math.min(100, quota ? Math.round(used / quota * 100) : 0) + '%"></span></div></div>' : "") +
+          '<p class="small muted" style="margin-top:14px">Package allowances: ' + (a.quota_a || 1) + " × Workspace (GHS 300), " + (a.quota_b || 1) + " × Workspace Plus (GHS 500). Each workspace counts against its own package.</p>" +
+          (wsKnown ? '<p class="small muted" style="margin-top:8px">' + (used < quota ? "The customer may provision another workspace." : "Quota fully used.") + "</p>" : "") +
           '<button class="button secondary small-btn" data-action="quota" data-id="' + a.id + '">Change allowance</button></section>' +
       "</div>" +
       '<section class="card" style="margin-top:18px"><div class="card-head"><h2>Backup access</h2>' + (a.backup_enabled ? statusBadge("active", "Enabled for customer") : statusBadge("off", "Disabled")) + "</div>" +
@@ -1126,6 +1683,11 @@ var ICONS = {
           ? "This customer can create and download backups from their own portal. You can revoke this at any time."
           : "This customer does not see a backup option. Only the admin can back up this workspace until you enable it.") + "</p>" +
         '<button class="button secondary small-btn" data-action="admin-backup-toggle" data-id="' + a.id + '" data-on="' + (a.backup_enabled ? "1" : "0") + '" style="margin-top:14px">' + (a.backup_enabled ? " Revoke backup access" : " Allow customer to back up") + "</button></section>" +
+      '<section class="card" style="margin-top:18px"><div class="card-head"><h2>Update access</h2>' + (a.update_enabled ? statusBadge("active", "Enabled for customer") : statusBadge("off", "Disabled")) + "</div>" +
+        '<p class="small muted" style="margin:0">' + (a.update_enabled
+          ? "This customer can update their own workspaces from their portal. Updates are paced on the server, one workspace at a time per server, and you can revoke this at any time."
+          : "This customer does not see an update option. Only you can update this customer's workspaces until you enable it.") + "</p>" +
+        '<button class="button secondary small-btn" data-action="admin-update-toggle" data-id="' + a.id + '" data-on="' + (a.update_enabled ? "1" : "0") + '" style="margin-top:14px">' + (a.update_enabled ? " Revoke update access" : " Allow customer to update") + "</button></section>" +
       '<div class="grid cols-3" style="margin-top:18px"><section class="card span-2"><div class="card-head"><h2>Workspaces</h2>' +
         (used < quota ? '<button class="button secondary small-btn" data-action="admin-add-workspace" data-id="' + a.id + '">Add workspace</button>' : "") + "</div>" +
         '<div class="workspace-list">' +
@@ -1135,12 +1697,19 @@ var ICONS = {
             : i.status === "provisioning" ? statusBadge("provisioning", "Being set up")
             : i.status === "failed" ? statusBadge("failed", "Setup failed") : statusBadge("neutral", cap(i.status));
           var attachedTag = i.managed === 0 ? ' <span class=\"status info\">Attached</span>' : "";
+          var planTag = i.plan === "b" ? ' <span class=\"status info\">Plus</span>' : ' <span class=\"status neutral\">GHS 300</span>';
           return '<article class="workspace-item"><span class="workspace-logo">' + icon("workspace") + "</span>" +
-            "<div><h3>" + esc(titleCase(i.stack_name)) + " workspace" + attachedTag + updBadge(i) + updateChip(i) + "</h3><p>" + esc(i.domain) + "<br>Env " + esc(i.environment_name || i.environment_id) + " · Port " + esc(i.port) + (i.managed === 0 ? " · password unchanged" : "") + "</p></div>" +
+            "<div><h3>" + esc(titleCase(i.stack_name)) + " workspace" + attachedTag + planTag + updBadge(i) + updateChip(i) + runnerBadge(i) + "</h3><p>" + esc(i.domain) + "<br>Env " + esc(i.environment_name || i.environment_id) + " · Port " + esc(i.port) + (i.managed === 0 ? " · password unchanged" : "") + "</p></div>" +
             badge + '<button class="button secondary small-btn" data-action="workspace-actions" data-id="' + i.id + '" data-name="' + esc(i.stack_name) + '">Actions</button>' +
+              '<div class="wi-actions">' +
               '<button class="button secondary small-btn" data-action="admin-backup" data-id="' + i.id + '">' + icon("archive") + " Back up</button>" +
-              '<button class="button secondary small-btn" data-action="admin-update-image" data-id="' + i.id + '"' + updDisabled(i) + '>' + icon("refresh") + (state.instUpdating[i.id] ? " Updating..." : " Update n8n") + "</button>" + '</article>';
-        }).join("") : '<div class="empty-state" style="min-height:200px"><div><h3>No workspaces yet</h3><p class="muted">The customer has not provisioned a workspace.</p></div></div>') +
+              '<button class="button secondary small-btn" data-action="admin-update-image" data-id="' + i.id + '"' + updDisabled(i) + '>' + icon("refresh") + (state.instUpdating[i.id] ? " Updating..." : " Update n8n") + "</button>" +
+              '<button class="button secondary small-btn" data-action="admin-restart" data-id="' + i.id + '"' + (state.instRestarting[i.id] ? " disabled" : "") + '>' + icon("refresh") + (state.instRestarting[i.id] ? " Restarting..." : " Restart") + "</button>" +
+              '<button class="button secondary small-btn" data-action="runner-toggle" data-id="' + i.id + '"' + runDisabled(i) + '>' + icon(i.python_runner ? "close" : "spark") + (state.runnerBusy[i.id] ? (i.python_runner ? " Removing..." : " Attaching...") : (i.python_runner ? " Remove Python" : " Attach Python")) + "</button>" +
+              "</div></article>";
+        }).join("") : (wsKnown
+              ? '<div class="empty-state" style="min-height:200px"><div><h3>No workspaces yet</h3><p class="muted">The customer has not provisioned a workspace.</p></div></div>'
+              : '<div class="empty-state" style="min-height:200px" role="status" aria-live="polite"><div><h3>Loading workspaces...</h3><p class="muted">Checking what workspaces this account has.</p></div></div>')) +
         "</div></section>" +
         '<section class="card"><h2>Subscription timeline</h2><div class="timeline">' +
           '<div class="timeline-item"><h3>Account created</h3><p>' + esc(fmtDate(a.created_at)) + "</p></div>" +
@@ -1183,6 +1752,11 @@ var ICONS = {
   }
   function envHealthCards() {
     var envs = state.adminEnvs || [];
+    // Was silently absent until the list arrived; now it says it is loading (0.1.84).
+    if (!envs.length && !state.adminEnvsLoaded) {
+      return '<section class="card flush" style="margin-top:18px"><div class="card-head" style="padding:20px 20px 0"><h2>Server environments</h2></div>' +
+        loadingBlock("Loading servers...", "Asking each n8n server for its state.", 160) + "</section>";
+    }
     if (!envs.length) return "";
     return '<section class="card flush" style="margin-top:18px"><div class="card-head" style="padding:20px 20px 0"><h2>Server environments</h2><a class="button ghost small-btn" href="#/admin/settings">Manage</a></div>' +
       '<div class="grid cols-3" style="padding:14px 20px 20px">' +
@@ -1218,10 +1792,13 @@ var ICONS = {
         "<span><strong>" + esc(e.name || "Server") + '</strong><span class="small muted">' + esc(e.ip || "") +
         ' - <span class="status ' + dotCls + '">' + dot + "</span></span></span>" +
         '<span class="small muted">' + e.running_n8n + " running, " + esc(fmtBytes(e.storage_bytes)) + "</span></label>";
-    }).join("") || '<div class="empty-state" style="min-height:160px"><div><h3>No environments found</h3><p class="muted">The n8n servers could not be listed right now.</p></div></div>';
+    }).join("") || (state.adminEnvsLoaded
+      ? '<div class="empty-state" style="min-height:160px"><div><h3>No environments found</h3><p class="muted">The n8n servers could not be listed right now.</p></div></div>'
+      : loadingBlock("Loading servers...", "Asking each n8n server for its state.", 160));
     return appLayout("admin", "Settings", "settings",
       '<main class="page">' + pageHead("Portal settings", "Choose where new customer workspaces are created and whether customers can pay.", '<button class="button" data-action="save-servers">' + icon("check") + " Save selection</button>") +
       paymentsCard() +
+      '<div class="grid cols-2" style="margin-bottom:18px">' + adminProfileCard() + mnotifyCard() + "</div>" +
       '<div class="grid cols-3"><section class="card span-2"><div class="card-head"><div><h2>Available servers</h2><p class="muted small" style="margin:4px 0 0">Only the n8n servers are listed here. The local control host is never used for customer workspaces.</p></div></div>' +
       '<div class="server-list env-check-list">' + rows + "</div></section>" +
       '<aside class="card"><h2>Placement rule</h2>' +
@@ -1250,6 +1827,105 @@ var ICONS = {
           '<div><strong>No customer can pay or subscribe right now</strong><br><span class="small">New checkouts are refused. Give each onboarded user free access with <strong>Extend expiry</strong> on their account (works while payments are held), then open payments again when paid onboarding starts.</span></div></div>' +
           '<div class="actions end"><button class="button" data-action="payments-toggle" data-open="1">' + icon("check") + " Open payments</button></div>") +
       "</section>";
+  }
+
+  /* Administrator profile (0.1.90): the address and the phone the admin's own sign-in
+   * codes go to. Before this the email was hardcoded in the backend. */
+  function adminProfileCard() {
+    var s = state.adminSettings || {};
+    return '<section class="card"><div class="card-head">' +
+      '<div><h2>Administrator profile</h2><p class="muted small" style="margin:4px 0 0">' +
+      "Both are used by your second factor at sign-in.</p></div></div>" +
+      '<div class="field"><label for="admin-profile-email">Email address (email codes)</label>' +
+      '<input id="admin-profile-email" type="email" autocomplete="email" placeholder="you@example.com" value="' +
+      esc(s.admin_email || "") + '"></div>' +
+      '<div class="field"><label for="admin-profile-phone">Phone number (SMS codes)</label>' +
+      '<input id="admin-profile-phone" type="tel" autocomplete="tel" placeholder="024 123 4567" value="' +
+      esc(s.admin_phone_pretty || s.admin_phone || "") + '">' +
+      '<p class="small muted" style="margin:6px 0 0">Any Ghana format: 024 123 4567, ' +
+      "+233 24 123 4567 or 233241234567. Saved as 0241234567.</p></div>" +
+      '<div class="actions end"><button class="button" data-action="save-admin-profile">' +
+      icon("check") + " Save profile</button></div></section>";
+  }
+
+  /* mNotify SMS delivery (0.1.90). The API key is write-only: it goes up, and only
+   * "saved ... last four" ever comes back, so a screenshot of this page leaks nothing. */
+  /* The verdict on the last test send, read from mNotify's own delivery report (0.1.92).
+   * "Accepted by the API" is not delivery: a rejected message still costs a credit. */
+  function testOutcome() {
+    var t = state.smsTest;
+    if (!t) return "";
+    var map = {
+      DELIVERED: ["", "check", "Delivered", "The handset acknowledged it."],
+      SUBMITTED: [" warning", "bell", "Submitted", "Handed to the carrier, not acknowledged yet. Give it a minute."],
+      REJECTED: [" warning", "error", "Rejected", "The gateway dropped it. Check the Sender ID's registered purpose against the routing mode above."],
+    };
+    if (t.checking) {
+      return '<p class="small muted" style="margin:0 0 12px">Test message sent. Checking delivery' +
+        " with mNotify" + " ..." + "</p>";
+    }
+    var m = map[t.status] || ["", "bell", t.status || "No report yet", t.reason || "mNotify has no verdict yet."];
+    return '<div class="banner' + m[0] + '" style="margin:12px 0">' + icon(m[1]) +
+      "<div><strong>Test message: " + esc(m[2]) + "</strong><br><span class=\"small\">" + esc(m[3]) + "</span></div></div>";
+  }
+
+  function mnotifyCard() {
+    var s = state.adminSettings || {};
+    var st = state.smsStatus || null;
+    var keyLine = s.sms_api_key_set
+      ? statusBadge("active", "Key saved") + ' <span class="small muted">ends ' + esc(s.sms_api_key_last4 || "") + "</span>"
+      : statusBadge("pending", "No API key saved");
+    var status = "";
+    if (st) {
+      if (st.error) {
+        status = '<div class="banner warning" style="margin:12px 0">' + icon("error") +
+          "<div><strong>" + esc(st.error) + '</strong><br><span class="small">Paste your mNotify API key and save it.</span></div></div>';
+      } else {
+        var sender = st.sender || {};
+        var bal = st.balance || {};
+        var mismatch = st.purpose_mismatch
+          ? '<div class="banner warning" style="margin:0 0 12px">' + icon("error") +
+            '<div><strong>Sender ID and routing mode disagree</strong><br><span class="small">' +
+            esc(st.purpose_mismatch) + "</span></div></div>"
+          : "";
+        status = '<div class="banner' + (sender.approved ? "" : " warning") + '" style="margin:12px 0">' + icon(sender.approved ? "check" : "error") +
+          "<div><strong>Sender ID " + esc(sender.sender || st.sender_id || "") + ": " + esc(sender.status || "unknown") + "</strong><br>" +
+          '<span class="small">' + (sender.approved
+            ? "Messages will go out under this name."
+            : "mNotify must approve this Sender ID before texts will arrive.") + "</span></div></div>" +
+          (bal.balance === null || bal.balance === undefined ? "" :
+            '<p class="small muted" style="margin:0 0 12px">SMS credits left: <strong>' + esc(String(bal.balance)) + "</strong>" +
+            (bal.bonus ? " plus " + esc(String(bal.bonus)) + " bonus" : "") + "</p>") +
+          (st.otp_typing && bal.wallet !== null && bal.wallet !== undefined
+            ? '<p class="small muted" style="margin:0 0 12px">Main wallet: <strong>' + esc(String(bal.wallet)) +
+              "</strong>" + (bal.wallet > 0 ? "" : " - empty, so OTP-typed sends will be refused. Top it up or turn the OTP route off.") + "</p>"
+            : "") +
+          (sender.purpose ? '<p class="small muted" style="margin:0 0 12px">Registered for: ' +
+            esc(sender.purpose) + "</p>" : "") + mismatch +
+          (st.sender_error ? '<p class="small muted" style="margin:0 0 12px">Sender check: ' + esc(st.sender_error) + "</p>" : "") +
+          (st.balance_error ? '<p class="small muted" style="margin:0 0 12px">Balance check: ' + esc(st.balance_error) + "</p>" : "");
+      }
+    }
+    return '<section class="card"><div class="card-head">' +
+      '<div><h2>Text messages (mNotify)</h2><p class="muted small" style="margin:4px 0 0">' +
+      "Delivers your SMS sign-in codes.</p></div>" + keyLine + "</div>" +
+      '<div class="field"><label for="sms-api-key">API key</label>' +
+      '<input id="sms-api-key" type="password" autocomplete="new-password" placeholder="' +
+      (s.sms_api_key_set ? "Saved - paste a new key to replace it" : "Paste your mNotify API key") + '">' +
+      '<p class="small muted" style="margin:6px 0 0">Stored on the portal server and never shown again.</p></div>' +
+      '<div class="field"><label for="sms-sender-id">Sender ID</label>' +
+      '<input id="sms-sender-id" type="text" maxlength="11" value="' + esc(s.sms_sender_id || "StePro-OTP") + '">' +
+      '<p class="small muted" style="margin:6px 0 0">Must be approved in mNotify, up to 11 characters. ' +
+      "Letters and digits only is safest: a hyphenated name was rejected by the gateway on this account " +
+      "while the same name without the hyphen delivers.</p></div>" +
+      '<label class="env-check" style="margin-bottom:12px"><input type="checkbox" id="sms-otp-type"' + (s.sms_otp_type === "otp" ? " checked" : "") + ">" +
+      '<span class="check-ui"></span><span><strong>Route as an OTP</strong><span class="small muted">' +
+      "Off (plain) is what you chose. The OTP route bills 0.035 per campaign from your MAIN WALLET " +
+      "(a separate purse from these SMS credits), so it fails if that wallet is empty.</span></span></label>" +
+      status + testOutcome() +
+      '<div class="actions end"><button class="button secondary" data-action="sms-status">' + icon("bell") + " Check connection</button>" +
+      '<button class="button secondary" data-action="sms-test">' + icon("phone") + " Send test SMS</button>" +
+      '<button class="button" data-action="save-sms">' + icon("check") + " Save SMS settings</button></div></section>";
   }
 
   /* ================= router ================= */
@@ -1297,6 +1973,7 @@ var ICONS = {
     else if (route === "/admin/requests") html = requireAdmin(function () { return adminRequests(); });
     else if (route === "/admin/accounts") html = requireAdmin(function () { return adminAccounts(); });
     else if (route === "/admin/backups") html = requireAdmin(function () { return adminBackups(); });
+    else if (route === "/admin/updates") html = requireAdmin(function () { return adminUpdates(); });
     else if (route === "/admin/archived") html = requireAdmin(function () { return archivedAccounts(); });
     else if (parts[0] === "admin" && parts[1] === "account") html = requireAdmin(function () { return adminAccountPage(parts[2]); });
     else if (route === "/admin/maintenance") html = requireAdmin(function () { return maintenancePage(); });
@@ -1313,6 +1990,17 @@ var ICONS = {
 
   function requireCustomer(fn) {
     if (!localStorage.getItem("portal_token")) { navigate("/entry"); return ""; }
+    // First paint of a signed-in customer happens BEFORE /me answers, so every
+    // page used to render its zero/empty state as if it were fact: "No
+    // workspaces yet", "0 of 1 used", "Subscribe and provision..." for a paying
+    // customer (Steward's flash-of-misinformation report, 2026-10-07). Hold the
+    // page on an announced loading state until the session is known - or known to
+    // have failed (sessionLoaded is set on the failure path too).
+    if (!state.sessionLoaded) {
+      return appLayout("customer", "Loading", "workspace",
+        '<main class="page"><div class="center-state" style="min-height:60vh" role="status" aria-live="polite">' +
+        '<p class="muted">Loading your account...</p></div></main>');
+    }
     return fn();
   }
   function requireAdmin(fn) {
@@ -1329,8 +2017,19 @@ var ICONS = {
       done = true;
       if (!routeChanged(route) && dataSig() !== sigBefore && !modalRoot.children.length) render();
     }
-    if (parts[0] === "customer") { refreshSession().then(after); }
-    else if (parts[0] === "admin" && route !== "/admin/signin") { refreshAdminData().then(after); }
+    if (parts[0] === "customer") { refreshSession().then(after); ensureMyUpdates(); }
+    else if (parts[0] === "admin" && route !== "/admin/signin") {
+      refreshAdminData().then(after);
+      if (route === "/admin/updates") {
+        ensureAdminUpdates();
+        // the queue moves in the background, so keep this page honest while it is open
+        if (!state.updatesPoll) {
+          state.updatesPoll = setInterval(function () {
+            if ((location.hash || "").slice(1) === "/admin/updates") ensureAdminUpdates(true);
+          }, 15000);
+        }
+      } else if (state.updatesPoll) { clearInterval(state.updatesPoll); state.updatesPoll = null; }
+    }
     // security (2FA) setup state: /me/security or /admin/security. Set the state
     // and let dataSig detect the change to re-render ONCE (calling render() here
     // directly caused an infinite render<->fetch loop that prevented the modal
@@ -1377,24 +2076,32 @@ var ICONS = {
     var sec = state.security2fa ? JSON.stringify(state.security2fa) : "";
     var bk = state.backups ? JSON.stringify(state.backups) : "";
     var abk = state.adminBackups ? JSON.stringify(state.adminBackups) : "";
+    var mu = state.myUpdates ? JSON.stringify(state.myUpdates) : "";
+    var au = state.adminUpdates ? JSON.stringify(state.adminUpdates) : "";
     var route = (location.hash || "").slice(1);
     var m = route.match(/^\/admin\/account\/(\d+)$/);
     var d = m && state.accountCache[m[1]] ? JSON.stringify(state.accountCache[m[1]]) : "";
     return c + "|" + a + "|" + ar + "|" + r + "|" + e + "|" + p + "|" + d + "|" + ev + "|" + ul + "|" + sec + "|" + bk + "|" + abk +
+      "|" + mu + "|" + au +
       "|" + (state.paymentsOpen ? "po1" : "po0") + (state.adminPaymentsOpen ? "apo1" : "apo0");
   }
 
   async function refreshSession() {
     var token = localStorage.getItem("portal_token");
-    if (!token) { state.session = null; return null; }
+    if (!token) { state.session = null; state.sessionLoaded = true; return null; }
     try {
       var data = await api("/me");
       state.session = { token: token, account: data.account, instances: data.instances || [] };
+      state.sessionLoaded = true;
       if (!state.plans.length) await loadPlans();
       // lazily load backups when the customer opens the Backups page
       if ((location.hash || "").indexOf("/customer/backups") === 1 || state.backupsLoaded) {
-        var bk = await api("/me/backups");
-        state.backups = (bk && bk.backups) || [];
+        try {
+          var bk = await api("/me/backups");
+          state.backups = (bk && bk.backups) || [];
+        } catch (e) { state.backups = state.backups || []; }
+        // Marked on failure too: the Backups page must not sit on "Loading..."
+        // forever if the read breaks (0.1.84).
         state.backupsLoaded = true;
       }
       return state.session;
@@ -1402,9 +2109,13 @@ var ICONS = {
       if (e.status === 401) {
         localStorage.removeItem("portal_token");
         state.session = null;
+        state.backupsLoaded = false; state.backups = [];
         showToast("Session ended", "Please sign in again.");
         navigate("/entry");
       }
+      // Marked on failure too, so a broken /me can never leave the customer
+      // staring at a loading screen forever (0.1.83).
+      state.sessionLoaded = true;
       return null;
     }
   }
@@ -1414,10 +2125,18 @@ var ICONS = {
     try {
       var accts = await api("/admin/accounts");
       state.adminAccounts = accts || [];
+      state.adminAccountsLoaded = true;
       var arch = await api("/admin/accounts?include_archived=1");
       state.adminArchived = (arch || []).filter(function (a) { return a.account_state === "archived"; });
+      state.adminArchivedLoaded = true;
       var reqs = await api("/admin/access-requests");
       state.requests = reqs || [];
+      state.requestsLoaded = true;
+      // true running versions (0.1.80): the chip must not trust the image tag
+      try {
+        var vers = await api("/admin/instance-versions");
+        state.n8nVersions = (vers && vers.versions) || {};
+      } catch (e) { state.n8nVersions = {}; }
       // account details for the account page currently open (always fresh)
       var route = (location.hash || "").slice(1);
       var m = route.match(/^\/admin\/account\/(\d+)$/);
@@ -1427,23 +2146,35 @@ var ICONS = {
           var detail = await api("/accounts/" + id);
           state.accountCache[id] = detail;
         } catch (e) { /* public per-account read failed */ }
+        // Marked whether it succeeded or not, so a failed read can never leave
+        // the Workspaces card stuck on its loading state (0.1.82).
+        state.accountDetailTried[id] = true;
       }
       var settings = await api("/admin/settings");
       state.envOrder = String(settings.landing_environments || "").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
       state.adminPaymentsOpen = settings.payments_open !== false;
+      state.adminSettings = settings;      // admin profile + mNotify card (0.1.90)
       if (!state.environmentList.length) {
         try { state.environmentList = await api("/environments"); } catch (e) { state.environmentList = []; }
       }
       try { state.adminEnvs = await api("/admin/environments"); } catch (e) { state.adminEnvs = []; }
+      state.adminEnvsLoaded = true;
       try {
         if ((location.hash || "").indexOf("/admin/backups") === 1 || state.adminBackupsLoaded) {
           var bk = await api("/admin/backups");
           state.adminBackups = (bk && bk.backups) || [];
-          state.adminBackupsLoaded = true;
         }
       } catch (e) { state.adminBackups = state.adminBackups || []; }
+      if ((location.hash || "").indexOf("/admin/backups") === 1 || state.adminBackupsLoaded) state.adminBackupsLoaded = true;
     } catch (e) {
       if (e.status === 401) { localStorage.removeItem("admin_token"); state.adminAuthed = false; showToast("Admin session ended", "Please sign in again."); navigate("/admin/signin"); }
+      // If the whole refresh breaks, show the lists as they are rather than leaving
+      // every table on a loading state for ever (0.1.84, same rule as 0.1.83's /me).
+      state.adminAccountsLoaded = true;
+      state.requestsLoaded = true;
+      state.adminArchivedLoaded = true;
+      state.adminEnvsLoaded = true;
+      state.adminBackupsLoaded = true;
     }
   }
 
@@ -1482,10 +2213,19 @@ var ICONS = {
   }
 
   function paymentModal() {
-    var plan = state.plans.find(function (p) { return p.active; }) || {};
+    // Plan-aware banner (0.1.69): the modal must show the package the user
+    // actually clicked, not the first active plan. chosenPlan is set by the
+    // pay-now button (data-plan) before this modal opens.
+    var plan = state.plans.find(function (p) {
+      return p.active && ((chosenPlan === "b") === (p.amount_minor === 50000));
+    }) || state.plans.find(function (p) { return p.active; }) || {};
+    var isPlus = chosenPlan === "b";
+    var pkgLine = isPlus
+      ? esc(plan.name || "n8n Workspace Plus") + " - includes Python code node and AI assistant setup support"
+      : esc(plan.name || "n8n Workspace");
     showModal(modalHeader("Continue to secure payment") +
       '<p class="muted">You will leave the SteProTECH portal and complete payment securely on the payment provider.</p>' +
-      '<div class="banner">' + icon("shield") + "<div><strong>" + esc(fmtMinor(plan.amount_minor, plan.currency)) + " per year</strong><br><span class=\"small\">Your workspace will start being prepared after payment is confirmed.</span></div></div>" +
+      '<div class="banner">' + icon("shield") + "<div><strong>" + esc(fmtMinor(plan.amount_minor, plan.currency)) + " per year</strong><br><span class=\"small\">" + pkgLine + "</span></div></div>" +
       '<div class="actions end" style="margin-top:24px"><button class="button secondary" data-action="close-modal">Cancel</button>' +
       '<button class="button" data-action="payment-continue">Continue to payment ' + icon("external") + "</button></div>");
   }
@@ -1493,19 +2233,22 @@ var ICONS = {
   function approveModal(id) {
     var r = (state.requests || []).find(function (x) { return x.id === Number(id); });
     if (!r) return;
-    showModal(modalHeader("Approve access request?") +
-      "<p>Approve <strong>" + esc(r.email) + "</strong> to generate a one-time registration code.</p>" +
-      '<div class="consequence" style="background:var(--amber-100)"><strong>What happens next</strong><ul><li>The code is emailed automatically</li><li>It expires after 72 hours</li><li>The same code is shown here once for copying</li></ul></div>' +
+    var again = (r.status === "approved" || r.status === "token_sent");
+    showModal(modalHeader(again ? "Send the approval notice again?" : "Approve access request?") +
+      (again ? "<p>Resend the approval email to <strong>" + esc(r.email) + "</strong>.</p>"
+             : "<p>Approve <strong>" + esc(r.email) + "</strong> to open the portal for them.</p>") +
+      '<div class="consequence" style="background:var(--amber-100)"><strong>What happens next</strong><ul><li>The request is marked <strong>Approved</strong></li><li>No code is generated and none is needed</li><li>They are emailed that their access is approved</li><li>They create their account and are signed in straight away</li></ul></div>' +
       '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
-      '<button class="button" data-confirm-approve="' + id + '">Approve and send code</button></div>');
+      '<button class="button" data-confirm-approve="' + id + '">' + (again ? "Resend email" : "Approve and notify") + "</button></div>");
   }
+
 
   function denyModal(id) {
     var r = (state.requests || []).find(function (x) { return x.id === Number(id); });
     if (!r) return;
     showModal(modalHeader("Disapprove " + esc(r.email) + "?") +
-      "<p>This declines the request and clears any access code that was already sent. The person will not be able to register with this email.</p>" +
-      '<div class="consequence" style="background:var(--red-100)"><strong>What happens next</strong><ul><li>The request is marked <strong>Disapproved</strong></li><li>Any previously issued code is invalidated</li><li>The email is blocked from requesting again</li><li>Delete the request later to let them try again</li></ul></div>' +
+      "<p>This declines the request. The person will not be able to register with this email.</p>" +
+      '<div class="consequence" style="background:var(--red-100)"><strong>What happens next</strong><ul><li>The request is marked <strong>Disapproved</strong></li><li>The approval is withdrawn</li><li>The email is blocked from requesting again</li><li>Delete the request later to let them try again</li></ul></div>' +
       '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
       '<button class="button danger" data-confirm-request-deny="' + id + '">' + icon("close") + " Disapprove</button></div>");
   }
@@ -1522,14 +2265,15 @@ var ICONS = {
 
   function approvalSuccess(data) {
     var r = (state.requests || []).find(function (x) { return x.id === Number(data.request_id); });
+    var em = (r ? r.email : "") || data.email || "";
     showModal('<div class="center-state"><div class="state-orb success">' + icon("check") + '</div><h2 id="modal-title">Access approved</h2>' +
-      '<p class="muted">A one-time code was generated and emailed to <strong>' + esc(r ? r.email : "") + "</strong>.</p>" +
-      '<div class="card" style="margin:22px 0"><div class="eyebrow">One-time code</div>' +
-      '<div class="mono" style="font-size:1.7rem;letter-spacing:.18em;font-weight:800;margin:8px 0">' + esc(data.token || "") + "</div>" +
-      '<button class="button secondary small-btn" data-action="copy-code" data-code="' + esc(data.token || "") + '">' + icon("copy") + " Copy code</button></div>" +
-      '<div class="banner success" style="text-align:left">' + icon("check") + "<div><strong>Code emailed</strong><br><span class=\"small\">Expires in 72 hours. This code will not be shown again after closing.</span></div></div>" +
+      '<p class="muted"><strong>' + esc(em) + '</strong> can now create their account. No code is needed.</p>' +
+      (data.email_sent
+        ? '<div class="banner success" style="text-align:left">' + icon("check") + '<div><strong>Email sent</strong><br><span class="small">They were told their access is approved and asked to create their account.</span></div></div>'
+        : '<div class="banner warning" style="text-align:left">' + icon("warning") + '<div><strong>Email not sent</strong><br><span class="small">The approval is saved, but the notice did not go out. Tell them directly that they can create their account now.</span></div></div>') +
       '<button class="button" style="margin-top:22px" data-action="close-modal">Done</button></div>');
   }
+
 
   function adminAddUserModal() {
     showModal(modalHeader("Add a user") +
@@ -1563,8 +2307,19 @@ var ICONS = {
       var note = anchorUsed
         ? '<div class="banner" id="markpaid-anchor" style="margin:14px 0 0">' + icon("clock") + "<div><strong>Dates loaded from Nginx Proxy Manager</strong><br><span class=\"small\">The workspace proxy was created on the loaded start date, so expiry is exactly one year after it.</span></div></div>"
         : "";
+      var curPlan = (a && a.plan) || "a";
+      function planCard(val, title, sub) {
+        var on = curPlan === val;
+        return '<label class="field" style="display:flex;align-items:flex-start;gap:10px;border:1px solid ' + (on ? "var(--teal-700)" : "var(--line)") + ';border-radius:10px;padding:12px;cursor:pointer;margin:0">' +
+          '<input type="radio" name="paid-plan" value="' + val + '"' + (on ? " checked" : "") + ' style="margin-top:3px">' +
+          "<div><strong>" + esc(title) + "</strong><br><span class=\"small muted\">" + esc(sub) + "</span></div></label>";
+      }
       showModal(modalHeader("Mark " + esc(name) + " as paid") +
         '<p class="muted">Record that this customer has paid, with the exact subscription dates. You can backdate the start when the customer already paid before being added here.</p>' +
+        '<div class="field"><label>Package paid for</label><div class="grid cols-2" style="gap:10px">' +
+        planCard("a", "Workspace (GHS 300)", "Standard package. Sets this account\u2019s package and its Workspace allowance.") +
+        planCard("b", "Workspace Plus (GHS 500)", "Plus package with more resources for every workspace.") +
+        "</div></div>" +
         '<div class="grid cols-2">' +
         '<div class="field"><label>Subscription start</label><input id="paid-from" type="date" value="' + d(defFrom) + '"></div>' +
         '<div class="field"><label>Expiry date</label><input id="paid-until" type="date" value="' + d(defUntil) + '"></div></div>' +
@@ -1669,6 +2424,8 @@ var ICONS = {
         : '<button class="button secondary" data-action="reset-password" data-id="' + inst.id + '">' + icon("lock") + " Reset workspace password</button>") +
       '<button class="button secondary" data-action="admin-backup" data-id="' + inst.id + '">' + icon("archive") + " Back up</button>" +
       (inst ? '<button class="button secondary" data-action="admin-update-image" data-id="' + inst.id + '"' + updDisabled(inst) + '>' + icon("refresh") + (state.instUpdating[inst.id] ? " Updating..." : " Update n8n") + "</button>" : "") +
+      (inst ? '<button class="button secondary" data-action="admin-restart" data-id="' + inst.id + '"' + (state.instRestarting[inst.id] ? " disabled" : "") + '>' + icon("refresh") + (state.instRestarting[inst.id] ? " Restarting..." : " Restart") + "</button>" : "") +
+      (inst ? '<button class="button secondary" data-action="runner-toggle" data-id="' + inst.id + '"' + runDisabled(inst) + '>' + icon(inst.python_runner ? "close" : "spark") + (inst.python_runner ? " Remove Python runner" : " Attach Python runner") + "</button>" : "") +
       "</div>");
   }
 
@@ -1695,12 +2452,20 @@ var ICONS = {
   }
   function quotaModal(accountId) {
     var a = (state.adminAccounts || []).find(function (x) { return x.id === Number(accountId); });
-    showModal(modalHeader("Change workspace quota") +
-      '<p class="muted">Set how many workspaces this customer may own (1 to 50).</p>' +
-      '<div class="field"><label>Workspaces allowed</label><input id="quota-input" type="number" min="1" max="50" value="' + ((a && a.quota) || 1) + '">' +
-      '<span class="hint">Raising the quota lets the customer provision more workspaces. Reducing it does not delete existing workspaces.</span></div>' +
+    var qa = (a && a.quota_a) || 1;
+    var qb = (a && a.quota_b) || 1;
+    showModal(modalHeader("Workspace allowances") +
+      '<p class="muted">Set how many workspaces this customer may own, per package. A workspace counts against the allowance of its own package.</p>' +
+      '<div class="grid cols-2" style="gap:12px">' +
+      '<div class="field" style="border:1px solid var(--line);border-radius:10px;padding:14px;margin:0"><label>Workspace (GHS 300)</label>' +
+      '<input id="quota-input-a" type="number" min="1" max="50" value="' + qa + '">' +
+      '<span class="hint">Allowance for workspaces on the standard package.</span></div>' +
+      '<div class="field" style="border:1px solid var(--line);border-radius:10px;padding:14px;margin:0"><label>Workspace Plus (GHS 500)</label>' +
+      '<input id="quota-input-b" type="number" min="1" max="50" value="' + qb + '">' +
+      '<span class="hint">Allowance for workspaces on the Plus package.</span></div></div>' +
+      '<span class="hint">Raising an allowance lets the customer provision more workspaces of that package. Reducing it does not delete existing workspaces.</span>' +
       '<div class="actions end" style="margin-top:22px"><button class="button secondary" data-action="close-modal">Cancel</button>' +
-      '<button class="button" data-confirm-quota="' + accountId + '">Update quota</button></div>');
+      '<button class="button" data-confirm-quota="' + accountId + '">Update allowances</button></div>');
   }
 
   function maintenanceModal() {
@@ -1731,7 +2496,7 @@ var ICONS = {
     if (!acc) return;
     var email = acc.email || "";
     showModal(modalHeader("Add another workspace") +
-      '<p class="muted">Your account can own up to ' + ((acc && acc.quota) || 1) + ' workspaces. Each workspace gets its own owner, its own password, and a unique address from the username you choose.</p>' +
+      '<p class="muted">Your account can own up to ' + allowanceFor(acc, state.session ? state.session.instances : []) + ' workspaces. Each workspace gets its own owner, its own password, and a unique address from the username you choose.</p>' +
       '<div class="form-grid">' +
         '<div class="field full"><label>Owner email</label>' +
         '<input id="ws-email" type="email" value="' + esc(email) + '" autocomplete="off" spellcheck="false">' +
@@ -1999,6 +2764,8 @@ var ICONS = {
     state.impersonation = { id: Number(accountId), label: String(label) };
     state.impTtlMinutes = r.expires_minutes || 60;
     state.session = null;
+    state.sessionLoaded = false;
+    state.backupsLoaded = false; state.backups = [];
     state.menuOpen = false;
     stopPolling();
     showToast("Viewing as " + label, "Exit impersonation from the banner at any time.");
@@ -2020,6 +2787,8 @@ var ICONS = {
     localStorage.removeItem("impersonation");
     state.impersonation = null;
     state.session = null;
+    state.sessionLoaded = false;
+    state.backupsLoaded = false; state.backups = [];
     state.provisioningPw = null;
     stopPolling();
     showToast("Returned to admin", "You are no longer viewing as " + label + ".");
@@ -2037,6 +2806,15 @@ var ICONS = {
       n8nReleasesCache = { at: now, data: d };
       return d;
     }).catch(function () { return null; });
+  }
+  // The version a workspace really runs. The image reference is often the
+  // floating "latest" tag, which is not a version: never treat that as current.
+  function instVersion(inst) {
+    if (!inst) return "";
+    var m = (state.n8nVersions || {})[inst.id];
+    if (m && m.version) return m.version;
+    var tag = imageTagOf(inst.image || "");
+    return semverTuple(tag) ? tag : "";
   }
   function imageTagOf(img) {
     var s = String(img || "");
@@ -2059,8 +2837,10 @@ var ICONS = {
     return isNaN(d.getTime()) ? "" : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
   }
   function updateChip(inst) {
-    if (!inst || !state.n8nLatestTag || !inst.image) return "";
-    if (isVersionBehind(inst.image, state.n8nLatestTag)) {
+    if (!inst || !state.n8nLatestTag) return "";
+    var v = instVersion(inst);
+    if (!v) return "";   // unknown version: say nothing rather than claim "up to date"
+    if (isVersionBehind(v, state.n8nLatestTag)) {
       return ' <span class="status warning">n8n ' + esc(state.n8nLatestTag) + " available</span>";
     }
     return "";
@@ -2072,28 +2852,93 @@ var ICONS = {
   function updDisabled(inst) {
     return (inst && state.instUpdating[inst.id]) ? " disabled" : "";
   }
+  function runDisabled(inst) {
+    // Two stack mutations must never race: block runner changes while an n8n
+    // image update runs on the same workspace, and vice versa.
+    return (inst && (state.runnerBusy[inst.id] || state.instUpdating[inst.id])) ? " disabled" : "";
+  }
+  function runnerBadge(inst) {
+    return (inst && inst.python_runner && !state.runnerBusy[inst.id]) ? ' <span class="status info">Python attached</span>' : "";
+  }
+  function confirmAttachRunner(instanceId) {
+    var inst = (state.adminInstances || []).find(function (x) { return x.id === Number(instanceId); }) ||
+               findInstanceById(instanceId);
+    var wname = inst ? titleCase(inst.stack_name) : "this workspace";
+    showModal(modalHeader("Attach Python runner?") +
+      "<p>This adds n8n\u2019s official Python helper container to " + esc(wname) + " only. No other workspace is affected.</p>" +
+      '<div class="consequence"><strong>This action will:</strong><ul>' +
+      "<li>Install the runner beside this workspace (official n8n image, matched to its version)</li>" +
+      "<li>Restart the workspace; it is back in a few minutes and all workflows and data are preserved</li>" +
+      "<li>Make Python available in the Code node, with the standard library included</li>" +
+      "<li>Keep third-party Python packages (pandas, numpy and similar) unavailable for now</li>" +
+      "<li>Stay removable at any time from this same menu</li></ul></div>" +
+      '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+      '<button class="button" data-confirm-runner-attach="' + instanceId + '">Attach Python</button></div>');
+  }
+  function confirmDetachRunner(instanceId) {
+    var inst = (state.adminInstances || []).find(function (x) { return x.id === Number(instanceId); }) ||
+               findInstanceById(instanceId);
+    var wname = inst ? titleCase(inst.stack_name) : "this workspace";
+    showModal(modalHeader("Remove Python runner?") +
+      "<p>The Python helper container is removed from " + esc(wname) + ".</p>" +
+      '<div class="consequence" style="background:var(--amber-100)"><strong>This action will:</strong><ul>' +
+      "<li>Restart the workspace; data is preserved</li>" +
+      "<li>Stop Python Code nodes from running; workflows that use them will fail until re-attached</li>" +
+      "<li>Leave JavaScript Code nodes working exactly as before</li></ul></div>" +
+      '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+      '<button class="button danger" data-confirm-runner-detach="' + instanceId + '">Remove Python</button></div>');
+  }
+  function runRunnerToggle(instanceId, mode) {
+    var attaching = mode === "attach";
+    state.runnerBusy[instanceId] = attaching ? "attach" : "detach";
+    state.busyModal = true;
+    render();
+    showModal(modalHeader(attaching ? "Attaching Python runner" : "Removing Python runner") + '<div class="spinner"></div>' +
+      '<p class="muted">Recreating the workspace with' + (attaching ? "" : "out") + " the Python helper container. This can take a few minutes; the window updates when it finishes.</p>");
+    api("/admin/instances/" + instanceId + "/python-runner/" + mode, { method: "POST" }).then(function () {
+      state.busyModal = false;
+      delete state.runnerBusy[instanceId];
+      closeModal();
+      showToast(attaching ? "Python attached" : "Python runner removed",
+        attaching ? "Python is now available in this workspace\u2019s Code node. Third-party packages stay unavailable for now."
+                  : "The workspace no longer has a Python runner. Python Code nodes will fail until you attach one again.");
+      refreshAdminData().then(function () { render(); });
+    }).catch(function (err) {
+      state.busyModal = false;
+      delete state.runnerBusy[instanceId];
+      closeModal();
+      showToast(attaching ? "Attach failed" : "Remove failed", err.message);
+      refreshAdminData().then(function () { render(); });
+    });
+  }
   function updateImageModal(uInst) {
     var wname = titleCase(uInst.stack_name);
     showModal(modalHeader("Update n8n for " + wname) + '<div class="spinner"></div><p class="muted">Checking the current version and the latest n8n release...</p>');
     var curP = api("/admin/instances/" + uInst.id + "/image").then(function (d) {
-      return d && d.image ? d.image : "";
-    }).catch(function () { return ""; });
+      return d || {};
+    }).catch(function () { return {}; });
     var relP = fetchN8nReleases();
     Promise.all([curP, relP]).then(function (res) {
-      var current = res[0] || "";
+      var info = res[0] || {};
+      var currentImage = info.image || "";
+      // Prefer the version the container actually runs; fall back to an explicit
+      // tag in the reference. "latest" is NOT a version, and pretending it was
+      // produced the false "already on the latest release" report (0.1.80).
+      var current = info.version || (semverTuple(imageTagOf(currentImage)) ? imageTagOf(currentImage) : "");
+      var known = !!semverTuple(current);
       var rel = res[1];
       var latestTag = (rel && rel.latest && rel.latest.tag) || "";
       var latestIso = (rel && rel.latest && rel.latest.published_at) || "";
-      var behind = !!(latestTag && current && isVersionBehind(current, latestTag));
-      var onLatest = !!(latestTag && current && !isVersionBehind(current, latestTag));
-      var showCurrent = current && imageTagOf(current) !== "latest";
+      var behind = !!(latestTag && known && isVersionBehind(current, latestTag));
+      var onLatest = !!(latestTag && known && !isVersionBehind(current, latestTag));
+      var showCurrent = !!current;
       var latestBanner = rel && rel.latest
         ? '<div class="banner' + (behind ? " success" : "") + '" style="margin-bottom:14px">' + icon("spark") +
           "<div><strong>Latest n8n release: " + esc(latestTag) + "</strong><br><span class=\"small\">" +
           (latestIso ? "Published " + esc(releaseDateLabel(latestIso)) + ". " : "") +
-          (behind ? "This workspace is on " + esc(imageTagOf(current)) + " and can be updated."
+          (behind ? "This workspace is on " + esc(current) + " and can be updated."
                   : onLatest ? "This workspace is already on the latest release."
-                             : (current ? "Current: " + esc(imageTagOf(current)) : "Current version unknown.")) +
+                             : "The current version could not be determined. You can still update to the latest release.") +
           "</span></div>" +
           (behind ? '<button class="button" data-action="update-image-now" data-id="' + uInst.id + '" data-tag="' + esc(latestTag) + '" style="margin-left:auto">' + icon("refresh") + " Update to " + esc(latestTag) + "</button>" : "") +
           "</div>"
@@ -2101,14 +2946,18 @@ var ICONS = {
           "<div><strong>Could not check for new releases</strong><br><span class=\"small\">The release list is unreachable right now. You can still update to a specific version below.</span></div></div>";
       showModal(modalHeader("Update n8n for " + wname) +
         latestBanner +
-        (showCurrent ? '<div class="field"><label>Current version</label><input class="mono" value="' + esc(current) + '" readonly></div>' : "") +
+        (showCurrent ? '<div class="field"><label>Current version</label><input class="mono" value="' + esc(current) + '" readonly>' +
+            (currentImage && imageTagOf(currentImage) !== current
+              ? '<span class="hint">Stack image: ' + esc(currentImage) + ' (a floating tag; the version above is what the container really runs)</span>'
+              : "") +
+            '</div>' : "") +
         '<div class="field"><label>Update to a specific version</label><div class="input-row">' +
         '<span class="input-suffix">n8nio/n8n:</span>' +
         '<input id="img-tag" type="text" placeholder="e.g. ' + esc(latestTag || "2.31.6") + '" autocomplete="off" spellcheck="false">' +
         '</div><span class="hint">Type the exact version tag to update to (for example ' + esc(latestTag || "2.31.6") + '). Every update pulls the image from Docker Hub first, so a brand-new version works right away. Workflows and credentials are preserved.</span></div>' +
         '<div class="actions end" style="justify-content:flex-start;flex-wrap:wrap">' +
         '<button class="button" data-action="update-to-version" data-id="' + uInst.id + '">' + icon("refresh") + " Update n8n</button>" +
-        (showCurrent && !behind ? '<button class="button secondary" data-action="repull-version" data-id="' + uInst.id + '" data-tag="' + esc(imageTagOf(current)) + '">Re-pull ' + esc(imageTagOf(current)) + "</button>" : "") +
+        (showCurrent && !behind ? '<button class="button secondary" data-action="repull-version" data-id="' + uInst.id + '" data-tag="' + esc(current) + '">Re-pull ' + esc(current) + "</button>" : "") +
         '<button class="button secondary" data-action="close-modal">Cancel</button></div>');
     });
   }
@@ -2184,17 +3033,19 @@ var ICONS = {
                (event.target === act || !act.classList.contains("modal-backdrop"))) closeModal();
       else if (action === "signout") {
         if (state.impersonation) { exitImpersonation(); }
-        else { localStorage.removeItem("portal_token"); state.session = null; state.provisioningPw = null; stopPolling(); showToast("Signed out", "You have been signed out of the portal."); navigate("/entry"); }
+        else { localStorage.removeItem("portal_token"); state.session = null; state.sessionLoaded = false; state.backupsLoaded = false; state.backups = []; state.provisioningPw = null; stopPolling(); showToast("Signed out", "You have been signed out of the portal."); navigate("/entry"); }
       }
       else if (action === "signout-route") {
         if (currentKind() === "admin") {
           localStorage.removeItem("admin_token"); state.adminAuthed = false;
-          state.adminAccounts = []; state.adminArchived = []; state.requests = []; state.accountCache = {}; state.adminInstances = []; state.adminInstancesLoaded = false;
+          state.adminAccounts = []; state.adminAccountsLoaded = false; state.adminArchived = []; state.requests = []; state.accountCache = {}; state.accountDetailTried = {}; state.adminInstances = []; state.adminInstancesLoaded = false;
+          state.requests = []; state.requestsLoaded = false; state.adminArchived = []; state.adminArchivedLoaded = false;
+          state.adminEnvs = []; state.adminEnvsLoaded = false; state.adminBackups = []; state.adminBackupsLoaded = false;
           showToast("Signed out", "Admin session ended."); navigate("/admin/signin");
         } else if (state.impersonation) {
           exitImpersonation();
         } else {
-          if (window.confirm("Sign out of the portal?")) { localStorage.removeItem("portal_token"); state.session = null; state.provisioningPw = null; stopPolling(); navigate("/entry"); }
+          if (window.confirm("Sign out of the portal?")) { localStorage.removeItem("portal_token"); state.session = null; state.sessionLoaded = false; state.backupsLoaded = false; state.backups = []; state.provisioningPw = null; stopPolling(); navigate("/entry"); }
         }
       }
       else if (action === "toggle-password") {
@@ -2271,12 +3122,16 @@ var ICONS = {
           showToast("Code sent", "A new code has been emailed to you.");
         }).catch(function (err) { showToast("Could not send", err.message); });
       }
-      else if (action === "admin-mfa-resend") {
+      else if (action === "admin-mfa-send" || action === "admin-mfa-resend") {
         event.preventDefault();
         var ams = state.adminMfa;
         if (!ams) return;
-        api("/admin/mfa-send-otp", { method: "POST" }).then(function () {
-          showToast("Code sent", "A new code has been emailed to you.");
+        var chan = (act.dataset && act.dataset.channel) || "email";
+        api("/admin/mfa-send-otp", { method: "POST", body: { channel: chan, challenge: ams.challenge } }).then(function (r) {
+          state.adminMfaSent = { channel: r.channel || chan, to: r.to || "" };
+          showToast(chan === "sms" ? "Code texted" : "Code sent",
+            (chan === "sms" ? "A text message is on its way to " : "A new code has been emailed to ") + (r.to || "you") + ".");
+          render();
         }).catch(function (err) { showToast("Could not send", err.message); });
       }
       else if (action === "payment-continue") { doPayment(); }
@@ -2294,7 +3149,7 @@ var ICONS = {
           // refresh the backups list shortly after
           setTimeout(function () {
             api("/me/backups").then(function (bk) { state.backups = (bk && bk.backups) || []; state.backupsLoaded = true; render(); })
-              .catch(function () {});
+              .catch(function () { state.backups = state.backups || []; state.backupsLoaded = true; render(); });
           }, 4000);
         }).catch(function (err) { showToast("Could not start backup", err.message); });
       }
@@ -2411,6 +3266,31 @@ var ICONS = {
         api(es, { method: "POST" }).then(function () { showToast("Code sent", "A new code has been emailed to you."); })
           .catch(function (err) { showToast("Could not send", err.message); });
       }
+      else if (action === "sec-sms-setup") {
+        // Mirror of the email flow: prove the phone can receive a code before switching it on.
+        showModal(modalHeader("Set up SMS 2FA") + '<div class="spinner"></div>');
+        api("/admin/security/sms/send", { method: "POST" }).then(function (r) {
+          showModal(modalHeader("Enter the texted code") +
+            '<p class="muted">We texted a sign-in code to ' + esc(r.to || "your phone") + ". Enter it below to confirm SMS 2FA.</p>" +
+            '<form data-form="sec-sms-enable"><div class="field"><label>Verification code</label>' +
+            '<input name="code" type="text" inputmode="text" autocapitalize="characters" autocorrect="off" spellcheck="false" ' +
+            'autocomplete="one-time-code" required maxlength="6" placeholder="Code" style="text-align:center;letter-spacing:.3em;text-transform:uppercase">' +
+            "</div>" +
+            '<button class="button primary-wide" type="submit">Confirm &amp; enable</button></form>' +
+            '<p class="small muted" style="text-align:center;margin-top:14px">Did not arrive? <a href="#" data-action="sec-sms-send">Send another code</a></p>');
+        }).catch(function (err) { showToast("Could not send", err.message); closeModal(); });
+      }
+      else if (action === "sec-sms-send") {
+        event.preventDefault();
+        api("/admin/security/sms/send", { method: "POST" }).then(function (r) {
+          showToast("Code texted", "A new code is on its way to " + (r.to || "your phone") + ".");
+        }).catch(function (err) { showToast("Could not send", err.message); });
+      }
+      else if (action === "sec-sms-disable") {
+        showModal(modalHeader("Turn off SMS 2FA?") + "<p>You will no longer be texted a sign-in code.</p>" +
+          '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+          '<button class="button danger" data-confirm-sec-sms-disable="1">Turn off</button></div>');
+      }
       else if (action === "sec-email-disable") {
         var ed = act.dataset.kind === "admin" ? "/admin/security/email/disable" : "/me/security/email/disable";
         showModal(modalHeader("Turn off email 2FA?") + "<p>You will no longer be sent a sign-in code by email.</p>" +
@@ -2491,8 +3371,91 @@ var ICONS = {
           '<button class="button' + (openTo ? "" : " danger") + '" data-confirm-payments="1" data-open="' + (openTo ? "1" : "0") + '">' +
           (openTo ? icon("check") + " Open payments" : icon("pause") + " Hold payments") + "</button></div>");
       }
+      else if (action === "updates-refresh") {
+        state.adminUpdatesLoaded = false;
+        ensureAdminUpdates(true);
+      }
+      else if (action === "updates-select-none") {
+        state.updSel = {};
+        render();
+      }
+      else if (action === "updates-queue-one") {
+        queueUpdates([Number(act.dataset.id)]);
+      }
+      else if (action === "updates-queue-selected") {
+        var picked = [].slice.call(document.querySelectorAll("[data-upd-check]"))
+          .filter(function (cb) { return cb.checked; })
+          .map(function (cb) { return Number(cb.value); });
+        if (!picked.length) { showToast("Nothing selected", "Tick at least one workspace first."); }
+        else { queueUpdates(picked); }
+      }
+      else if (action === "updates-queue-all") {
+        queueUpdates(null);
+      }
+      else if (action === "updates-cancel") {
+        api("/admin/updates/cancel?batch_id=" + encodeURIComponent(act.dataset.batch || ""), { method: "POST" })
+          .then(function (r) {
+            showToast("Batch cancelled", ((r && r.canceled) || 0) +
+              " queued update(s) removed. Anything already running still finishes.");
+            state.adminUpdatesLoaded = false;
+            return ensureAdminUpdates(true);
+          })
+          .catch(function (e) { showToast("Could not cancel", (e && e.message) || "Try again."); });
+      }
+      else if (action === "ws-self-update") {
+        // The customer's own button: it QUEUES, it never starts on click, and the
+        // toast says so with their place in their server's line.
+        act.disabled = true;
+        api("/me/instances/" + Number(act.dataset.id) + "/update", { method: "POST" })
+          .then(function (r) {
+            showToast("Update requested", "Your workspace is in the line: position " + ((r && r.position) || 1) +
+              ((r && r.eta_minutes) ? ", " + etaText(r.eta_minutes) : "") +
+              ". We will email you the moment it is done.");
+            state.myUpdatesLoaded = false;
+            return ensureMyUpdates(true);
+          })
+          .catch(function (e) {
+            act.disabled = false;
+            showToast("Could not request the update", (e && e.message) || "Try again later.");
+          });
+      }
+      else if (action === "ws-restart") {
+        // Same container, same version, same data: the customer is told what to expect
+        // and the server paces it, refusing with its own reason when it does not agree.
+        act.disabled = true;
+        api("/me/instances/" + Number(act.dataset.id) + "/restart", { method: "POST" })
+          .then(function (r) {
+            showToast("Restarting your workspace", (r && r.message) || "It is usually back in about half a minute.");
+            state.myUpdatesLoaded = false;
+            return ensureMyUpdates(true);
+          })
+          .catch(function (e) {
+            act.disabled = false;
+            showToast("Could not restart", (e && e.message) || "Try again in a moment.");
+          });
+      }
+      else if (action === "admin-restart") {
+        // The admin is not paced: restart is available whenever it is needed, and the
+        // workspace it applies to is named so a wrong click is visible immediately.
+        var rid = Number(act.dataset.id);
+        state.instRestarting[rid] = true;
+        render();
+        api("/admin/instances/" + rid + "/restart", { method: "POST" })
+          .then(function (r) {
+            state.instRestarting[rid] = false;
+            showToast("Restarting workspace", (r && r.message) || "It is usually back in about half a minute.");
+            return refreshAdminData().then(function () { render(); });
+          })
+          .catch(function (e) {
+            state.instRestarting[rid] = false;
+            render();
+            showToast("Could not restart", (e && e.message) || "Try again in a moment.");
+          });
+      }
       else if (action === "admin-attach") {
         var attId = act.dataset.id;
+        // The scan walks every n8n server, so say so instead of appearing dead.
+        showModal(modalHeader("Finding workspaces") + '<p class="muted" role="status" aria-live="polite">Checking the n8n servers for workspaces that are not attached to an account yet...</p>');
         (async function () {
           try {
             state.unlinkedStacks = await api("/admin/stacks/unlinked");
@@ -2501,8 +3464,8 @@ var ICONS = {
         })();
       }
       else if (action === "after-add-attach") {
-        closeModal();
         var aaId = act.dataset.id;
+        showModal(modalHeader("Finding workspaces") + '<p class="muted" role="status" aria-live="polite">Checking the n8n servers for workspaces that are not attached to an account yet...</p>');
         (async function () {
           try { state.unlinkedStacks = await api("/admin/stacks/unlinked"); } catch (e) { state.unlinkedStacks = []; }
           attachModal(aaId);
@@ -2553,6 +3516,23 @@ var ICONS = {
             '<button class="button" data-confirm-admin-backup-toggle="' + bktId + '" data-on="1">Allow backup</button></div>');
         }
       }
+      else if (action === "admin-update-toggle") {
+        event.preventDefault();
+        var updId = act.dataset.id, updOn = act.dataset.on === "1";
+        if (updOn) {
+          showModal(modalHeader("Revoke update access?") +
+            "<p>The customer will no longer see an update option in their portal. You can still update their workspaces yourself from the Updates page.</p>" +
+            '<div class="consequence"><strong>This action will:</strong><ul><li>Hide the update option from this customer</li><li>Not stop an update that is already in the line</li><li>Be reversible (you can allow updates again)</li></ul></div>' +
+            '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+            '<button class="button danger" data-confirm-admin-update-toggle="' + updId + '" data-on="0">Revoke access</button></div>');
+        } else {
+          showModal(modalHeader("Allow this customer to update?") +
+            "<p>Showing the update option lets this customer update their own workspaces from their portal. Updates stay paced on the server: one workspace at a time per server, with a few quiet minutes after each one.</p>" +
+            '<div class="consequence safe"><strong>This action will:</strong><ul><li>Show the update option on this customer workspace rows</li><li>Let them join the update line at any time</li><li>Be reversible (you can revoke at any time)</li></ul></div>' +
+            '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+            '<button class="button" data-confirm-admin-update-toggle="' + updId + '" data-on="1">Allow update</button></div>');
+        }
+      }
       else if (action === "admin-update-image") {
         event.preventDefault();
         var uInst = findInstanceById(act.dataset.id);
@@ -2570,6 +3550,12 @@ var ICONS = {
         if (!act.dataset.tag) { showToast("Current version unknown", "Re-open the update dialog and try again."); return; }
         runImageUpdate(act.dataset.id, act.dataset.tag);
       }
+      else if (action === "runner-toggle") {
+        var rInst = (state.adminInstances || []).find(function (x) { return x.id === Number(act.dataset.id); }) ||
+                    findInstanceById(act.dataset.id);
+        if (!rInst) { showToast("Not found", "Could not resolve this workspace."); return; }
+        if (rInst.python_runner) confirmDetachRunner(rInst.id); else confirmAttachRunner(rInst.id);
+      }
       else if (action === "update-image-now") {
         event.preventDefault();
         if (!act.dataset.tag) { showToast("Update n8n", "No target version."); return; }
@@ -2579,9 +3565,26 @@ var ICONS = {
       else if (action === "unlock-workspace") confirmUnlock(act.dataset.id);
       else if (action === "reset-password") resetPasswordModal(act.dataset.id);
       else if (action === "admin-add-workspace") {
-        showModal(modalHeader("Add workspace for customer") + "<p>Provision another workspace for this customer. Access details are emailed to them.</p>" +
+        var awId = act.dataset.id;
+        var awAcc = (state.adminAccounts || []).find(function (x) { return x.id === Number(awId); });
+        var curPlan = (awAcc && awAcc.plan) === "b" ? "b" : "a";
+        var planName = function (v) { return v === "b" ? "Workspace Plus (GHS 500)" : "Workspace (GHS 300)"; };
+        function awCard(val) {
+          var on = val === curPlan;
+          return '<label style="display:flex;gap:10px;align-items:flex-start;border:1px solid var(--line);border-radius:10px;padding:12px;cursor:pointer;margin:0">' +
+            '<input type="radio" name="aw-plan" value="' + val + '"' + (on ? " checked" : "") + ' style="margin-top:3px">' +
+            "<div><strong>" + esc(planName(val)) + "</strong><br><span class=\"small muted\">" +
+            (val === "b"
+              ? "Plus package: Python code node + AI assistant setup support."
+              : "Standard package.") +
+            (on ? " <strong>(customer\u2019s current package)</strong>" : " <em>(moving the subscription to this package)</em>") + "</span></div></label>";
+        }
+        showModal(modalHeader("Add workspace for " + esc(awAcc ? (awAcc.display_name || awAcc.username) : "customer")) +
+          '<div class="banner" style="margin-bottom:14px">' + icon("info") + "<div><strong>Current package: " + esc(planName(curPlan)) + "</strong><br><span class=\"small\">Pick which package this new workspace should be. Choosing the other package also moves the customer\u2019s subscription to it.</span></div></div>" +
+          '<div class="field"><label>Workspace package</label><div class="grid cols-2" style="gap:10px" id="aw-plan-picker">' + awCard("a") + awCard("b") + "</div></div>" +
+          "<p>Access details are emailed to the customer.</p>" +
           '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
-          '<button class="button" data-confirm-admin-provision="' + act.dataset.id + '">Provision workspace</button></div>');
+          '<button class="button" data-confirm-admin-provision="' + awId + '">Provision workspace</button></div>');
       }
       else if (action === "workspace-detail") {
         var i = findInstanceById(act.dataset.id);
@@ -2624,6 +3627,73 @@ var ICONS = {
           } catch (err) { showToast("Save failed", err.message); }
         })();
       }
+      else if (action === "save-admin-profile") {
+        (async function () {
+          try {
+            var em = String((document.getElementById("admin-profile-email") || {}).value || "").trim();
+            var ph = String((document.getElementById("admin-profile-phone") || {}).value || "").trim();
+            var res = await api("/admin/settings", { method: "PUT", body: { admin_email: em, admin_phone: ph } });
+            state.adminSettings = Object.assign({}, state.adminSettings || {}, res);
+            showToast("Profile saved", ph ? "Codes will go to " + (res.admin_phone_pretty || ph) + "." : "Email codes only for now.");
+            render();
+          } catch (err) { showToast("Could not save", err.message); }
+        })();
+      }
+      else if (action === "save-sms") {
+        (async function () {
+          try {
+            var keyEl = document.getElementById("sms-api-key");
+            var senderEl = document.getElementById("sms-sender-id");
+            var otpEl = document.getElementById("sms-otp-type");
+            var body = {
+              sms_sender_id: String((senderEl || {}).value || "").trim(),
+              sms_otp_type: otpEl && otpEl.checked ? "otp" : "",
+            };
+            var typed = String((keyEl || {}).value || "").trim();
+            if (typed) body.sms_api_key = typed;      // empty means "leave the saved key alone"
+            var res = await api("/admin/settings", { method: "PUT", body: body });
+            if (keyEl) keyEl.value = "";
+            state.adminSettings = Object.assign({}, state.adminSettings || {}, res);
+            showToast("SMS settings saved", res.sms_api_key_set ? "Key saved. Send a test SMS to be sure." : "Saved.");
+            render();
+          } catch (err) { showToast("Could not save", err.message); }
+        })();
+      }
+      else if (action === "sms-status") {
+        (async function () {
+          try {
+            state.smsStatus = await api("/admin/sms/status");
+            render();
+          } catch (err) { showToast("Check failed", err.message); }
+        })();
+      }
+      else if (action === "sms-test") {
+        (async function () {
+          try {
+            var r = await api("/admin/sms/test", { method: "POST" });
+            showToast("Test text sent", "Sent to " + (r.to || "your phone") +
+              (r.credit_left !== null && r.credit_left !== undefined ? " - " + r.credit_left + " credits left." : ".") +
+              " Checking whether it actually delivers.");
+            state.smsTest = { checking: true };
+            render();
+            // mNotify takes a moment to report, so ask a few times before giving a verdict.
+            for (var i = 0; i < 4; i++) {
+              await new Promise(function (res) { setTimeout(res, i === 0 ? 6000 : 10000); });
+              try {
+                var d = await api("/admin/sms/delivery?campaign_id=" + encodeURIComponent(r.campaign_id || ""));
+                if (d && d.found) {
+                  state.smsTest = d;
+                  if (d.status === "REJECTED" || d.status === "DELIVERED") break;
+                }
+              } catch (e) { /* keep waiting */ }
+            }
+            if (state.smsTest && state.smsTest.checking) {
+              state.smsTest = { status: "", reason: "mNotify has not reported yet. Check connection again in a minute." };
+            }
+            render();
+          } catch (err) { showToast("Test failed", err.message); }
+        })();
+      }
       else if (action === "copy-code") {
         var code = act.dataset.code;
         if (navigator.clipboard && code) navigator.clipboard.writeText(code);
@@ -2638,10 +3708,10 @@ var ICONS = {
         var rr = (state.requests || []).find(function (x) { return x.id === Number(reqView.dataset.requestState); });
         if (rr) {
           var isRegistered = rr.status === "registered";
-          showModal(modalHeader(isRegistered ? "Already registered" : "Code already sent") +
+          showModal(modalHeader(isRegistered ? "Already registered" : "Already approved") +
             '<div class="banner ' + (isRegistered ? "" : "success") + '">' + icon(isRegistered ? "account" : "check") +
-            "<div><strong>No duplicate code was created</strong><br><span class=\"small\">" + esc(rr.email) + " " +
-            (isRegistered ? "already has a customer portal account." : "was previously approved and emailed a code.") + "</span></div></div>" +
+            "<div><strong>Nothing else was sent</strong><br><span class=\"small\">" + esc(rr.email) + " " +
+            (isRegistered ? "already has a customer portal account." : "was already approved and can create their account.") + "</span></div></div>" +
             '<button class="button" style="margin-top:20px" data-action="close-modal">Done</button>');
         }
       }
@@ -2651,7 +3721,7 @@ var ICONS = {
         var rid = confirmApprove.dataset.confirmApprove;
         (async function () {
           try {
-            var data = await api("/admin/access-requests/" + rid + "/token", { method: "POST" });
+            var data = await api("/admin/access-requests/" + rid + "/approve", { method: "POST" });
             closeModal();
             approvalSuccess(data);
             refreshAdminData();
@@ -2735,6 +3805,18 @@ var ICONS = {
         }
       }
 
+      var cRAttach = event.target.closest("[data-confirm-runner-attach]");
+      if (cRAttach) {
+        closeModal();
+        runRunnerToggle(Number(cRAttach.dataset.confirmRunnerAttach), "attach");
+      }
+
+      var cRDetach = event.target.closest("[data-confirm-runner-detach]");
+      if (cRDetach) {
+        closeModal();
+        runRunnerToggle(Number(cRDetach.dataset.confirmRunnerDetach), "detach");
+      }
+
       var cImp = event.target.closest("[data-confirm-impersonate]");
       if (cImp) {
         closeModal();
@@ -2754,15 +3836,18 @@ var ICONS = {
       // (n8n image updates moved to the updateImageModal flow + actions, 0.1.50)
       var cQuota = event.target.closest("[data-confirm-quota]");
       if (cQuota) {
-        var quotaVal = parseInt(($("#quota-input") || {}).value || "1", 10);
-        if (!quotaVal || quotaVal < 1 || quotaVal > 50) { showToast("Invalid quota", "Quota must be 1 to 50."); return; }
+        var qaVal = parseInt(($("#quota-input-a") || {}).value || "1", 10);
+        var qbVal = parseInt(($("#quota-input-b") || {}).value || "1", 10);
+        if ((!qaVal || qaVal < 1 || qaVal > 50) || (!qbVal || qbVal < 1 || qbVal > 50)) { showToast("Invalid allowance", "Allowances must be 1 to 50."); return; }
         closeModal();
         (async function () {
+          var id = cQuota.dataset.confirmQuota;
           try {
-            await api("/admin/accounts/" + cQuota.dataset.confirmQuota + "/quota", { method: "PUT", body: { quota: quotaVal } });
-            showToast("Quota updated", "The customer may now own " + quotaVal + " workspace(s).");
+            await api("/admin/accounts/" + id + "/quota", { method: "PUT", body: { quota: qaVal, plan: "a" } });
+            await api("/admin/accounts/" + id + "/quota", { method: "PUT", body: { quota: qbVal, plan: "b" } });
+            showToast("Allowances updated", qaVal + " Workspace (GHS 300) and " + qbVal + " Workspace Plus (GHS 500).");
             refreshAdminData();
-          } catch (err) { showToast("Quota update failed", err.message); }
+          } catch (err) { showToast("Allowance update failed", err.message); }
         })();
       }
       var cBackupToggle = event.target.closest("[data-confirm-admin-backup-toggle]");
@@ -2774,6 +3859,19 @@ var ICONS = {
           showToast(bktEnabled ? "Backup access granted" : "Backup access revoked", bktEnabled
             ? "The customer can now create and download backups from their portal."
             : "The customer no longer sees a backup option.");
+          refreshAdminData();
+          render();
+        }).catch(function (err) { showToast("Update failed", err.message); });
+      }
+      var cUpdateToggle = event.target.closest("[data-confirm-admin-update-toggle]");
+      if (cUpdateToggle) {
+        var updTId = cUpdateToggle.dataset.confirmAdminUpdateToggle;
+        var updTOn = cUpdateToggle.dataset.on === "1";
+        closeModal();
+        api("/admin/accounts/" + updTId + "/update-access", { method: "PUT", body: { update_enabled: updTOn } }).then(function () {
+          showToast(updTOn ? "Update access granted" : "Update access revoked", updTOn
+            ? "The customer can now update their own workspaces from their portal."
+            : "The customer no longer sees an update option.");
           refreshAdminData();
           render();
         }).catch(function (err) { showToast("Update failed", err.message); });
@@ -2811,16 +3909,19 @@ var ICONS = {
         var mpId = cMarkPaid.dataset.confirmMarkPaid;
         var paidFrom = (document.getElementById("paid-from") || {}).value;
         var paidUntil = (document.getElementById("paid-until") || {}).value;
+        var planSel = document.querySelector('input[name="paid-plan"]:checked');
+        var planVal = planSel ? planSel.value : "";
         function toEpoch(dateStr) { var d = new Date(dateStr + "T23:59:59"); return Math.floor(d.getTime() / 1000); }
         if (!paidFrom || !paidUntil) { showToast("Dates required", "Pick both the start and expiry dates."); return; }
+        if (!planVal) { showToast("Package required", "Choose which package was paid for."); return; }
         var until = toEpoch(paidUntil);
         var from = toEpoch(paidFrom);
         closeModal();
         (async function () {
           try {
-            var data = await api("/admin/accounts/" + mpId + "/mark-paid", { method: "POST", body: { paid_until: until, paid_from: from } });
+            var data = await api("/admin/accounts/" + mpId + "/mark-paid", { method: "POST", body: { paid_until: until, paid_from: from, plan: planVal } });
             showToast(data.subscription_status === "active" ? "Marked as paid" : "Recorded as expired",
-              data.subscription_status === "active" ? "Subscription active until " + fmtDate(until) + "." : "Expiry was in the past; the workspace stays off.");
+              data.subscription_status === "active" ? "Subscription active until " + fmtDate(until) + " on the " + (planVal === "b" ? "Plus (GHS 500)" : "Workspace (GHS 300)") + " package." : "Expiry was in the past; the workspace stays off.");
             refreshAdminData();
           } catch (err) { showToast("Mark-paid failed", err.message); }
         })();
@@ -2854,11 +3955,13 @@ var ICONS = {
       }
       var cAdminProv = event.target.closest("[data-confirm-admin-provision]");
       if (cAdminProv) {
+        var awRadio = document.querySelector('input[name="aw-plan"]:checked');
+        var awPlan = awRadio ? awRadio.value : "";
         closeModal();
         (async function () {
           try {
-            await api("/accounts/" + cAdminProv.dataset.confirmAdminProvision + "/provision", { method: "POST", body: {} });
-            showToast("Provisioning queued", "The customer will receive an email when the workspace is ready.");
+            await api("/accounts/" + cAdminProv.dataset.confirmAdminProvision + "/provision", { method: "POST", body: awPlan ? { plan: awPlan } : {} });
+            showToast("Provisioning queued", awPlan === "b" ? "Workspace Plus (GHS 500) is being prepared." : awPlan === "a" ? "Workspace (GHS 300) is being prepared." : "The customer will receive an email when the workspace is ready.");
             refreshAdminData();
           } catch (err) { showToast("Provisioning failed", err.message); }
         })();
@@ -2881,6 +3984,14 @@ var ICONS = {
           refreshSecurity();
         }).catch(function (err) { showToast("Could not disable", err.message); });
       }
+      var cSecSms = event.target.closest("[data-confirm-sec-sms-disable]");
+      if (cSecSms) {
+        closeModal();
+        api("/admin/security/sms/disable", { method: "POST" }).then(function () {
+          showToast("SMS 2FA off", "");
+          refreshSecurity();
+        }).catch(function (err) { showToast("Could not disable", err.message); });
+      }
       var cSecPk = event.target.closest("[data-confirm-sec-passkey-delete]");
       if (cSecPk) {
         closeModal();
@@ -2900,6 +4011,20 @@ var ICONS = {
       /* (server reorder removed - placement is now checkbox selection) */
     });
 
+    document.addEventListener("change", function (event) {
+      // Updates page: remember which workspaces are ticked so the 15 second refresh
+      // cannot silently clear a selection the admin is still building.
+      var t = event.target;
+      if (!t || !t.matches || !t.matches("[data-upd-check]")) return;
+      state.updSel = state.updSel || {};
+      if (t.checked) state.updSel[t.value] = true; else delete state.updSel[t.value];
+      var label = document.querySelector("[data-action=\"updates-queue-selected\"]");
+      if (label) {
+        var n = Object.keys(state.updSel).length;
+        label.textContent = "Update selected (" + n + ")";
+        label.disabled = !n;
+      }
+    });
     document.addEventListener("input", function (event) {
       if (event.target.id === "account-search") {
         var q = event.target.value.toLowerCase();
@@ -2956,19 +4081,17 @@ var ICONS = {
         api("/auth/check", { method: "POST", body: { email: email } }).then(function (r) {
           state.gateEmail = r.email;
           if (r.action === "login") navigate("/signin");
-          else if (r.action === "token") navigate("/code");
+          else if (r.action === "approved" || r.action === "token") navigate("/code");
           else if (r.action === "denied") navigate("/denied");
           else navigate("/request"); // requested | waiting -> same screen copy
         }).catch(function (err) { showToast("Could not continue", err.message); });
       }
       else if (type === "code") {
         var fd0 = new FormData(form);
-        var token = String(fd0.get("token") || "").trim().toUpperCase();
         var first = String(fd0.get("first_name") || "").trim();
         var last = String(fd0.get("last_name") || "").trim();
         var pw2 = String(fd0.get("password") || "");
         var conf = String((document.getElementById("reg-confirm") || {}).value || "");
-        if (!token) { showToast("Enter the code", "Paste or type the code from your email."); return; }
         if (!first || !last) { showToast("Missing details", "Enter your first and last name."); return; }
         if (pw2 !== conf) { showToast("Passwords do not match", "Re-enter the same password in both fields."); return; }
         if (!/^.*(?=.*[A-Z])(?=.*[a-z])(?=.*\d).{8,}$/.test(pw2)) { showToast("Password too weak", "Use 8+ characters with uppercase, lowercase, and a digit."); return; }
@@ -2977,7 +4100,7 @@ var ICONS = {
         api("/accounts", { method: "POST", body: {
           email: state.gateEmail, username: null,
           first_name: first, last_name: last,
-          password: pw2, access_token: token
+          password: pw2
         } }).then(function (r) {
           localStorage.setItem("portal_token", r.token);
           state.provisioningPw = pw2;
@@ -3094,6 +4217,14 @@ else if (type === "register") {
           refreshSecurity();
         }).catch(function (err) { showToast("Code not accepted", err.message); });
       }
+      else if (type === "sec-sms-enable") {
+        var scCode = String(new FormData(form).get("code") || "").trim();
+        api("/admin/security/sms/enable", { method: "POST", body: { code: scCode } }).then(function () {
+          closeModal();
+          showToast("SMS 2FA on", "A code is now texted to you at sign-in.");
+          refreshSecurity();
+        }).catch(function (err) { showToast("Code not accepted", err.message); });
+      }
       else if (type === "admin-signin") {
         var pwA = String(new FormData(form).get("password") || "");
         var btnA = form.querySelector("button[type=submit]");
@@ -3102,6 +4233,7 @@ else if (type === "register") {
           if (r.mfa) {
             // Admin second factor required (authenticator/email/passkey).
             state.adminMfa = { challenge: r.mfa.challenge, methods: r.mfa.methods || [], codeSent: false };
+            state.adminMfaSent = null;
             navigate("/admin/mfa");
             return;
           }
@@ -3232,16 +4364,31 @@ else if (type === "register") {
     if (state.adminAuthed) {
       fetchN8nReleases().then(function (d) { if (d && d.latest) state.n8nLatestTag = d.latest.tag; });
     }
-    // handle payment return: ?status=success after Paystack redirect
+    // handle payment return: ?status=success after Paystack redirect (0.1.71):
+    // the webhook can land a second or two AFTER the browser returns, so poll
+    // /me briefly until the subscription flips active, then auto-provision.
+    // If this browser has no portal token (customer paid elsewhere), the
+    // server-side sweep still provisions; nothing is lost.
     var params = new URLSearchParams(location.search);
     if (params.get("status") === "success" && portalToken) {
       history.replaceState(null, "", location.pathname + location.hash);
       if (params.get("checkout") !== "mock") {
-        refreshSession().then(function () {
-          showToast("Payment received", "Your subscription is active. Preparing your workspace...");
-          autoProvision();
-          navigate("/customer/dashboard");
-        });
+        (async function () {
+          var sess = null;
+          for (var attempt = 0; attempt < 10; attempt++) {
+            sess = await refreshSession();
+            if (sess && sess.account && sess.account.subscription_status === "active") break;
+            await new Promise(function (res) { setTimeout(res, 2000); });
+          }
+          if (sess && sess.account && sess.account.subscription_status === "active") {
+            showToast("Payment received", "Your subscription is active. Preparing your workspace...");
+            autoProvision();
+            navigate("/customer/dashboard");
+          } else {
+            showToast("Payment received", "We are confirming your payment; your workspace will be prepared automatically.");
+            navigate("/customer/billing");
+          }
+        })();
       }
     }
     eventHandlers();

@@ -10,26 +10,38 @@
 #   GET  /api/v1/admin/accounts    — list all accounts
 
 import logging
+import re
 import time as _time
 import asyncio
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Request, Header
-from fastapi.responses import FileResponse
+from fastapi import (FastAPI, HTTPException, Depends, BackgroundTasks, Request, Header,
+                     Body)
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr, Field
 
 from .config import settings
 from . import db
+from .security import _decode_subject as _sec_decode_subject
+
+
+def _decode_subject_is_admin(authorization: str | None) -> bool:
+    try:
+        return _sec_decode_subject(authorization) == "admin"
+    except Exception:
+        return False
 from .services import provisioner, billing, access_gate, admin_ops, backup_ops
-from .services import account_security, passkeys, n8n_releases
+from .services import account_security, passkeys, n8n_releases, python_runner, sms
+from .services import update_queue
+from .services import plan_specs
 from .services import security_controls as sc
 from .services.admin_ops import AdminOpsError
 from .services.portainer_client import PortainerClient
 from .services.npm_client import NPMClient
 from .services.emailer import (send_welcome_credentials, send_reset_password,
-                               send_access_token, EmailError)
+                               send_access_token, send_access_approved, EmailError)
 from .security import (create_access_token, verify_admin,
                        verify_admin_password, verify_password, hash_password,
                        create_client_token, verify_client, create_mfa_token,
@@ -49,6 +61,10 @@ async def lifespan(app: FastAPI):
     # AUTO-EXPIRY background task (Steward 2026-09-01): every 15 minutes, stop
     # instances whose subscription has expired. Renewal restarts them.
     expiry_task = asyncio.create_task(_expiry_loop())
+    # WORKSPACE UPDATE QUEUE (0.1.85): one update at a time per server, a quiet gap
+    # between them, admin batches ahead of customer requests. Runs in this process
+    # so it survives a closed browser; queue state is in SQLite so it survives us.
+    update_queue.start_worker()
     try:
         yield
     finally:
@@ -61,6 +77,17 @@ async def _expiry_loop(interval_seconds: int = 15 * 60) -> None:
             await asyncio.to_thread(billing.sweep_expired)
         except Exception as e:
             log.warning("expiry sweep failed: %s", e)
+        # Renewal reminders (0.1.76): with no Paystack plan there is no automatic
+        # renewal, so this loop also sends the reminders that are due. It runs at
+        # most once a day and only when RENEWAL_REMINDERS_ENABLED is true; the
+        # service enforces both, so a disabled switch is inert here.
+        try:
+            from .services import renewal
+            res = await asyncio.to_thread(renewal.maybe_send_reminders)
+            if res.get("sent"):
+                log.info("renewal reminders sent: %s", res)
+        except Exception as e:
+            log.warning("renewal reminders failed: %s", e)
         await asyncio.sleep(interval_seconds)
 
 
@@ -131,12 +158,16 @@ class AccountOut(BaseModel):
     display_name: str
     status: str
     quota: int = 1
+    quota_a: int = 1   # per-plan workspace allowances (0.1.68)
+    quota_b: int = 1
     subscription_status: str = "none"
     paid_until: Optional[int] = None
     paid_from: Optional[int] = None
     account_state: str = "active"  # active | suspended | archived
     backup_enabled: bool = False   # customer may self-service backup (admin-set)
+    update_enabled: bool = False   # customer may self-update a workspace (admin-set, 0.1.88)
     plan: str = "a"                 # subscribed tier: a = GHS 300, b = GHS 500 (Plus)
+    first_name: str = ""            # 0.1.74: the sidebar chip shows only this
     created_at: int
     provisioned_at: Optional[int] = None
 
@@ -162,6 +193,7 @@ class AdminAttachIn(BaseModel):
 class AdminMarkPaidIn(BaseModel):
     paid_until: Optional[int] = None  # epoch seconds (expiry date); omit to auto-anchor on NPM created_on
     paid_from: Optional[int] = None  # epoch seconds (subscription start; backdating)
+    plan: Optional[str] = None  # 'a' | 'b': which package was paid for (0.1.68)
 
 
 class AdminExtendIn(BaseModel):
@@ -191,6 +223,11 @@ class ProvisionRequest(BaseModel):
     owner_email: Optional[EmailStr] = None
     first_name: Optional[str] = Field(default=None, max_length=50)
     last_name: Optional[str] = Field(default=None, max_length=50)
+    # Which package this workspace is provisioned as (0.1.70, Steward):
+    # 'a' GHS 300 | 'b' GHS 500 Plus. Omit = the account's subscription tier
+    # (the customer self-service flow always omits this; provisioning follows
+    # the paid package automatically). Admin-only: enforced in the route.
+    plan: Optional[str] = Field(default=None, pattern="^[ab]$")
 
 
 class InstanceStatusOut(BaseModel):
@@ -206,6 +243,8 @@ class InstanceStatusOut(BaseModel):
     locked: int = 0
     managed: int = 1
     image: str = ""
+    python_runner: int = 0
+    plan: str = "a"   # this workspace's package: a GHS 300 | b GHS 500 Plus (0.1.70)
     error: Optional[str]
     created_at: int
 
@@ -215,6 +254,14 @@ class AdminSettingsIn(BaseModel):
     # caller can update ONLY the payments switch without touching placement.
     landing_environments: Optional[str] = None
     payments_open: Optional[bool] = None
+    # Admin profile + SMS delivery (0.1.90, Steward 2026-10-07). Every field is optional
+    # so one card can save without touching the others. sms_api_key is write-only: it goes
+    # in and only a masked confirmation comes back.
+    admin_email: Optional[str] = None
+    admin_phone: Optional[str] = None
+    sms_api_key: Optional[str] = None
+    sms_sender_id: Optional[str] = None
+    sms_otp_type: Optional[str] = None
 
 
 class AdminLoginIn(BaseModel):
@@ -290,6 +337,13 @@ class PasskeyVerifyIn(BaseModel):
     credential: dict = Field(...)
 
 
+class AdminMFASendOTPIn(BaseModel):
+    # Which channel to send the admin code on. Optional so the old call (no body) still
+    # means "email", exactly as it did before 0.1.90.
+    channel: Optional[str] = None
+    challenge: Optional[str] = None      # required for SMS: proves the password step ran
+
+
 class AdminMFAVerifyIn(BaseModel):
     challenge: str = Field(..., min_length=10, max_length=512)
     code: str = Field(..., min_length=6, max_length=10)
@@ -344,16 +398,25 @@ def _row_get(row, key, default=None):
 
 
 def _account_to_out(a) -> AccountOut:
+    dn = (a["display_name"] or "").strip()
+    if not dn:
+        # 0.1.72: legacy accounts signed up before display names were defaulted
+        # still render the person's real name, not the email-derived username.
+        dn = f"{_row_get(a, 'first_name', '') or ''} {_row_get(a, 'last_name', '') or ''}".strip()
     return AccountOut(
         id=a["id"], email=a["email"], username=a["username"],
-        display_name=a["display_name"], status=a["status"],
+        display_name=dn, status=a["status"],
         quota=_row_get(a, "quota", 1),
+        quota_a=db.account_quota_for(a, "a"),
+        quota_b=db.account_quota_for(a, "b"),
         subscription_status=_row_get(a, "subscription_status", "none"),
         paid_until=_row_get(a, "paid_until"),
         paid_from=_row_get(a, "paid_from"),
         account_state=_row_get(a, "account_state", "active"),
         backup_enabled=bool(_row_get(a, "backup_enabled", 0)),
+        update_enabled=bool(_row_get(a, "update_enabled", 0)),
         plan=_row_get(a, "plan", "a") or "a",
+        first_name=(_row_get(a, "first_name", "") or "").strip(),
         created_at=a["created_at"], provisioned_at=a["provisioned_at"],
     )
 
@@ -366,6 +429,8 @@ def _instance_to_out(i) -> InstanceStatusOut:
         status=i["status"], locked=_row_get(i, "locked", 0), error=i["error"],
         managed=_row_get(i, "managed", 1),
         image=_row_get(i, "image", ""),
+        python_runner=_row_get(i, "python_runner", 0),
+        plan=_row_get(i, "plan", "a") or "a",
         created_at=i["created_at"],
     )
 
@@ -406,6 +471,60 @@ def _require_backup(account_id: int) -> None:
     raise HTTPException(403, "Backup is not enabled for this account. Contact support.")
 
 
+def _require_update(account_id: int) -> None:
+    """Self-update is admin-gated exactly like backups (0.1.88, Steward 2026-10-07): a
+    customer may only ask for a workspace update when the admin enabled it for their
+    account; otherwise the update UI is hidden AND the API refuses (defense in depth)."""
+    acct = db.get_account(account_id)
+    if acct and bool(_row_get(acct, "update_enabled", 0)):
+        return
+    raise HTTPException(403, "Self-update is not enabled for this account. Contact support.")
+
+
+# Restarting is safe and cheap, but a workspace restarted in a loop never gets to stay
+# up. Customers are paced; the admin is not (Steward, 2026-10-08: the option is for both).
+RESTART_COOLDOWN_SECONDS = 120
+
+
+def _restart_instance(inst: dict, *, actor: str) -> dict:
+    """Restart one workspace container in place, for the admin or its own customer.
+
+    Not an update: the image is untouched, so this cannot change a version or roll
+    anything back. The server refuses while an update is queued or running for the same
+    workspace, because restarting in the middle of one would fight that update.
+    """
+    iid = int(inst["id"])
+    try:
+        conn = db.get_conn()
+        try:
+            busy = conn.execute(
+                "SELECT 1 FROM update_queue WHERE instance_id = ? AND status IN ('queued','running')"
+                " LIMIT 1", (iid,)).fetchone()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 - the queue table is best effort here
+        busy = None
+    if busy:
+        raise HTTPException(409, "This workspace is being updated right now. Restart it after that finishes.")
+
+    key = f"restart_at:{iid}"
+    if actor == "customer":
+        try:
+            last = int(db.get_setting(key) or 0)
+        except (TypeError, ValueError):
+            last = 0
+        wait = RESTART_COOLDOWN_SECONDS - (int(_time.time()) - last)
+        if last and wait > 0:
+            raise HTTPException(429, "This workspace was restarted a moment ago. Try again in %d seconds." % wait)
+    try:
+        container = backup_ops.restart_workspace(inst)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, "The workspace could not be restarted because " + str(e)[:180] + ".")
+    db.set_setting(key, str(int(_time.time())))
+    return {"ok": True, "instance_id": iid, "container": container[:12], "status": "restarting",
+            "message": "Restarting now. It is usually back in about half a minute."}
+
+
 def _run_backup(backup_id: int, instance: dict, kind: str) -> None:
     """Background task wrapper for a backup job (called via BackgroundTasks)."""
     try:
@@ -443,11 +562,12 @@ def _serve_backup(b):
 
 
 def _run_provision(account_id: int, password: str | None = None,
-                   workspace: dict | None = None) -> None:
+                   workspace: dict | None = None,
+                   plan: str | None = None) -> None:
     """Background task wrapper — provisioning runs async so the API returns fast."""
     try:
         result = provisioner.provision_account(account_id, password=password,
-                                               workspace=workspace)
+                                               workspace=workspace, plan=plan)
         try:
             send_welcome_credentials(
                 to=result["basic_auth_user"],
@@ -913,6 +1033,57 @@ def my_create_backup(instance_id: int, kind: str = "full",
     return {"id": bid, "status": "creating"}
 
 
+@app.get("/api/v1/me/updates", dependencies=[Depends(verify_client)])
+def my_updates(account_id: int = Depends(verify_client)):
+    """Version and self-update state for the signed-in account's own workspaces.
+
+    `can_update` is true only on the self-service package and only when the
+    workspace is genuinely behind, so the button never promises a no-op.
+    """
+    return {"latest_version": update_queue.latest_target()["version"],
+            "update_allowed": update_queue.account_update_allowed(account_id),
+            "items": update_queue.customer_state(account_id)}
+
+
+@app.post("/api/v1/me/instances/{instance_id}/update", status_code=202,
+          dependencies=[Depends(verify_client)])
+def my_request_update(instance_id: int, account_id: int = Depends(verify_client)):
+    """Ask for a self-update. ALWAYS queued: even if ten people click together, the
+    worker updates one workspace per server with a quiet gap between them, and this
+    response tells the customer where they are in their server's line."""
+    _require_update(account_id)
+    inst = _get_owned_instance(account_id, instance_id)
+    info = {i["instance_id"]: i for i in update_queue.customer_state(account_id)}.get(int(inst["id"]))
+    if not info:
+        raise HTTPException(404, "Workspace not found.")
+    if info.get("queued"):
+        raise HTTPException(409, "This workspace is already in the update line.")
+    if not info.get("can_update"):
+        raise HTTPException(403, info.get("blocked_reason") or "This workspace cannot self-update.")
+    res = update_queue.queue_workspaces([int(inst["id"])], requested_by="customer",
+                                       requested_account=account_id, priority=100)
+    if not res.get("ok"):
+        why = res.get("error") or (res.get("skipped") or [{}])[0].get("reason") or "Could not queue the update."
+        raise HTTPException(503, why)
+    row = res["queued"][0]
+    pos = update_queue.position_of(row["queue_id"])
+    return {"ok": True, "queue_id": row["queue_id"], "target_version": row["target_version"],
+            "position": pos.get("position"), "eta_minutes": pos.get("eta_minutes"),
+            "status": "queued"}
+
+
+@app.post("/api/v1/me/instances/{instance_id}/restart", status_code=202,
+          dependencies=[Depends(verify_client)])
+def my_restart_instance(instance_id: int, account_id: int = Depends(verify_client)):
+    """Restart my own workspace: same version, same data, back in about half a minute.
+
+    Available to every customer on their own workspace (Steward, 2026-10-08). Paced, so
+    it cannot be used to keep a workspace down, and refused mid-update.
+    """
+    inst = _get_owned_instance(account_id, instance_id)
+    return _restart_instance(inst, actor="customer")
+
+
 @app.get("/api/v1/me/backups/{backup_id}/download", dependencies=[Depends(verify_client)])
 def my_download_backup(backup_id: int, account_id: int = Depends(verify_client)):
     """Download a backup file for the signed-in account's own instance."""
@@ -929,7 +1100,7 @@ def my_download_backup(backup_id: int, account_id: int = Depends(verify_client))
 
 @app.post("/api/v1/accounts", response_model=dict, status_code=201)
 def create_account(payload: AccountCreate, request: Request):
-    """Registration is GATED: requires a verified access token for this email
+    """Registration is GATED: the email must carry an admin-approved access request
     (Steward 2026-09-01). Returns the account + a portal session token.
     SECURITY (2026-09-03): per-IP rate limited (access-token guessing / spam)."""
     ip = sc.client_ip(request)
@@ -941,25 +1112,26 @@ def create_account(payload: AccountCreate, request: Request):
     existing = db.get_account_by_email(email)
     if existing:
         raise HTTPException(409, "An account with this email already exists.")
-    # gate: a token must have been issued AND verified for this email
+    # gate (0.1.77, Steward): an ADMIN APPROVAL is the gate, not a code. The email
+    # must carry an approved access request; nothing is generated, emailed or
+    # typed. 'token_sent' rows predate this change and were already approved, so
+    # they register exactly the same way. payload.access_token is still accepted
+    # (older clients send it) and deliberately ignored.
     req = db.get_access_request(email)
-    if not req or req["status"] != "token_sent":
-        raise HTTPException(403, "Access token required. Request access from an administrator first.")
-    if not req["token_hash"] or req["token_expires_at"] and _time.time() > req["token_expires_at"]:
-        raise HTTPException(403, "Access token expired. Request a new one from an administrator.")
-    # require the caller to prove token possession: the UI verified it first and
-    # we re-verify here with the plaintext token carried by the registration form.
-    if not payload.access_token:
-        raise HTTPException(403, "Access token required.")
-    if not access_gate.verify_token(email, payload.access_token):
-        raise HTTPException(401, "Invalid access token for this email.")
+    if not req or req["status"] not in ("approved", "token_sent"):
+        raise HTTPException(403, "Access required. Request access from an administrator first.")
     username = provisioner.ensure_unique_username(payload.username, email)
     try:
         provisioner.validate_password_policy(payload.password)
     except provisioner.ProvisionError as e:
         raise HTTPException(422, str(e))
+    # Display name (0.1.72, Steward): the person's REAL name must be the
+    # account's main name - never the email-derived username. Default it from
+    # the signup name fields when the form did not send one.
+    display_name = (payload.display_name or "").strip() or \
+        f"{payload.first_name} {payload.last_name}".strip()
     account_id = db.create_account(
-        email, username, payload.display_name or "",
+        email, username, display_name,
         first_name=payload.first_name, last_name=payload.last_name,
         password_hash=hash_password(payload.password),
     )
@@ -1005,18 +1177,41 @@ def provision(account_id: int, background: BackgroundTasks,
                 provisioner.validate_password_policy(payload.password)
             except provisioner.ProvisionError as e:
                 raise HTTPException(422, str(e))
-    # Quota gate: one instance per account unless the admin raised the quota
-    # (provisioner enforces the same rule; this gives the API a fast 409).
-    quota = account["quota"] if "quota" in account.keys() else settings.default_quota
-    live = db.count_instances(account_id)
+    # Quota gate, PER PACKAGE (0.1.73): the fast 409 must count the workspace
+    # against the package it will actually be provisioned as. Reading the legacy
+    # single quota here blocked an account that holds BOTH packages from using
+    # its second allowance (the provisioner's own gate is per-package, so the
+    # route was the stricter, wrong one).
+    target_plan = "a"
+    if payload and payload.plan in ("a", "b"):
+        target_plan = payload.plan            # admin package choice (checked below)
+    elif "plan" in account.keys() and (account["plan"] or "a") == "b":
+        target_plan = "b"
+    quota = db.account_quota_for(account, target_plan)
+    live = db.count_instances_by_plan(account_id, target_plan)
     if live >= quota:
-        raise HTTPException(409, f"Instance quota reached ({live}/{quota}). Contact an administrator to increase your quota.")
+        package = "Plus" if target_plan == "b" else "standard"
+        raise HTTPException(409, f"Workspace quota reached on the {package} package ({live}/{quota}). Contact an administrator to increase your allowance.")
     # PAYMENT GATE: instances are only created after the annual subscription is
     # active (webhook sets subscription_status=active on charge.success).
     if billing.gateway() in ("paystack", "stripe") and account["subscription_status"] != "active":
         raise HTTPException(402, "Payment required: subscribe before provisioning.")
+    # ADMIN PACKAGE CHOICE (0.1.70, Steward): an admin may pick which package
+    # the workspace is provisioned as. Choosing a DIFFERENT package than the
+    # account's subscription moves the subscription to that package (the two
+    # must never disagree). Customers cannot pass this field.
+    plan_override = None
+    if payload and payload.plan:
+        _is_admin = _decode_subject_is_admin(authorization)
+        if not _is_admin:
+            raise HTTPException(403, "Only an administrator can choose the package.")
+        current = (account["plan"] or "a") if "plan" in account.keys() else "a"
+        if payload.plan != current:
+            db.set_account_plan(account_id, payload.plan)
+            log.info("Account %s subscription moved %s -> %s by admin (workspace provision)", account_id, current, payload.plan)
+        plan_override = payload.plan
     password = payload.password if payload else None
-    background.add_task(_run_provision, account_id, password, workspace)
+    background.add_task(_run_provision, account_id, password, workspace, plan_override)
     return {"status": "provisioning_started", "account_id": account_id}
 
 
@@ -1068,21 +1263,30 @@ def plan_info():
 
 @app.get("/api/v1/plans")
 def plans():
-    """Both annual plans (Steward 2026-09-01): GHS 300 active, GHS 500
-    inactive until the special compose is built. Kept in GHS for now."""
+    """Both annual packages (Steward 2026-09-01): GHS 300 and GHS 500 Plus.
+
+    Each entry carries `key` ('a' | 'b') so the UI labels a package from the API
+    rather than guessing off the price, plus `specs` (0.1.73) built by
+    plan_specs from the ACTUAL stack template, so the billing page shows the
+    resources a workspace really gets.
+    """
     plans_out = [{
+        "key": "a",
         "name": settings.plan_name,
         "currency": settings.plan_currency,
         "amount_minor": settings.plan_amount_minor,
         "interval": "annually",
         "active": True,
+        "specs": plan_specs.specs_for_plan("a"),
     }]
     plans_out.append({
+        "key": "b",
         "name": settings.plan_b_name,
         "currency": settings.plan_currency,
         "amount_minor": settings.plan_b_amount_minor,
         "interval": "annually",
         "active": settings.plan_b_active,
+        "specs": plan_specs.specs_for_plan("b"),
     })
     return {"plans": plans_out, "gateway": billing.gateway(),
             "payments_open": billing.payments_open()}
@@ -1120,10 +1324,20 @@ def create_checkout(account_id: int,
 
 
 @app.post("/api/v1/webhook/paystack")
-async def paystack_webhook(request: Request):
-    """Paystack webhook endpoint. Signature: x-paystack-signature (HMAC-SHA512)."""
+async def paystack_webhook(request: Request,
+                           x_router_secret: Optional[str] = Header(default=None)):
+    """Paystack webhook endpoint (normally delivered via our webhook router).
+    Signature: x-paystack-signature (HMAC-SHA512). When PAYSTACK_ROUTER_SECRET
+    is configured, the x-router-secret header must ALSO match, so only our
+    router can deliver events even if the Paystack signature is replayed."""
     payload = await request.body()
     signature = request.headers.get("x-paystack-signature")
+    expected_rs = settings.paystack_router_secret
+    if expected_rs:
+        from .security import _constant_time_eq
+        if not x_router_secret or not _constant_time_eq(x_router_secret, expected_rs):
+            log.warning("Rejected Paystack webhook without valid router secret")
+            raise HTTPException(401, "Invalid router secret.")
     try:
         result = billing.handle_webhook("paystack", payload, signature)
     except Exception as e:
@@ -1221,8 +1435,15 @@ def admin_login(payload: AdminLoginIn, request: Request):
         sc.record_failed(ip, "login_fail", None, "admin bad password")
         raise HTTPException(401, "Invalid admin password.")
     sc.record_ok(ip, "login_ok", None)
-    # Admin 2FA gate
-    methods = account_security.admin_2fa_state()["methods"]
+    # Admin 2FA gate. 0.1.90: if 2FA is switched on but no channel can actually
+    # deliver (e.g. only SMS is on and the phone number was removed), refuse rather
+    # than quietly signing the admin in without a second factor.
+    state_2fa = account_security.admin_2fa_state()
+    methods = state_2fa["methods"]
+    if not methods and (db.get_setting("admin_2fa", "") or "").strip():
+        raise HTTPException(
+            409, "Admin 2FA is switched on but no usable method is configured. "
+                 "Add your phone number or email in Settings.")
     if methods:
         return AdminLoginOut(
             token="__mfa__",
@@ -1255,8 +1476,9 @@ def admin_mfa_verify(payload: AdminMFAVerifyIn, request: Request):
     ok = False
     if any(m["method"] == "totp" for m in enabled):
         ok = account_security.admin_totp_verify_code(payload.code)
-    if not ok and any(m["method"] == "email" for m in enabled):
-        ok = account_security.admin_email_otp_verify(payload.code)
+    if not ok and any(m["method"] in ("email", "sms") for m in enabled):
+        # One code slot for the admin, whichever channel delivered it (0.1.90).
+        ok = account_security.admin_otp_verify(payload.code)
     if not ok:
         sc.record_failed(ip, "mfa_fail", None)
         raise HTTPException(401, "That code is invalid or has expired.")
@@ -1268,16 +1490,38 @@ def admin_mfa_verify(payload: AdminMFAVerifyIn, request: Request):
 
 
 @app.post("/api/v1/admin/mfa-send-otp", response_model=dict)
-def admin_mfa_send_otp(request: Request):
-    """Resend the emailed one-time code for the admin second-factor step.
-    (Steward 2026-09-03: admin now has a real post-password MFA flow.)"""
+def admin_mfa_send_otp(request: Request, payload: Optional[AdminMFASendOTPIn] = Body(None)):
+    """Send the admin one-time code for the second-factor step, by email or SMS.
+
+    Steward 2026-09-03: the admin has a real post-password MFA flow.
+    Steward 2026-10-07: SMS joined it, so the channel is now chosen here. An SMS costs
+    real credits, so that channel additionally demands the MFA challenge - proof the
+    password step actually happened - instead of being an open tap on the admin's phone.
+    """
     ip = sc.client_ip(request)
     if sc.check_rate(ip, "forgot"):
         raise HTTPException(429, "Too many requests. Try again in a few minutes.")
+    channel = ((payload.channel if payload else None) or "email").strip().lower()
+    if channel not in ("email", "sms"):
+        raise HTTPException(422, "Unknown code channel.")
     enabled = account_security.admin_2fa_state()["methods"]
-    if not any(m["method"] == "email" for m in enabled):
-        raise HTTPException(409, "Email 2FA is not enabled for the admin.")
-    return account_security.admin_email_send_otp()
+    if not any(m["method"] == channel for m in enabled):
+        raise HTTPException(409, "%s 2FA is not enabled for the admin."
+                            % ("SMS" if channel == "sms" else "Email"))
+    if channel == "sms":
+        challenge = (payload.challenge or "").strip() if payload else ""
+        if not challenge:
+            raise HTTPException(400, "Sign in again to receive an SMS code.")
+        try:
+            acc_id, _methods = verify_mfa_token(challenge)
+        except Exception:  # noqa: BLE001 - any bad token is the same answer to the caller
+            acc_id = None
+        if acc_id != 0:
+            raise HTTPException(401, "Invalid admin MFA challenge.")
+    try:
+        return account_security.admin_send_otp(channel)
+    except account_security.SecurityError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.get("/api/v1/admin/security", dependencies=[Depends(verify_admin)])
@@ -1324,6 +1568,95 @@ def admin_email_disable():
     cur = db.get_setting("admin_2fa", "") or ""
     db.set_setting("admin_2fa", ",".join(x for x in cur.split(",") if x != "email"))
     return {"ok": True}
+
+
+# ---------- admin SMS (mNotify) 0.1.90, Steward 2026-10-07 --------------------
+
+@app.post("/api/v1/admin/security/sms/send", dependencies=[Depends(verify_admin)])
+def admin_sms_otp_send():
+    """Send a code to the admin phone: used both to switch SMS 2FA on and to test it."""
+    try:
+        return account_security.admin_sms_send_otp()
+    except account_security.SecurityError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/v1/admin/security/sms/enable", dependencies=[Depends(verify_admin)])
+def admin_sms_enable(payload: OTPEnableIn):
+    """Turn SMS on only after a code that arrived by SMS has been proven."""
+    if not account_security.admin_otp_verify(payload.code.strip()):
+        raise HTTPException(400, "That code is invalid or has expired.")
+    try:
+        account_security.admin_sms_enable()
+    except account_security.SecurityError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
+
+
+@app.post("/api/v1/admin/security/sms/disable", dependencies=[Depends(verify_admin)])
+def admin_sms_disable():
+    account_security.admin_sms_disable()
+    return {"ok": True}
+
+
+@app.post("/api/v1/admin/sms/test", dependencies=[Depends(verify_admin)])
+def admin_sms_test():
+    """A plain test message to the admin phone (not a code).
+
+    Deliberately does NOT touch the one-time-code slot: testing your mNotify setup must
+    not invalidate a code you are halfway through using at sign-in.
+    """
+    phone = account_security.admin_phone()
+    if not account_security.admin_phone_ok():
+        raise HTTPException(400, "Save your phone number first.")
+    try:
+        info = sms.send_sms(phone, "SteProTECH portal test message. Your mNotify setup "
+                                   "works. No action needed.")
+    except sms.SmsError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, **info}
+
+
+@app.get("/api/v1/admin/sms/delivery", dependencies=[Depends(verify_admin)])
+def admin_sms_delivery(campaign_id: str = ""):
+    """What actually happened to a message we sent (0.1.92, Steward: "is there a way to verify").
+
+    The API answering 200 and a credit being deducted says nothing about delivery, so the
+    Settings card asks mNotify's own report for the verdict after a test send.
+    """
+    return sms.delivery_status(campaign_id)
+
+
+@app.get("/api/v1/admin/sms/status", dependencies=[Depends(verify_admin)])
+def admin_sms_status():
+    """Sender-ID approval + purpose + SMS credits, so an empty wallet is visible before it bites."""
+    out = {"configured": sms.configured(), "sender_id": sms.sender_id(),
+           "otp_typing": sms.otp_typing()}
+    if not out["configured"]:
+        out["error"] = "No mNotify API key saved yet."
+        return out
+    try:
+        snd = sms.check_sender()
+        out["sender"] = snd
+        # A sender registered for OTP traffic and plain sending (or the reverse) is exactly the
+        # mismatch that silently dropped his messages, so name it rather than let it hide.
+        if snd.get("otp_purpose") and not out["otp_typing"]:
+            out["purpose_mismatch"] = ("This Sender ID is registered for OTP traffic while plain "
+                                       "sending is on. That combination has delivered on this "
+                                       "account, so treat this as a note: if texts ever stop "
+                                       "arriving, switch the route on (and fund the main wallet) "
+                                       "or use a sender registered for ordinary notifications.")
+        elif (not snd.get("otp_purpose")) and out["otp_typing"]:
+            out["purpose_mismatch"] = ("The OTP route is on while this Sender ID is registered for "
+                                       "ordinary notifications. If texts stop arriving, turn the "
+                                       "route off or use the sender registered for OTP traffic.")
+    except sms.SmsError as e:
+        out["sender_error"] = str(e)
+    try:
+        out["balance"] = sms.sms_balance()
+    except sms.SmsError as e:
+        out["balance_error"] = str(e)
+    return out
 
 
 # ---------- admin passkeys (WebAuthn, Steward 2026-09-03) ----------
@@ -1435,10 +1768,21 @@ def admin_passkey_login_verify(payload: PasskeyVerifyIn, request: Request):
 
 @app.get("/api/v1/admin/settings", dependencies=[Depends(verify_admin)])
 def get_admin_settings():
-    return {
+    out = {
         "landing_environments": db.get_setting("landing_environments", default="8"),
         "payments_open": billing.payments_open(),
+        # Admin profile + SMS delivery (0.1.90). The mNotify key is write-only: only
+        # whether it is stored and its last four characters ever come back.
+        "admin_email": account_security.admin_email(),
+        "admin_phone": account_security.admin_phone(),
+        "admin_phone_pretty": sms.pretty_phone(account_security.admin_phone()),
+        "sms_sender_id": sms.sender_id(),
+        "sms_otp_type": "otp" if sms.otp_typing() else "",
+        "sms_configured": sms.configured(),
+        "admin_2fa": db.get_setting("admin_2fa", "") or "",
     }
+    out.update(sms.masked_key())
+    return out
 
 
 @app.put("/api/v1/admin/settings", dependencies=[Depends(verify_admin)])
@@ -1454,6 +1798,42 @@ def put_admin_settings(payload: AdminSettingsIn):
     if payload.payments_open is not None:
         billing.set_payments_open(payload.payments_open)
         out["payments_open"] = billing.payments_open()
+    # ---- admin profile (0.1.90) -------------------------------------------------
+    if payload.admin_email is not None:
+        addr = payload.admin_email.strip()
+        if addr and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[A-Za-z]{2,}", addr):
+            raise HTTPException(422, "That email address does not look right.")
+        db.set_setting(account_security.ADMIN_EMAIL_SETTING, addr)
+        out["admin_email"] = account_security.admin_email()
+    if payload.admin_phone is not None:
+        raw = payload.admin_phone.strip()
+        if not raw:
+            db.set_setting(account_security.ADMIN_PHONE_SETTING, "")
+            out["admin_phone"] = ""
+        else:
+            local = sms.normalise_phone(raw)
+            if not local:
+                raise HTTPException(422, "That phone number does not look like a Ghana "
+                                         "number. Use 024 123 4567 or +233 24 123 4567.")
+            db.set_setting(account_security.ADMIN_PHONE_SETTING, local)
+            out["admin_phone"] = local
+            out["admin_phone_pretty"] = sms.pretty_phone(local)
+    # ---- SMS delivery (0.1.90) --------------------------------------------------
+    if payload.sms_api_key is not None:
+        db.set_setting(sms.SMS_KEY, payload.sms_api_key.strip())
+        out.update(sms.masked_key())          # never the key itself
+    if payload.sms_sender_id is not None:
+        try:
+            name = sms.validate_sender(payload.sms_sender_id)
+        except sms.SmsError as e:
+            raise HTTPException(422, str(e))
+        db.set_setting(sms.SMS_SENDER, name)
+        out["sms_sender_id"] = sms.sender_id()
+    if payload.sms_otp_type is not None:
+        mode = "otp" if str(payload.sms_otp_type).strip().lower() in ("otp", "1", "true", "on") \
+            else ""
+        db.set_setting(sms.SMS_OTP_TYPE, mode)
+        out["sms_otp_type"] = mode
     if not out:
         raise HTTPException(422, "Nothing to update.")
     return out
@@ -1486,23 +1866,35 @@ def admin_access_requests():
     return out
 
 
-@app.post("/api/v1/admin/access-requests/{request_id}/token", dependencies=[Depends(verify_admin)])
-def admin_issue_token(request_id: int):
-    """Generate a fresh access token for a request, email it to the person, and
-    return it once so the admin can also share it directly (WhatsApp etc.)."""
+@app.post("/api/v1/admin/access-requests/{request_id}/approve", dependencies=[Depends(verify_admin)])
+def admin_approve_request(request_id: int):
+    """Admin action (0.1.77, Steward): approve the request outright, with no code.
+
+    The person is emailed that their access is approved and asked to create their
+    account; registration then signs them in. `email_sent` is returned so the
+    dashboard can say plainly when the notice did not go out."""
     try:
-        token = access_gate.issue_token(request_id)
+        access_gate.approve_request(request_id)
     except access_gate.AccessGateError as e:
         raise HTTPException(409, str(e))
     req = db.get_access_request_by_id(request_id)
     email = req["email"] if req else ""
+    email_sent = False
     if email:
         try:
-            send_access_token(email, token)
+            send_access_approved(email)
+            email_sent = True
         except EmailError as e:
-            log.warning(f"Access-token email failed for {email}: {e}")
+            log.warning(f"Approval email failed for {email}: {e}")
     return {"request_id": request_id, "email": email,
-            "token": token, "expires_hours": access_gate.TOKEN_VALID_HOURS}
+            "status": "approved", "email_sent": email_sent}
+
+
+@app.post("/api/v1/admin/access-requests/{request_id}/token", dependencies=[Depends(verify_admin)])
+def admin_issue_token(request_id: int):
+    """LEGACY ALIAS (so an already-open dashboard keeps working): issuing a code
+    was replaced by approval in 0.1.77 and both now do the same thing."""
+    return admin_approve_request(request_id)
 
 
 @app.post("/api/v1/admin/access-requests/{request_id}/deny", dependencies=[Depends(verify_admin)])
@@ -1538,6 +1930,86 @@ def admin_sweep():
     return result
 
 
+# ---------- renewal reminders + login-free renewal links (0.1.76) ----------
+
+def _renewal_page(title: str, message: str) -> str:
+    """Plain, branded page for an expired or unknown renewal link."""
+    return f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>{title}</title></head>
+    <body style="font-family:Arial,sans-serif;background:#f9fafb;margin:0;padding:48px 16px">
+      <div style="max-width:520px;margin:auto;background:#ffffff;border:1px solid #e5e7eb;
+                  border-radius:10px;padding:28px">
+        <h2 style="color:#1f2937;margin-top:0">{title}</h2>
+        <p style="color:#374151;line-height:1.5">{message}</p>
+        <p><a href="{settings.portal_base_url}" style="color:#1f2937">Go to the portal</a></p>
+      </div>
+    </body></html>"""
+
+
+@app.get("/r/{token}", include_in_schema=False)
+def renewal_link(token: str):
+    """A reminder email's link: start a payment for that account, no sign-in.
+
+    The token is an unguessable 60-day key bound to one account and package. It
+    can only create an unpaid checkout for that same account; it cannot sign in,
+    read data, change anything, or reach another account.
+    """
+    from .services import renewal, paystack as paystack_svc
+
+    row = renewal.resolve_link(token)
+    if not row:
+        return HTMLResponse(_renewal_page(
+            "This renewal link has expired",
+            "Renewal links stay valid for 60 days. Please sign in to your dashboard to "
+            "renew, or reply to our email and we will send you a fresh link."),
+            status_code=410)
+    account = db.get_account(int(row["account_id"]))
+    if not account or (account["account_state"] or "active") != "active":
+        return HTMLResponse(_renewal_page(
+            "This account cannot renew here",
+            "Please get in touch with us and we will help you directly."),
+            status_code=410)
+    try:
+        out = paystack_svc.initialize_checkout(int(account["id"]), account["email"],
+                                               row["plan"])
+    except Exception as e:
+        log.error("renewal link: checkout failed for account %s: %s", account["id"], e)
+        return HTMLResponse(_renewal_page(
+            "We could not open the payment page",
+            "Please try the link again in a minute, or renew from your dashboard at "
+            f"{settings.portal_base_url}."), status_code=502)
+    db.mark_renewal_link_used(token, int(_time.time()))
+    log.info("renewal link used for account %s (package %s)", account["id"], row["plan"])
+    return RedirectResponse(out["authorization_url"], status_code=302)
+
+
+@app.get("/api/v1/admin/billing/renewal-notices", dependencies=[Depends(verify_admin)])
+def renewal_notices(account_id: Optional[int] = None):
+    """Every reminder email, rendered, WITHOUT sending anything.
+
+    Sending is off until Steward approves the wording; this is how the copy is
+    reviewed against a real account (or a sample when no id is given).
+    """
+    from .services import renewal
+    try:
+        return renewal.preview(account_id)
+    except ValueError as e:
+        raise HTTPException(404, detail=str(e))
+
+
+@app.post("/api/v1/admin/billing/renewal-notices/send", dependencies=[Depends(verify_admin)])
+def renewal_notices_send(account_id: int, stage: str):
+    """Send ONE reminder to a chosen account (the deliberate live test)."""
+    from .services import renewal
+    try:
+        return renewal.send_for_account(account_id, stage)
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(502, detail=f"send failed: {e}")
+
+
 @app.post("/api/v1/admin/accounts/{account_id}/lock", dependencies=[Depends(verify_admin)])
 def admin_lock(account_id: int):
     if not db.get_account(account_id):
@@ -1563,15 +2035,41 @@ def admin_unlock(account_id: int):
 
 class QuotaIn(BaseModel):
     quota: int = Field(..., ge=1, le=50)
+    plan: Optional[str] = None  # 'a' | 'b': which package's allowance (0.1.68); omit = legacy single quota
 
 
 @app.put("/api/v1/admin/accounts/{account_id}/quota", dependencies=[Depends(verify_admin)])
 def admin_set_quota(account_id: int, payload: QuotaIn):
-    """Admin raises/lowers how many n8n instances this account may provision."""
+    """Admin raises/lowers how many n8n instances this account may provision.
+    0.1.68: payload.plan targets a specific package's allowance (a|b); without
+    it the LEGACY single quota is set (kept for API compatibility)."""
     if not db.get_account(account_id):
         raise HTTPException(404, "Account not found.")
+    plan = (payload.plan or "").strip().lower()
+    if plan:
+        if plan not in ("a", "b"):
+            raise HTTPException(422, "Plan must be 'a' or 'b'.")
+        db.set_account_quota_for(account_id, plan, payload.quota)
+        return {"account_id": account_id, "plan": plan, "quota": payload.quota}
+    # 0.1.73: db.set_account_quota also raises the account's CURRENT package
+    # allowance - the value the provisioning gate actually reads - so a legacy
+    # write can no longer raise a number nothing consults.
     db.set_account_quota(account_id, payload.quota)
-    return {"account_id": account_id, "quota": payload.quota}
+    current = db._row_get(db.get_account(account_id), "plan", "a") or "a"
+    return {"account_id": account_id, "quota": payload.quota,
+            "plan": "b" if current == "b" else "a"}
+
+
+@app.get("/api/v1/admin/accounts/{account_id}/quotas", dependencies=[Depends(verify_admin)])
+def admin_get_quotas(account_id: int):
+    """Per-plan workspace allowances for the quota editor."""
+    a = db.get_account(account_id)
+    if not a:
+        raise HTTPException(404, "Account not found.")
+    return {"account_id": account_id,
+            "plan": db._row_get(a, "plan", "a") or "a",
+            "quota_a": db.account_quota_for(a, "a"),
+            "quota_b": db.account_quota_for(a, "b")}
 
 
 class BackupIn(BaseModel):
@@ -1586,6 +2084,22 @@ def admin_set_backup(account_id: int, payload: BackupIn):
         raise HTTPException(404, "Account not found.")
     db.set_account_backup(account_id, payload.backup_enabled)
     return {"account_id": account_id, "backup_enabled": payload.backup_enabled}
+
+
+class UpdateAccessIn(BaseModel):
+    update_enabled: bool
+
+
+@app.put("/api/v1/admin/accounts/{account_id}/update-access",
+         dependencies=[Depends(verify_admin)])
+def admin_set_update_access(account_id: int, payload: UpdateAccessIn):
+    """Grant/revoke a customer's self-update permission (0.1.88). Same shape as the backup
+    permission: off by default, and while it is off the customer sees NO update UI. The
+    admin can always update any workspace from the Updates page."""
+    if not db.get_account(account_id):
+        raise HTTPException(404, "Account not found.")
+    db.set_account_update(account_id, payload.update_enabled)
+    return {"account_id": account_id, "update_enabled": payload.update_enabled}
 
 
 # ---------- admin impersonation (login as a customer, 2026-09-03) ----------
@@ -1706,10 +2220,19 @@ def admin_attach(account_id: int, payload: AdminAttachIn):
 def admin_mark_paid(account_id: int, payload: AdminMarkPaidIn):
     """Admin records a subscription with custom dates (no payment gateway).
     Future expiry -> active + instance started if stopped; past expiry ->
-    unpaid + instance stopped (backdated already-expired accounts)."""
+    unpaid + instance stopped (backdated already-expired accounts).
+    0.1.68: payload.plan selects WHICH package was paid for (a|b) and is
+    stored on the account, so provisioning uses that plan's template + quota."""
+    plan = (payload.plan or "").strip().lower()
+    if plan and plan not in ("a", "b"):
+        raise HTTPException(422, "Plan must be 'a' or 'b'.")
     try:
         result = admin_ops.mark_paid(account_id, payload.paid_until or 0,
                                      payload.paid_from)
+        if plan:
+            from . import db as _db
+            _db.set_account_plan(account_id, plan)
+            result["plan"] = plan
     except AdminOpsError as e:
         raise HTTPException(404, str(e))
     except Exception as e:
@@ -1857,6 +2380,48 @@ class UpdateImageIn(BaseModel):
     image: str = Field(..., min_length=1, max_length=120)
 
 
+class UpdateQueueIn(BaseModel):
+    instance_ids: list[int] | None = None
+    all_behind: bool = False
+
+
+@app.get("/api/v1/admin/updates", dependencies=[Depends(verify_admin)])
+def admin_updates():
+    """Everything the Updates page shows (0.1.85): who is behind the latest release,
+    the live queue, each server's next allowed slot and recent history."""
+    return update_queue.overview()
+
+
+@app.post("/api/v1/admin/updates/queue", dependencies=[Depends(verify_admin)])
+def admin_queue_updates(payload: UpdateQueueIn):
+    """Queue updates for chosen workspaces, or for everything that is behind.
+
+    Admin rows take priority over customer requests, but the worker still moves one
+    workspace PER SERVER with the quiet gap between them, so a bulk action cannot
+    pile recreations onto one box.
+    """
+    if payload.all_behind:
+        res = update_queue.queue_all_behind(requested_by="admin")
+    else:
+        ids = [int(i) for i in (payload.instance_ids or [])]
+        if not ids:
+            raise HTTPException(400, "Pick at least one workspace, or use all_behind.")
+        res = update_queue.queue_workspaces(ids, requested_by="admin")
+    if not res.get("ok") and res.get("error"):
+        raise HTTPException(503, res["error"])
+    if res.get("queued"):
+        # start the first one now rather than on the next supervisor tick
+        update_queue.worker_tick()
+    return res
+
+
+@app.post("/api/v1/admin/updates/cancel", dependencies=[Depends(verify_admin)])
+def admin_cancel_updates(batch_id: str):
+    """Cancel the queued (not yet started) rows of one batch. A running update is
+    left to finish, because interrupting a recreate is worse than waiting."""
+    return {"ok": True, "canceled": update_queue.cancel_batch(batch_id)}
+
+
 @app.post("/api/v1/admin/instances/{instance_id}/update-image",
           dependencies=[Depends(verify_admin)])
 def admin_update_image(instance_id: int, payload: UpdateImageIn):
@@ -1866,9 +2431,15 @@ def admin_update_image(instance_id: int, payload: UpdateImageIn):
     inst = db.get_instance(instance_id)
     if not inst:
         raise HTTPException(404, "Instance not found.")
+    # 0.1.85: a manual update runs at once, as Steward asked, but it takes this
+    # server's slot so the queue worker cannot add a second update to the same box
+    # while it runs.
+    _manual_q = update_queue.reserve_manual(inst, payload.image,
+                                            update_queue.tag_to_version(payload.image))
     try:
         new_image = backup_ops.update_instance_image(inst, payload.image)
     except ValueError as e:
+        update_queue.complete_manual(_manual_q, False, error=str(e))
         raise HTTPException(422, str(e))
     except Exception as e:
         msg = str(e)
@@ -1884,17 +2455,104 @@ def admin_update_image(instance_id: int, payload: UpdateImageIn):
                 "n8n. Double-check the tag (format like 2.31.6) and try again.",
             )
         log.error("update image %s: %s", instance_id, e)
+        update_queue.complete_manual(_manual_q, False, error=msg)
         raise HTTPException(502, f"Image update failed: {e}")
+    update_queue.complete_manual(_manual_q, True, note="manual update from the dashboard",
+                                 result_version=update_queue.tag_to_version(payload.image))
     return {"ok": True, "instance_id": instance_id, "image": new_image}
+
+
+@app.post("/api/v1/admin/instances/{instance_id}/restart", dependencies=[Depends(verify_admin)])
+def admin_restart_instance(instance_id: int):
+    """Restart any workspace in place. The admin is not paced and acts whenever needed."""
+    inst = db.get_instance(instance_id)
+    if not inst:
+        raise HTTPException(404, "Workspace not found.")
+    return _restart_instance(inst, actor="admin")
 
 
 @app.get("/api/v1/admin/instances/{instance_id}/image", dependencies=[Depends(verify_admin)])
 def admin_current_image(instance_id: int):
-    """Report the instance's current running n8n image tag (for the UI)."""
+    """The instance's image reference AND the version it is really running.
+
+    `image` is what the update field needs; `version` is what the
+    behind/current report must use, because the reference is normally the
+    floating `latest` tag, which carries no version at all (0.1.80).
+    """
     inst = db.get_instance(instance_id)
     if not inst:
         raise HTTPException(404, "Instance not found.")
-    return {"image": backup_ops.current_image(inst)}
+    ver = backup_ops.current_version(inst, allow_exec=True)
+    return {
+        "image": backup_ops.current_image(inst),
+        "version": ver["version"],
+        "source": ver["source"],
+    }
+
+
+@app.get("/api/v1/admin/instance-versions", dependencies=[Depends(verify_admin)])
+def admin_instance_versions():
+    """True running n8n version for every instance (workspace list chip).
+
+    Batched: one container list + one image list per environment, so it stays
+    cheap however many workspaces exist. Empty on failure - the UI must show
+    "unknown" rather than claim a workspace is current.
+    """
+    try:
+        return {"versions": backup_ops.true_versions(db.list_instances())}
+    except Exception as e:
+        log.warning("instance version list failed: %s", e)
+        return {"versions": {}}
+
+
+class RunnerAttachIn(BaseModel):
+    # Reserved for future policy options (stdlib scope, third-party packages);
+    # attach currently takes no input and always ships the safe default policy.
+    pass
+
+
+def _runner_instance_or_404(instance_id: int):
+    inst = db.get_instance(instance_id)
+    if not inst:
+        raise HTTPException(404, "Instance not found.")
+    return inst
+
+
+@app.post("/api/v1/admin/instances/{instance_id}/python-runner/attach",
+          dependencies=[Depends(verify_admin)])
+def admin_attach_python_runner(instance_id: int, payload: RunnerAttachIn = None):
+    """Attach the official n8n Python/JS task-runner sidecar to ONE workspace
+    (admin opt-in, one at a time). Recreates the stack (n8n restarts against
+    the same volume; workflows and credentials are preserved) and starts the
+    runners container alongside. Rollback = the detach endpoint."""
+    inst = _runner_instance_or_404(instance_id)
+    try:
+        result = python_runner.attach_runner(inst)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except Exception as e:
+        log.error("runner attach %s: %s", instance_id, e)
+        raise HTTPException(502, f"Python runner attach failed: {e}")
+    return {"ok": True, "instance_id": instance_id,
+            "runners_tag": result.get("tag"),
+            "runner_container_seen": result.get("runner_container_seen", False)}
+
+
+@app.post("/api/v1/admin/instances/{instance_id}/python-runner/detach",
+          dependencies=[Depends(verify_admin)])
+def admin_detach_python_runner(instance_id: int):
+    """Remove the task-runner sidecar from a workspace (the rollback path for
+    attach). The stack is recreated without the runners service; the DB flag
+    flips off. Data is untouched."""
+    inst = _runner_instance_or_404(instance_id)
+    try:
+        python_runner.detach_runner(inst)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except Exception as e:
+        log.error("runner detach %s: %s", instance_id, e)
+        raise HTTPException(502, f"Python runner detach failed: {e}")
+    return {"ok": True, "instance_id": instance_id}
 
 
 @app.get("/api/v1/admin/instances", dependencies=[Depends(verify_admin)])

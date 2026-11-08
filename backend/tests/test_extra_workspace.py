@@ -179,9 +179,9 @@ def test_provision_passes_workspace_profile_to_job(tmp_path, monkeypatch):
     ctoken = create_client_token(aid)
     captured = {}
     monkeypatch.setattr(mainmod, "_run_provision",
-                        lambda account_id, password, workspace: captured.update(
+                        lambda account_id, password, workspace, plan=None: captured.update(
                             account_id=account_id, password=password,
-                            workspace=workspace))
+                            workspace=workspace, plan=plan))
     r = client.post(f"/api/v1/accounts/{aid}/provision", headers=_h(ctoken),
                     json={"password": "SecondPass1", "username": "secondbox",
                           "owner_email": "Owner@Example.com",
