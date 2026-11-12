@@ -110,7 +110,11 @@ def test_the_rewrite_fails_closed_when_a_line_is_missing():
 
 
 def test_the_rewrite_refuses_an_ambiguous_file():
-    dup = 'x\n    cpus: "0.30"\n    cpus: "0.40"\n'
+    # 0.1.102 scoped the rewrite to the n8n SERVICE, so the duplicate lines must live inside a real
+    # service block for this to test ambiguity rather than a missing service.
+    dup = ('services:\n  n8n:\n    image: n8nio/n8n:3.2.0\n'
+           '    cpus: "0.30"\n    cpus: "0.40"\n    mem_limit: "768m"\n'
+           '      - NODE_OPTIONS=--max-old-space-size=384\n')
     try:
         ps.rewrite_resources(dup, "b")
     except ValueError as exc:

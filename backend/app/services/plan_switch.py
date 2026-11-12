@@ -88,22 +88,80 @@ def template_resources(plan: str) -> dict[str, str]:
     return values
 
 
-def rewrite_resources(content: str, target_plan: str) -> tuple[str, list[dict[str, str]]]:
-    """Rewrite the three resource lines in a stack file. Returns (new content, changes).
+def _service_block(content: str, service: str) -> tuple[int, int]:
+    """Character span of one service's block inside a compose file.
 
-    Raises ValueError without touching anything when a line is missing or ambiguous: half a
-    resource change is worse than none, because the workspace would then claim a package its
-    container is not actually running.
+    A deployed workspace may carry more than the n8n service: the portal's Python support adds a
+    `runners` sidecar, which has resource lines of its own (`mem_limit: 384m`). Scanning the whole
+    file therefore finds several `mem_limit` lines and a naive rewrite either refuses (0.1.99 did,
+    with "expected exactly 1") or, worse, would retune the sidecar. Scope the search to the named
+    service so only the n8n container's resources move.
+
+    Raises ValueError when the service cannot be identified unambiguously.
+    """
+    lines = content.splitlines(keepends=True)
+    starts, offset = [], 0
+    for line in lines:
+        starts.append(offset)
+        offset += len(line)
+
+    header = None
+    for idx, line in enumerate(lines):
+        stripped = line.rstrip("\r\n")
+        if not stripped or stripped.lstrip().startswith("#"):
+            continue
+        if re.match(r"^\s*%s:\s*$" % re.escape(service), stripped):
+            if header is not None:
+                raise ValueError(
+                    "Stack file defines the '%s' service more than once; refusing to guess "
+                    "which one to change." % service
+                )
+            header = idx
+    if header is None:
+        raise ValueError(
+            "Stack file has no '%s' service block, so its resources cannot be changed safely. "
+            "Switch aborted so the file is left untouched." % service
+        )
+
+    indent = len(lines[header]) - len(lines[header].lstrip())
+    end = len(content)
+    for idx in range(header + 1, len(lines)):
+        stripped = lines[idx].rstrip("\r\n")
+        if not stripped.strip() or stripped.lstrip().startswith("#"):
+            continue
+        if (len(stripped) - len(stripped.lstrip())) <= indent:
+            end = starts[idx]
+            break
+    # Trailing blank lines and comments (such as the next service's marker comment) are not part of
+    # this service; the span ends at the last real line of its own body.
+    last_real = header
+    for idx in range(header + 1, len(lines)):
+        if starts[idx] >= end:
+            break
+        text = lines[idx].strip()
+        if text and not text.startswith("#"):
+            last_real = idx
+    return starts[header], starts[last_real] + len(lines[last_real])
+
+
+def rewrite_resources(content: str, target_plan: str) -> tuple[str, list[dict[str, str]]]:
+    """Rewrite the three resource lines of the N8N SERVICE. Returns (new content, changes).
+
+    Only the `n8n` service block is touched: a `runners` sidecar keeps its own limits, its image
+    and its config. Raises ValueError without touching anything when a line is missing or
+    ambiguous inside that block, because half a resource change is worse than none: the workspace
+    would then claim a package its container is not actually running.
     """
     target = template_resources(target_plan)
     changes: list[dict[str, str]] = []
     new_content = content
     for key, pattern in _RESOURCE_PATTERNS.items():
-        matches = list(pattern.finditer(new_content))
+        start, end = _service_block(new_content, "n8n")
+        matches = list(pattern.finditer(new_content[start:end]))
         if len(matches) != 1:
             raise ValueError(
-                f"Stack file has {len(matches)} {_RESOURCE_LABELS[key]} line(s), expected exactly 1; "
-                "switch aborted so the stack file is left untouched."
+                f"The n8n service has {len(matches)} {_RESOURCE_LABELS[key]} line(s), expected "
+                "exactly 1; switch aborted so the stack file is left untouched."
             )
         match = matches[0]
         current = match.group(2)
@@ -112,9 +170,10 @@ def rewrite_resources(content: str, target_plan: str) -> tuple[str, list[dict[st
             changes.append({"resource": key, "label": _RESOURCE_LABELS[key],
                             "from": current, "to": wanted, "change": "unchanged"})
             continue
-        new_content = (
-            new_content[: match.start(2)] + wanted + new_content[match.end(2):]
-        )
+        # offsets inside the slice are relative to it, so shift them back to the whole document
+        s = start + match.start(2)
+        e = start + match.end(2)
+        new_content = new_content[:s] + wanted + new_content[e:]
         changes.append({"resource": key, "label": _RESOURCE_LABELS[key],
                         "from": current, "to": wanted, "change": "changed"})
     return new_content, changes
