@@ -71,7 +71,7 @@ def channel_version(channel: str) -> dict | None:
     is the same reading that showed 2.48.2 was `beta` and 2.47.5 was `stable` on 2026-11-12.
     Returns None when the tag cannot be resolved, so the caller can fall back instead of failing.
     """
-    auth = httpx.get(_AUTH_URL, timeout=20.0)
+    auth = httpx.get(_AUTH_URL, timeout=20.0, follow_redirects=True)
     auth.raise_for_status()
     token = str((auth.json() or {}).get("token") or "")
     if not token:
@@ -82,6 +82,7 @@ def channel_version(channel: str) -> dict | None:
         f"{_REGISTRY}/manifests/{channel}",
         headers={**headers, "Accept": _INDEX_TYPES},
         timeout=25.0,
+        follow_redirects=True,
     )
     index.raise_for_status()
     digest = None
@@ -97,13 +98,19 @@ def channel_version(channel: str) -> dict | None:
         f"{_REGISTRY}/manifests/{digest}",
         headers={**headers, "Accept": _MANIFEST_TYPES},
         timeout=25.0,
+        follow_redirects=True,
     )
     manifest.raise_for_status()
     config_digest = ((manifest.json() or {}).get("config") or {}).get("digest")
     if not config_digest:
         return None
 
-    blob = httpx.get(f"{_REGISTRY}/blobs/{config_digest}", headers=headers, timeout=30.0)
+    # Docker Hub answers a blob request with 307 -> production.cloudfront.docker.com.
+    # Without follow_redirects this raises HTTPStatusError and the channel silently falls back.
+    blob = httpx.get(
+        f"{_REGISTRY}/blobs/{config_digest}", headers=headers, timeout=30.0,
+        follow_redirects=True,
+    )
     blob.raise_for_status()
     body = blob.json() or {}
     labels = (body.get("config") or {}).get("Labels") or {}

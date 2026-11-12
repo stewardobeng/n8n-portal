@@ -45,10 +45,17 @@ def _hub_tags():
     ]
 
 
-def _fake_get_factory(channel_versions, fail_registry=False):
-    """Emulate the Docker Hub tag list and the registry manifest walk the module performs."""
+def _fake_get_factory(channel_versions, fail_registry=False, seen=None):
+    """Emulate the Docker Hub tag list and the registry manifest walk the module performs.
 
-    def fake_get(url, params=None, headers=None, timeout=None):  # noqa: ARG001
+    `seen` collects (url, follow_redirects) so a test can prove the registry hops follow Docker
+    Hub's 307 to CloudFront: httpx does NOT follow redirects unless asked, and without it the
+    channel silently degrades to the numeric maximum in production while passing in a unit test.
+    """
+
+    def fake_get(url, params=None, headers=None, timeout=None, follow_redirects=False):  # noqa: ARG001
+        if seen is not None:
+            seen.append((url, follow_redirects))
         if "auth.docker.io" in url:
             if fail_registry:
                 raise httpx.ConnectError("registry unreachable")
@@ -136,6 +143,26 @@ def test_a_registry_outage_falls_back_instead_of_blocking_provisioning(monkeypat
     data = n8n_releases.latest_release(force=True)
     assert data["latest"]["tag"] == BETA_TAG, "falls back to the numeric maximum"
     assert data["channel"] == "highest", "and says so, so nobody believes the channel was honoured"
+
+
+def test_registry_hops_follow_redirects(monkeypatch):
+    """Docker Hub answers blobs with 307 to CloudFront; httpx must be told to follow it.
+
+    This is the bug that shipped in 0.1.100: the channel resolved locally (where the probe used
+    urllib, which follows redirects) and silently fell back to `highest` in the container.
+    """
+    seen = []
+    monkeypatch.setattr(settings, "n8n_release_channel", "stable")
+    monkeypatch.setattr(
+        n8n_releases.httpx, "get",
+        _fake_get_factory({"stable": STABLE_TAG}, seen=seen),
+    )
+    n8n_releases.channel_version("stable")
+    registry_hops = [(u, f) for u, f in seen if "registry-1.docker.io" in u]
+    assert registry_hops, "the registry was never contacted"
+    assert all(follow is True for _u, follow in registry_hops), [
+        (u.rsplit("/", 1)[-1][:20], follow) for u, follow in registry_hops
+    ]
 
 
 def test_provisioning_uses_the_channel_version(monkeypatch):
