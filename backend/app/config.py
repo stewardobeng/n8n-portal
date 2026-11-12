@@ -109,6 +109,10 @@ class Settings:
     update_interval_minutes: int = int(os.getenv("UPDATE_INTERVAL_MINUTES", "5"))
     update_worker_enabled: bool = os.getenv("UPDATE_WORKER_ENABLED", "true").lower() == "true"
     update_report_to: str = os.getenv("UPDATE_REPORT_TO", "stewardobeng@gmail.com")
+    # Where operational notices that need a human go: update reports, and the upgrade requests a
+    # customer raises from the portal (0.1.99). One address, deliberately, so it is obvious who is
+    # expected to act on them.
+    admin_email: str = os.getenv("PH_ADMIN_EMAIL", "stewardobeng@gmail.com")
     # Who may self-update, on top of the per-account permission (accounts.update_enabled):
     #   "none" = nobody (global kill switch)   "any" = no plan restriction
     #   "b"    = Workspace Plus (GHS 500) only

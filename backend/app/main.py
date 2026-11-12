@@ -36,12 +36,14 @@ from .services import provisioner, billing, access_gate, admin_ops, backup_ops
 from .services import account_security, passkeys, n8n_releases, python_runner, sms
 from .services import update_queue
 from .services import plan_specs
+from .services import plan_switch
 from .services import security_controls as sc
 from .services.admin_ops import AdminOpsError
 from .services.portainer_client import PortainerClient
 from .services.npm_client import NPMClient
 from .services.emailer import (send_welcome_credentials, send_reset_password,
-                               send_access_token, send_access_approved, EmailError)
+                               send_access_token, send_access_approved, send_email,
+                               EmailError)
 from .security import (create_access_token, verify_admin,
                        verify_admin_password, verify_password, hash_password,
                        create_client_token, verify_client, create_mfa_token,
@@ -854,9 +856,21 @@ def me(account_id: int = Depends(verify_client)):
             ". Contact support for help.",
         )
     instances = db.list_instances(account_id)
+    current_plan = (_row_get(account, "plan", "a") or "a")
     return {
         "account": _account_to_out(account).model_dump(),
         "instances": [_instance_to_out(i).model_dump() for i in instances],
+        # 0.1.99: what the dashboard needs to show the package and the upgrade button state.
+        # A request is an ASK (the admin contacts them), not a checkout: upgrading by card is
+        # not built yet, and claiming otherwise on screen would be a lie.
+        "plan": {
+            "current": current_plan,
+            "label": plan_switch.plan_label(current_plan),
+            "can_request_upgrade": current_plan != "b",
+            "target_plan": plan_switch.other_plan(current_plan),
+            "target_label": plan_switch.plan_label(plan_switch.other_plan(current_plan)),
+        },
+        "upgrade_request": db.open_upgrade_request(account_id),
     }
 
 
@@ -1225,9 +1239,22 @@ def account_status(account_id: int,
     if not account:
         raise HTTPException(404, "Account not found.")
     instances = db.list_instances(account_id)
+    current_plan = (db._row_get(account, "plan", "a") or "a")
+    pending = db.open_upgrade_request(account_id)
     return {
         "account": _account_to_out(account).model_dump(),
         "instances": [_instance_to_out(i).model_dump() for i in instances],
+        # The customer sees which package they hold, whether a request is already open, and
+        # what the next package is called. Payment for an upgrade is not built yet, so this is
+        # an ask, not a checkout: the admin contacts them.
+        "plan": {
+            "current": current_plan,
+            "label": plan_switch.plan_label(current_plan),
+            "can_request_upgrade": current_plan != "b",
+            "target_plan": plan_switch.other_plan(current_plan),
+            "target_label": plan_switch.plan_label(plan_switch.other_plan(current_plan)),
+        },
+        "upgrade_request": pending,
     }
 
 
@@ -2072,6 +2099,128 @@ def admin_get_quotas(account_id: int):
             "quota_b": db.account_quota_for(a, "b")}
 
 
+class PlanIn(BaseModel):
+    plan: str = Field(..., min_length=1, max_length=1)   # 'a' (GHS 300) | 'b' (GHS 500)
+
+
+@app.put("/api/v1/admin/accounts/{account_id}/plan", dependencies=[Depends(verify_admin)])
+def admin_set_plan(account_id: int, payload: PlanIn, request: Request):
+    """Admin moves an account between packages, in BOTH directions.
+
+    This changes what the account is subscribed to, which package's allowance applies to its
+    next workspace, and what the billing copy shows. It deliberately does NOT touch a running
+    workspace: resources live in the stack file, so changing them recreates the container and
+    is a separate, disruptive action (/admin/instances/{id}/plan). The response names any
+    workspace still running on the other package so the admin can decide about it.
+    """
+    account = db.get_account(account_id)
+    if not account:
+        raise HTTPException(404, "Account not found.")
+    try:
+        target = plan_switch.normalize_plan(payload.plan)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    current = (db._row_get(account, "plan", "a") or "a")
+    if target == current:
+        return {"account_id": account_id, "plan": target, "changed": False,
+                "label": plan_switch.plan_label(target),
+                "note": "The account is already on this package."}
+    db.set_account_plan(account_id, target)
+    db.record_auth_event(sc.client_ip(request), "plan_change", account_id,
+                         f"{current} -> {target} by admin")
+    log.info("Account %s package %s -> %s by admin", account_id, current, target)
+    behind = [str(i["stack_name"]) for i in db.list_instances(account_id)
+              if ((db._row_get(i, "plan", "a") or "a") != target)]
+    return {
+        "account_id": account_id, "plan": target, "changed": True,
+        "label": plan_switch.plan_label(target),
+        "workspaces_on_other_plan": behind,
+        "note": ("Running workspaces keep the resources they were built with. "
+                 "Switch each one to move its CPU and memory." if behind
+                 else "Every workspace already matches the new package."),
+    }
+
+
+class UpgradeRequestIn(BaseModel):
+    note: str = ""
+
+
+def _notify_admin_of_upgrade(account, instance, from_plan: str, to_plan: str, note: str) -> bool:
+    """Tell the admin a customer asked to move up. Never fatal: the request row is the record."""
+    to = (getattr(settings, "admin_email", "") or "").strip()
+    if not to:
+        log.warning("upgrade request: no admin_email configured, nobody was notified")
+        return False
+    who = (db._row_get(account, "display_name", "") or db._row_get(account, "email", "")
+           or f"account {account['id']}")
+    subject = f"Upgrade request: {who} wants {plan_switch.plan_label(to_plan)}"
+    rows = "".join(
+        f"<tr><td style='padding:4px 12px 4px 0;color:#64748b'>{k}</td><td>{v}</td></tr>"
+        for k, v in (
+            ("Customer", who),
+            ("Email", db._row_get(account, "email", "")),
+            ("Workspace", (db._row_get(instance, "stack_name", "") or "none") if instance else "none"),
+            ("Domain", (db._row_get(instance, "domain", "") or "") if instance else ""),
+            ("Now", plan_switch.plan_label(from_plan)),
+            ("Wants", plan_switch.plan_label(to_plan)),
+            ("Their note", note or "(none)"),
+        )
+    )
+    html = (
+        "<p>A customer asked to upgrade through the portal. Payment for upgrades is not built "
+        "yet, so nothing was charged and no workspace was changed.</p>"
+        f"<table>{rows}</table>"
+        "<p>Contact them to arrange it, then use Change plan and the workspace switch in the "
+        "admin console.</p>"
+    )
+    try:
+        send_email(to, subject, html)
+        return True
+    except EmailError as exc:
+        log.warning("upgrade request: admin notification failed: %s", exc)
+        return False
+
+
+@app.post("/api/v1/accounts/{account_id}/upgrade-request")
+def request_upgrade(account_id: int, payload: UpgradeRequestIn,
+                    request: Request,
+                    authorization: str = Header(default=None, alias="Authorization")):
+    """A customer asks to move to the bigger package. Records the wish and emails the admin.
+
+    Payment is deliberately out of scope for now: the admin contacts them. One open request per
+    account is enough to act on, so a second click reports "already requested" instead of
+    stacking duplicates.
+    """
+    authorize_owner_or_admin(authorization, account_id)
+    account = db.get_account(account_id)
+    if not account:
+        raise HTTPException(404, "Account not found.")
+    current = (db._row_get(account, "plan", "a") or "a")
+    target = plan_switch.other_plan(current)
+    if target == "a":
+        raise HTTPException(
+            409, "You are already on the bigger package. For anything else, contact support."
+        )
+    instances = db.list_instances(account_id)
+    instance = instances[0] if instances else None
+    note = (payload.note or "").strip()
+    rid = db.create_upgrade_request(
+        account_id, current, target,
+        instance_id=(instance["id"] if instance else None), note=note,
+    )
+    if rid is None:
+        existing = db.open_upgrade_request(account_id) or {}
+        return {"status": "already_requested", "request_id": existing.get("id"),
+                "to_plan": target, "to_label": plan_switch.plan_label(target),
+                "message": "Your upgrade request is already open. We will contact you."}
+    notified = _notify_admin_of_upgrade(account, instance, current, target, note)
+    db.record_auth_event(sc.client_ip(request), "upgrade_request", account_id,
+                         f"{current} -> {target}")
+    return {"status": "requested", "request_id": rid, "to_plan": target,
+            "to_label": plan_switch.plan_label(target), "admin_notified": notified,
+            "message": "Request received. We will contact you to arrange the upgrade."}
+
+
 class BackupIn(BaseModel):
     backup_enabled: bool
 
@@ -2460,6 +2609,96 @@ def admin_update_image(instance_id: int, payload: UpdateImageIn):
     update_queue.complete_manual(_manual_q, True, note="manual update from the dashboard",
                                  result_version=update_queue.tag_to_version(payload.image))
     return {"ok": True, "instance_id": instance_id, "image": new_image}
+
+
+@app.get("/api/v1/admin/instances/{instance_id}/plan-preview",
+         dependencies=[Depends(verify_admin)])
+def admin_plan_preview(instance_id: int, plan: str = ""):
+    """What switching this workspace's package would change, read from its live stack file.
+
+    Read-only: drives the confirm dialog so the admin sees the real numbers before a container
+    is recreated.
+    """
+    inst = db.get_instance(instance_id)
+    if not inst:
+        raise HTTPException(404, "Workspace not found.")
+    try:
+        target = plan_switch.normalize_plan(plan)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    try:
+        return plan_switch.preview(inst, target)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+
+
+class InstancePlanIn(BaseModel):
+    plan: str = Field(..., min_length=1, max_length=1)
+    backup_first: bool = True
+
+
+@app.post("/api/v1/admin/instances/{instance_id}/plan", dependencies=[Depends(verify_admin)])
+def admin_switch_instance_plan(instance_id: int, payload: InstancePlanIn,
+                               request: Request, background: BackgroundTasks = None):
+    """Move ONE workspace to the other package's resources. Works in both directions.
+
+    The container is recreated against the same named volume, so workflows, executions and
+    credentials survive, but the workspace blinks offline for a few seconds and anything
+    mid-execution is lost. `backup_first` (default true) records a full backup before the switch;
+    it is the admin's safety net, so turning it off is a deliberate choice.
+    """
+    inst = db.get_instance(instance_id)
+    if not inst:
+        raise HTTPException(404, "Workspace not found.")
+    try:
+        target = plan_switch.normalize_plan(payload.plan)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    current = (db._row_get(inst, "plan", "a") or "a")
+    backup_id = None
+    if payload.backup_first:
+        try:
+            bid = db.create_backup(inst["account_id"], instance_id, "full", "n8n-data.tar.gz")
+            if background:
+                background.add_task(_run_backup, bid, dict(inst), "full")
+            backup_id = bid
+        except Exception as exc:  # noqa: BLE001 - no backup, no switch
+            raise HTTPException(409, f"Could not start the pre-switch backup: {exc}")
+    try:
+        result = plan_switch.switch(inst, target)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+    db.record_auth_event(sc.client_ip(request), "plan_switch", inst["account_id"],
+                         f"instance {instance_id} {current} -> {target}")
+    log.info("Workspace %s switched %s -> %s by admin", instance_id, current, target)
+    return {
+        "instance_id": instance_id,
+        "from_plan": current, "to_plan": target,
+        "from_label": plan_switch.plan_label(current),
+        "to_label": plan_switch.plan_label(target),
+        "action": "downgrade" if target == "a" else "upgrade",
+        "backup_id": backup_id,
+        **result,
+    }
+
+
+@app.get("/api/v1/admin/upgrade-requests", dependencies=[Depends(verify_admin)])
+def admin_upgrade_requests(status: str = "open"):
+    """Customer upgrade requests, newest first. status=open|handled|all."""
+    rows = db.list_upgrade_requests(status)
+    for r in rows:
+        r["from_label"] = plan_switch.plan_label(r.get("from_plan"))
+        r["to_label"] = plan_switch.plan_label(r.get("to_plan"))
+    return {"data": rows, "open_count": len(db.list_upgrade_requests("open"))}
+
+
+@app.post("/api/v1/admin/upgrade-requests/{request_id}/handle",
+          dependencies=[Depends(verify_admin)])
+def admin_handle_upgrade_request(request_id: int):
+    """Mark a request dealt with, so the admin list only shows what still needs contact."""
+    if not db.handle_upgrade_request(request_id, handled_by="admin"):
+        raise HTTPException(409, "That request is not open (already handled or missing).")
+    return {"id": request_id, "status": "handled"}
 
 
 @app.post("/api/v1/admin/instances/{instance_id}/restart", dependencies=[Depends(verify_admin)])

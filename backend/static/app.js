@@ -632,7 +632,22 @@ var ICONS = {
           '<div class="quota"><div class="bar"><span style="width:' + Math.min(100, quota ? Math.round(used / quota * 100) : 0) + '%"></span></div><strong>' + Math.round(quota ? used / quota * 100 : 0) + "%</strong></div>" +
           '<p class="small muted" style="margin-top:20px">' + (used < quota ? "You can create another workspace." : "Contact support if your business needs a higher limit.") + "</p>" +
           (used < quota && acc && acc.subscription_status === "active"
-            ? '<button class="button secondary small-btn" data-action="add-workspace">Add workspace</button>' : "") + "</section>" +
+            ? '<button class="button secondary small-btn" data-action="add-workspace">Add workspace</button>' : "") +
+          (function () {
+            var pi = state.session && state.session.plan;
+            if (!pi) return "";
+            var req = state.session.upgradeRequest;
+            var out = '<p class="small muted" style="margin-top:14px">Package: <strong>' + esc(pi.label) + "</strong></p>";
+            if (!pi.can_request_upgrade) return out;
+            if (req) {
+              return out + '<p class="small" style="margin-top:8px">' + icon("clock") +
+                " Upgrade to " + esc(pi.target_label) + " requested" +
+                (req.created_at ? " on " + esc(fmtDate(req.created_at)) : "") +
+                ". We will contact you.</p>";
+            }
+            return out + '<button class="button secondary small-btn" data-action="request-upgrade">' +
+              icon("spark") + " Request upgrade to " + esc(pi.target_label) + "</button>";
+          })() + "</section>" +
         '<section class="card"><div class="card-head"><h3>Next renewal</h3>' + icon("billing") + "</div>" +
           '<p style="font-family:Manrope;font-size:1.4rem;font-weight:800;margin:12px 0 5px">' + esc(periodEnd) + "</p>" +
           '<p class="small muted">Your payment provider charges your card automatically and emails the result.</p>' +
@@ -681,6 +696,70 @@ var ICONS = {
     });
     return held;
   }
+  /* ---------- packages: change the plan, switch the workspace (0.1.99) ----------
+     The package is two different compose templates: standard is 0.30 CPU / 768 MB / heap 384,
+     Plus is 0.50 CPU / 1 GB / heap 768. Changing the PLAN is instant and only moves what the
+     account is subscribed to; switching the WORKSPACE recreates its container, so it is a
+     separate, confirmed action. One control does both directions: it reads "Upgrade to Plus" or
+     "Downgrade to standard" from the workspace's own plan, never two code paths. */
+  function planLabelOf(v) { return v === "b" ? "Workspace Plus (GHS 500)" : "Workspace (GHS 300)"; }
+  function planSpecsOf(v) {
+    return v === "b" ? "0.50 CPU · 1 GB memory · node heap 768" : "0.30 CPU · 768 MB memory · node heap 384";
+  }
+
+  function changePlanModal(accountId) {
+    var a = (state.adminAccounts || []).find(function (x) { return x.id === Number(accountId); });
+    if (!a) { showToast("Not found", "Could not resolve this account."); return; }
+    var cur = a.plan === "b" ? "b" : "a";
+    function opt(val) {
+      var on = val === cur;
+      return '<label style="display:flex;gap:10px;align-items:flex-start;border:1px solid var(--line);border-radius:10px;padding:12px;cursor:pointer;margin:0">' +
+        '<input type="radio" name="chg-plan" value="' + val + '"' + (on ? " checked" : "") + ' style="margin-top:3px">' +
+        '<span><strong>' + planLabelOf(val) + "</strong>" +
+        '<span class="small muted" style="display:block">' + planSpecsOf(val) + "</span>" +
+        (on ? '<span class="small muted" style="display:block">Current package</span>' : "") + "</span></label>";
+    }
+    showModal('<div class="card-head"><h2>Change package</h2><button class="button ghost small-btn" data-action="close-modal">' + icon("close") + "</button></div>" +
+      '<p class="muted">Move ' + esc(a.display_name || a.username) + " to the other package.</p>" +
+      '<div style="display:grid;gap:10px;margin:14px 0">' + opt("a") + opt("b") + "</div>" +
+      '<div class="consequence" style="background:var(--amber-100)"><strong>What this does and does not do</strong><ul><li>Changes what the account is subscribed to, and which allowance applies to its next workspace</li><li><strong>Does not</strong> change a running workspace: it keeps the CPU and memory it was built with</li><li>Switch the workspace separately if its resources should follow</li><li>Takes no payment and issues no refund</li></ul></div>' +
+      '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+      '<button class="button" data-confirm-plan="' + a.id + '">' + icon("check") + " Change package</button></div>");
+  }
+
+  function switchPlanModal(instanceId, targetPlan) {
+    var inst = findInstanceById(instanceId);
+    if (!inst) { showToast("Not found", "Could not resolve this workspace."); return; }
+    api("/admin/instances/" + Number(instanceId) + "/plan-preview?plan=" + encodeURIComponent(targetPlan))
+      .then(function (pv) {
+        var up = pv.action !== "downgrade";
+        var rows = (pv.changes || []).map(function (c) {
+          return "<li>" + esc(c.label) + ": <strong>" + esc(c.from) + "</strong> → <strong>" + esc(c.to) + "</strong></li>";
+        }).join("");
+        showModal('<div class="card-head"><h2>' + (up ? "Upgrade to Plus" : "Downgrade to standard") + "</h2>" +
+          '<button class="button ghost small-btn" data-action="close-modal">' + icon("close") + "</button></div>" +
+          '<p class="muted">Workspace <strong>' + esc(titleCase(pv.stack_name)) + "</strong> (" + esc(pv.domain || "") + ") moves from " +
+          esc(pv.from_label) + " to <strong>" + esc(pv.to_label) + "</strong>.</p>" +
+          '<div class="consequence" style="background:var(--amber-100)"><strong>What will change</strong><ul>' + rows + "</ul></div>" +
+          '<div class="consequence" style="background:var(--red-100)"><strong>This restarts the workspace</strong><ul><li>The container is recreated with the new limits, which takes a few seconds</li><li>Workflows, executions and credentials are preserved (same data volume)</li><li>Anything running at that moment is interrupted</li><li>A full backup is taken first</li></ul></div>' +
+          '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+          '<button class="button" data-confirm-plan-switch="' + pv.instance_id + '" data-plan="' + esc(pv.to_plan) + '">' +
+          icon("check") + " " + (up ? "Upgrade workspace" : "Downgrade workspace") + "</button></div>");
+      })
+      .catch(function (err) { showToast("Cannot switch this workspace", err.message); });
+  }
+
+  function requestUpgrade() {
+    var acc = state.session && state.session.account;
+    if (!acc) return;
+    api("/accounts/" + acc.id + "/upgrade-request", { method: "POST", body: {} })
+      .then(function (d) {
+        showToast(d.status === "already_requested" ? "Already requested" : "Upgrade requested", d.message);
+        refreshSession().then(function () { render(); });
+      })
+      .catch(function (err) { showToast("Request failed", err.message); });
+  }
+
   function quotaOf(acc, key) {
     var value = acc ? (key === "b" ? acc.quota_b : acc.quota_a) : null;
     if (value === null || value === undefined) value = acc ? acc.quota : null;
@@ -1657,6 +1736,7 @@ var ICONS = {
         '<button class="button secondary" data-action="admin-extend-expiry" data-id="' + a.id + '">' + icon("clock") + " Extend expiry</button>" +
         '<button class="button secondary" data-action="admin-attach" data-id="' + a.id + '">' + icon("workspace") + " Attach workspace</button>" +
         '<button class="button secondary" data-action="quota" data-id="' + a.id + '">Change quota</button>' +
+        '<button class="button secondary" data-action="admin-change-plan" data-id="' + a.id + '">' + icon("billing") + " Change plan</button>" +
         '<button class="button secondary" data-action="admin-backup-toggle" data-id="' + a.id + '" data-on="' + (a.backup_enabled ? "1" : "0") + '">' + icon("archive") + (a.backup_enabled ? " Revoke backup access" : " Allow backup") + "</button>" +
         (sub === "locked" ? '<button class="button" data-action="admin-unlock" data-id="' + a.id + '">' + icon("check") + " Switch workspace on</button>"
                           : '<button class="button secondary" data-action="admin-lock" data-id="' + a.id + '">' + icon("warning") + " Switch workspace off</button>") : "") +
@@ -1705,6 +1785,7 @@ var ICONS = {
               '<button class="button secondary small-btn" data-action="admin-backup" data-id="' + i.id + '">' + icon("archive") + " Back up</button>" +
               '<button class="button secondary small-btn" data-action="admin-update-image" data-id="' + i.id + '"' + updDisabled(i) + '>' + icon("refresh") + (state.instUpdating[i.id] ? " Updating..." : " Update n8n") + "</button>" +
               '<button class="button secondary small-btn" data-action="admin-restart" data-id="' + i.id + '"' + (state.instRestarting[i.id] ? " disabled" : "") + '>' + icon("refresh") + (state.instRestarting[i.id] ? " Restarting..." : " Restart") + "</button>" +
+              '<button class="button secondary small-btn" data-action="admin-switch-plan" data-id="' + i.id + '" data-plan="' + (i.plan === "b" ? "a" : "b") + '">' + icon(i.plan === "b" ? "arrow" : "spark") + (i.plan === "b" ? " Downgrade to standard" : " Upgrade to Plus") + "</button>" +
               '<button class="button secondary small-btn" data-action="runner-toggle" data-id="' + i.id + '"' + runDisabled(i) + '>' + icon(i.python_runner ? "close" : "spark") + (state.runnerBusy[i.id] ? (i.python_runner ? " Removing..." : " Attaching...") : (i.python_runner ? " Remove Python" : " Attach Python")) + "</button>" +
               "</div></article>";
         }).join("") : (wsKnown
@@ -2091,7 +2172,8 @@ var ICONS = {
     if (!token) { state.session = null; state.sessionLoaded = true; return null; }
     try {
       var data = await api("/me");
-      state.session = { token: token, account: data.account, instances: data.instances || [] };
+      state.session = { token: token, account: data.account, instances: data.instances || [],
+        plan: data.plan || null, upgradeRequest: data.upgrade_request || null };
       state.sessionLoaded = true;
       if (!state.plans.length) await loadPlans();
       // lazily load backups when the customer opens the Backups page
@@ -3550,6 +3632,9 @@ var ICONS = {
         if (!act.dataset.tag) { showToast("Current version unknown", "Re-open the update dialog and try again."); return; }
         runImageUpdate(act.dataset.id, act.dataset.tag);
       }
+      else if (action === "admin-change-plan") changePlanModal(act.dataset.id);
+      else if (action === "admin-switch-plan") switchPlanModal(act.dataset.id, act.dataset.plan);
+      else if (action === "request-upgrade") requestUpgrade();
       else if (action === "runner-toggle") {
         var rInst = (state.adminInstances || []).find(function (x) { return x.id === Number(act.dataset.id); }) ||
                     findInstanceById(act.dataset.id);
@@ -3903,6 +3988,32 @@ var ICONS = {
           refreshAdminData();
           render();
         }).catch(function (err) { showToast("Update failed", err.message); });
+      }
+      var cPlan = event.target.closest("[data-confirm-plan]");
+      if (cPlan) {
+        var chosen = document.querySelector('input[name="chg-plan"]:checked');
+        if (!chosen) { showToast("Pick a package", "Choose which package to move the account to."); return; }
+        var cpId = cPlan.dataset.confirmPlan, cpVal = chosen.value;
+        closeModal();
+        api("/admin/accounts/" + cpId + "/plan", { method: "PUT", body: { plan: cpVal } })
+          .then(function (d) {
+            showToast(d.changed ? "Package changed" : "No change",
+              d.changed ? (d.note || ("The account is now on " + d.label + ".")) : d.note);
+            refreshAdminData();
+          })
+          .catch(function (err) { showToast("Change failed", err.message); });
+      }
+      var cSwitch = event.target.closest("[data-confirm-plan-switch]");
+      if (cSwitch) {
+        var swId = cSwitch.dataset.confirmPlanSwitch, swPlan = cSwitch.dataset.plan;
+        closeModal();
+        api("/admin/instances/" + swId + "/plan", { method: "POST", body: { plan: swPlan, backup_first: true } })
+          .then(function (d) {
+            showToast(d.changed ? (d.action === "downgrade" ? "Workspace downgraded" : "Workspace upgraded") : "Already matching",
+              d.changed ? ("Now running " + d.to_label + ". The workspace restarted on the same data volume.") : (d.note || ""));
+            refreshAdminData();
+          })
+          .catch(function (err) { showToast("Switch failed", err.message); });
       }
       var cMarkPaid = event.target.closest("[data-confirm-mark-paid]");
       if (cMarkPaid) {

@@ -282,6 +282,24 @@ def init_db(db_path: str | None = None) -> None:
             detail TEXT DEFAULT '',
             created_at INTEGER NOT NULL
         );
+        /* A customer asking to move to a bigger package. Payment is deliberately NOT part of
+           this: the request only tells the admin, who contacts them. One OPEN row per account
+           per target package is enough to act on, so a duplicate request is refused rather
+           than piling up rows nobody reads. */
+        CREATE TABLE IF NOT EXISTS upgrade_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL,
+            instance_id INTEGER,
+            from_plan TEXT NOT NULL DEFAULT 'a',
+            to_plan TEXT NOT NULL DEFAULT 'b',
+            note TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'open',   -- open | handled | withdrawn
+            created_at INTEGER NOT NULL,
+            handled_at INTEGER,
+            handled_by TEXT DEFAULT ''
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_upgrade_open
+            ON upgrade_requests(account_id, to_plan) WHERE status = 'open';
         CREATE TABLE IF NOT EXISTS ip_bans (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ip TEXT NOT NULL UNIQUE,
@@ -1342,5 +1360,87 @@ def mark_renewal_link_used(token: str, used_at: int) -> None:
     try:
         conn.execute("UPDATE renewal_links SET used_at=? WHERE token=?", (used_at, token))
         conn.commit()
+    finally:
+        conn.close()
+
+
+# ---- upgrade requests (package upgrade asked for by the customer, 0.1.99) ----
+#
+# The customer cannot change their own package: payment is the gate, and payment for an
+# upgrade is not built yet. So the portal records the WISH and tells the admin, who contacts
+# them. One open row per account per target package: a second click says "already requested"
+# instead of queueing duplicates nobody will read.
+
+def create_upgrade_request(account_id: int, from_plan: str, to_plan: str,
+                           instance_id: int | None = None, note: str = "") -> int | None:
+    """Insert an open request. Returns its id, or None when one is already open."""
+    conn = get_conn()
+    try:
+        existing = conn.execute(
+            "SELECT id FROM upgrade_requests WHERE account_id=? AND to_plan=? AND status='open'",
+            (account_id, to_plan),
+        ).fetchone()
+        if existing:
+            return None
+        cur = conn.execute(
+            "INSERT INTO upgrade_requests (account_id, instance_id, from_plan, to_plan, note,"
+            " status, created_at) VALUES (?,?,?,?,?, 'open', ?)",
+            (account_id, instance_id, from_plan, to_plan, (note or "")[:500], now()),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+    finally:
+        conn.close()
+
+
+def open_upgrade_request(account_id: int) -> dict | None:
+    """The account's open request, if any (drives the customer's button state)."""
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM upgrade_requests WHERE account_id=? AND status='open'"
+            " ORDER BY id DESC LIMIT 1",
+            (account_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
+
+
+def list_upgrade_requests(status: str = "open") -> list[dict]:
+    """Requests joined to the account's email/name, newest first, for the admin list."""
+    conn = get_conn()
+    try:
+        if status and status != "all":
+            rows = conn.execute(
+                "SELECT r.*, a.email AS account_email, a.username AS account_username,"
+                " a.paid_until AS account_paid_until"
+                " FROM upgrade_requests r LEFT JOIN accounts a ON a.id = r.account_id"
+                " WHERE r.status=? ORDER BY r.id DESC",
+                (status,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT r.*, a.email AS account_email, a.username AS account_username,"
+                " a.paid_until AS account_paid_until"
+                " FROM upgrade_requests r LEFT JOIN accounts a ON a.id = r.account_id"
+                " ORDER BY r.id DESC"
+            ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+def handle_upgrade_request(request_id: int, handled_by: str = "admin",
+                           status: str = "handled") -> bool:
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "UPDATE upgrade_requests SET status=?, handled_at=?, handled_by=?"
+            " WHERE id=? AND status='open'",
+            (status, now(), (handled_by or "")[:120], request_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
     finally:
         conn.close()
