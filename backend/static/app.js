@@ -2172,9 +2172,10 @@ var ICONS = {
     if (!token) { state.session = null; state.sessionLoaded = true; return null; }
     try {
       var data = await api("/me");
-      state.session = { token: token, account: data.account, instances: data.instances || [],
-        plan: data.plan || null, upgradeRequest: data.upgrade_request || null };
+      state.session = { token: token, account: data.account, instances: data.instances || [] };
       state.sessionLoaded = true;
+      state.session.plan = data.plan || null;
+      state.session.upgradeRequest = data.upgrade_request || null;
       if (!state.plans.length) await loadPlans();
       // lazily load backups when the customer opens the Backups page
       if ((location.hash || "").indexOf("/customer/backups") === 1 || state.backupsLoaded) {
