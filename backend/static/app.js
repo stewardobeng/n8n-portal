@@ -54,6 +54,7 @@
     instUpdating: {},        // instanceId -> target tag while an n8n update runs
     instRestarting: {},      // instanceId -> true while a restart is in flight (0.1.96)
     runnerBusy: {},          // instanceId -> "attach"|"detach" while a python-runner change runs
+    sandboxBusy: {},         // instanceId -> "attach"|"detach" while an AI-sandbox change runs
     busyModal: false         // true while a long-running action modal is open (render must not wipe it)
   };
 
@@ -1787,6 +1788,7 @@ var ICONS = {
               '<button class="button secondary small-btn" data-action="admin-restart" data-id="' + i.id + '"' + (state.instRestarting[i.id] ? " disabled" : "") + '>' + icon("refresh") + (state.instRestarting[i.id] ? " Restarting..." : " Restart") + "</button>" +
               '<button class="button secondary small-btn" data-action="admin-switch-plan" data-id="' + i.id + '" data-plan="' + (i.plan === "b" ? "a" : "b") + '">' + icon(i.plan === "b" ? "arrow" : "spark") + (i.plan === "b" ? " Downgrade to standard" : " Upgrade to Plus") + "</button>" +
               '<button class="button secondary small-btn" data-action="runner-toggle" data-id="' + i.id + '"' + runDisabled(i) + '>' + icon(i.python_runner ? "close" : "spark") + (state.runnerBusy[i.id] ? (i.python_runner ? " Removing..." : " Attaching...") : (i.python_runner ? " Remove Python" : " Attach Python")) + "</button>" +
+              '<button class="button secondary small-btn" data-action="sandbox-toggle" data-id="' + i.id + '"' + sandboxDisabled(i) + '>' + icon(i.ai_sandbox ? "close" : "spark") + (state.sandboxBusy[i.id] ? (i.ai_sandbox ? " Removing..." : " Attaching...") : (i.ai_sandbox ? " Remove AI sandbox" : " Attach AI sandbox")) + "</button>" +
               "</div></article>";
         }).join("") : (wsKnown
               ? '<div class="empty-state" style="min-height:200px"><div><h3>No workspaces yet</h3><p class="muted">The customer has not provisioned a workspace.</p></div></div>'
@@ -2509,6 +2511,7 @@ var ICONS = {
       (inst ? '<button class="button secondary" data-action="admin-update-image" data-id="' + inst.id + '"' + updDisabled(inst) + '>' + icon("refresh") + (state.instUpdating[inst.id] ? " Updating..." : " Update n8n") + "</button>" : "") +
       (inst ? '<button class="button secondary" data-action="admin-restart" data-id="' + inst.id + '"' + (state.instRestarting[inst.id] ? " disabled" : "") + '>' + icon("refresh") + (state.instRestarting[inst.id] ? " Restarting..." : " Restart") + "</button>" : "") +
       (inst ? '<button class="button secondary" data-action="runner-toggle" data-id="' + inst.id + '"' + runDisabled(inst) + '>' + icon(inst.python_runner ? "close" : "spark") + (inst.python_runner ? " Remove Python runner" : " Attach Python runner") + "</button>" : "") +
+      (inst ? '<button class="button secondary" data-action="sandbox-toggle" data-id="' + inst.id + '"' + sandboxDisabled(inst) + '>' + icon(inst.ai_sandbox ? "close" : "spark") + (inst.ai_sandbox ? " Remove AI sandbox" : " Attach AI sandbox") + "</button>" : "") +
       "</div>");
   }
 
@@ -2970,6 +2973,62 @@ var ICONS = {
       "<li>Leave JavaScript Code nodes working exactly as before</li></ul></div>" +
       '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
       '<button class="button danger" data-confirm-runner-detach="' + instanceId + '">Remove Python</button></div>');
+  }
+  function sandboxDisabled(inst) {
+    // Same rule as the runner: never run two stack mutations against one workspace at once.
+    return (inst && (state.sandboxBusy[inst.id] || state.runnerBusy[inst.id] ||
+                     state.instUpdating[inst.id] || state.instRestarting[inst.id])) ? " disabled" : "";
+  }
+  function confirmAttachSandbox(instanceId) {
+    var inst = (state.adminInstances || []).find(function (x) { return x.id === Number(instanceId); }) ||
+               findInstanceById(instanceId);
+    var wname = inst ? titleCase(inst.stack_name) : "this workspace";
+    showModal(modalHeader("Attach AI sandbox?") +
+      "<p>This gives " + esc(wname) + " access to the shared n8n Assistant sandbox. No other workspace is affected.</p>" +
+      '<div class="consequence"><strong>This action will:</strong><ul>' +
+      "<li>Create a sandbox key used only by this workspace, so removing it later cannot affect anyone else</li>" +
+      "<li>Restart the workspace; it is back in a few minutes and all workflows and data are preserved</li>" +
+      "<li>Turn on the Assistant sandbox and the shared web search for this workspace</li>" +
+      "<li>Leave the model choice to the user, who adds their own key in the Assistant settings</li>" +
+      "<li>Stay removable at any time from this same menu</li></ul></div>" +
+      '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+      '<button class="button" data-confirm-sandbox-attach="' + instanceId + '">Attach sandbox</button></div>');
+  }
+  function confirmDetachSandbox(instanceId) {
+    var inst = (state.adminInstances || []).find(function (x) { return x.id === Number(instanceId); }) ||
+               findInstanceById(instanceId);
+    var wname = inst ? titleCase(inst.stack_name) : "this workspace";
+    showModal(modalHeader("Remove AI sandbox?") +
+      "<p>The shared sandbox is taken away from " + esc(wname) + " and its key is revoked.</p>" +
+      '<div class="consequence" style="background:var(--amber-100)"><strong>This action will:</strong><ul>' +
+      "<li>Restart the workspace; data is preserved</li>" +
+      "<li>Stop the Assistant from running code until a sandbox is attached again</li>" +
+      "<li>Leave every other workspace untouched</li></ul></div>" +
+      '<div class="actions end"><button class="button secondary" data-action="close-modal">Cancel</button>' +
+      '<button class="button danger" data-confirm-sandbox-detach="' + instanceId + '">Remove sandbox</button></div>');
+  }
+  function runSandboxToggle(instanceId, mode) {
+    var attaching = mode === "attach";
+    state.sandboxBusy[instanceId] = mode;
+    state.busyModal = true;
+    render();
+    showModal(modalHeader(attaching ? "Attaching AI sandbox" : "Removing AI sandbox") + '<div class="spinner"></div>' +
+      '<p class="muted">Recreating the workspace ' + (attaching ? "with" : "without") + ' the sandbox settings. This can take a few minutes; the window updates when it finishes.</p>');
+    api("/admin/instances/" + instanceId + "/ai-sandbox/" + mode, { method: "POST" }).then(function () {
+      state.busyModal = false;
+      delete state.sandboxBusy[instanceId];
+      closeModal();
+      showToast(attaching ? "AI sandbox attached" : "AI sandbox removed",
+        attaching ? "The user can now add their model key in the Assistant settings and the sandbox will run their code."
+                  : "This workspace no longer has a sandbox; the Assistant cannot run code until one is attached again.");
+      refreshAdminData().then(function () { render(); });
+    }).catch(function (err) {
+      state.busyModal = false;
+      delete state.sandboxBusy[instanceId];
+      closeModal();
+      showToast(attaching ? "Attach failed" : "Remove failed", err.message);
+      refreshAdminData().then(function () { render(); });
+    });
   }
   function runRunnerToggle(instanceId, mode) {
     var attaching = mode === "attach";
@@ -3642,6 +3701,12 @@ var ICONS = {
         if (!rInst) { showToast("Not found", "Could not resolve this workspace."); return; }
         if (rInst.python_runner) confirmDetachRunner(rInst.id); else confirmAttachRunner(rInst.id);
       }
+      else if (action === "sandbox-toggle") {
+        var sInst = (state.adminInstances || []).find(function (x) { return x.id === Number(act.dataset.id); }) ||
+                    findInstanceById(act.dataset.id);
+        if (!sInst) { showToast("Not found", "Could not resolve this workspace."); return; }
+        if (sInst.ai_sandbox) confirmDetachSandbox(sInst.id); else confirmAttachSandbox(sInst.id);
+      }
       else if (action === "update-image-now") {
         event.preventDefault();
         if (!act.dataset.tag) { showToast("Update n8n", "No target version."); return; }
@@ -3901,6 +3966,18 @@ var ICONS = {
       if (cRDetach) {
         closeModal();
         runRunnerToggle(Number(cRDetach.dataset.confirmRunnerDetach), "detach");
+      }
+
+      var cSAttach = event.target.closest("[data-confirm-sandbox-attach]");
+      if (cSAttach) {
+        closeModal();
+        runSandboxToggle(Number(cSAttach.dataset.confirmSandboxAttach), "attach");
+      }
+
+      var cSDetach = event.target.closest("[data-confirm-sandbox-detach]");
+      if (cSDetach) {
+        closeModal();
+        runSandboxToggle(Number(cSDetach.dataset.confirmSandboxDetach), "detach");
       }
 
       var cImp = event.target.closest("[data-confirm-impersonate]");

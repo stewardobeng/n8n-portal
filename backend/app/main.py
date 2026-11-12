@@ -33,7 +33,7 @@ def _decode_subject_is_admin(authorization: str | None) -> bool:
     except Exception:
         return False
 from .services import provisioner, billing, access_gate, admin_ops, backup_ops
-from .services import account_security, passkeys, n8n_releases, python_runner, sms
+from .services import account_security, passkeys, n8n_releases, python_runner, ai_sandbox, sms
 from .services import update_queue
 from .services import plan_specs
 from .services import plan_switch
@@ -246,6 +246,7 @@ class InstanceStatusOut(BaseModel):
     managed: int = 1
     image: str = ""
     python_runner: int = 0
+    ai_sandbox: int = 0   # 0.1.103: shared n8n AI sandbox attached to this workspace
     plan: str = "a"   # this workspace's package: a GHS 300 | b GHS 500 Plus (0.1.70)
     error: Optional[str]
     created_at: int
@@ -432,6 +433,7 @@ def _instance_to_out(i) -> InstanceStatusOut:
         managed=_row_get(i, "managed", 1),
         image=_row_get(i, "image", ""),
         python_runner=_row_get(i, "python_runner", 0),
+        ai_sandbox=_row_get(i, "ai_sandbox", 0),
         plan=_row_get(i, "plan", "a") or "a",
         created_at=i["created_at"],
     )
@@ -2792,6 +2794,58 @@ def admin_detach_python_runner(instance_id: int):
         log.error("runner detach %s: %s", instance_id, e)
         raise HTTPException(502, f"Python runner detach failed: {e}")
     return {"ok": True, "instance_id": instance_id}
+
+
+@app.post("/api/v1/admin/instances/{instance_id}/ai-sandbox/attach",
+          dependencies=[Depends(verify_admin)])
+def admin_attach_ai_sandbox(instance_id: int):
+    """Give ONE workspace the shared n8n AI sandbox (n8n-sandbox provider, admin opt-in).
+
+    Creates a sandbox tenant key for this workspace only, writes the four sandbox env vars plus the
+    SearXNG URL into its stack file and redeploys in place, so workflows and credentials survive.
+    The user still picks their own model in their instance's Assistant settings. Rollback = detach.
+    """
+    inst = _runner_instance_or_404(instance_id)
+    try:
+        result = ai_sandbox.attach(inst)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except ai_sandbox.SandboxError as e:
+        log.error("ai sandbox attach %s: %s", instance_id, e)
+        raise HTTPException(502, f"AI sandbox attach failed: {e}")
+    except Exception as e:  # noqa: BLE001
+        log.error("ai sandbox attach %s: %s", instance_id, e)
+        raise HTTPException(502, f"AI sandbox attach failed: {e}")
+    return {"ok": True, **result}
+
+
+@app.post("/api/v1/admin/instances/{instance_id}/ai-sandbox/detach",
+          dependencies=[Depends(verify_admin)])
+def admin_detach_ai_sandbox(instance_id: int):
+    """Remove the AI sandbox from a workspace and revoke its tenant key (the rollback path)."""
+    inst = _runner_instance_or_404(instance_id)
+    try:
+        result = ai_sandbox.detach(inst)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except Exception as e:  # noqa: BLE001
+        log.error("ai sandbox detach %s: %s", instance_id, e)
+        raise HTTPException(502, f"AI sandbox detach failed: {e}")
+    return {"ok": True, **result}
+
+
+@app.get("/api/v1/admin/instances/{instance_id}/ai-sandbox",
+         dependencies=[Depends(verify_admin)])
+def admin_ai_sandbox_status(instance_id: int):
+    """Whether this workspace has the sandbox, plus the shared service's reachability (no secrets)."""
+    inst = _runner_instance_or_404(instance_id)
+    return ai_sandbox.status(inst)
+
+
+@app.get("/api/v1/admin/ai-sandbox/service", dependencies=[Depends(verify_admin)])
+def admin_ai_sandbox_service():
+    """Health of the shared sandbox service, so the admin UI can warn before an attach."""
+    return ai_sandbox.service_health()
 
 
 @app.get("/api/v1/admin/instances", dependencies=[Depends(verify_admin)])

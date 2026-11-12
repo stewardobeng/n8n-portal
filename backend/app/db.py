@@ -215,6 +215,13 @@ def init_db(db_path: str | None = None) -> None:
         ic3 = [r[1] for r in cur.execute("PRAGMA table_info(instances)")]
         if "python_runner" not in ic3:
             cur.execute("ALTER TABLE instances ADD COLUMN python_runner INTEGER NOT NULL DEFAULT 0")
+        # 0.1.103: the shared n8n AI sandbox (n8n-sandbox provider), admin-attached per workspace.
+        # ai_sandbox_tenant_id records which tenant key belongs to this workspace so a detach can revoke
+        # exactly that key. The key itself lives in the stack file, never in the portal DB.
+        if "ai_sandbox" not in ic3:
+            cur.execute("ALTER TABLE instances ADD COLUMN ai_sandbox INTEGER NOT NULL DEFAULT 0")
+        if "ai_sandbox_tenant_id" not in ic3:
+            cur.execute("ALTER TABLE instances ADD COLUMN ai_sandbox_tenant_id TEXT DEFAULT ''")
         try:
             cur.execute("ALTER TABLE instances ADD COLUMN plan TEXT NOT NULL DEFAULT 'a'")
         except sqlite3.OperationalError:

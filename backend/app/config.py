@@ -79,6 +79,19 @@ class Settings:
     # Values: stable (default) | beta | highest (the old behaviour).
     n8n_release_channel: str = os.getenv("N8N_RELEASE_CHANNEL", "stable").strip()
 
+    # --- shared n8n AI sandbox (0.1.103) -------------------------------------------------------
+    # One sandbox service serves the whole fleet (n8n's own "n8n-sandbox" provider, NOT Daytona).
+    # Reached through a Cloudflare Tunnel, so nothing is published on the sandbox host.
+    ai_sandbox_url: str = os.getenv("AI_SANDBOX_URL", "").strip()
+    ai_sandbox_admin_key: str = os.getenv("AI_SANDBOX_ADMIN_KEY", "").strip()
+    # Web search offered to every sandbox-enabled workspace (bundled SearXNG, JSON API enabled).
+    ai_sandbox_search_url: str = os.getenv("AI_SANDBOX_SEARCH_URL", "").strip()
+    # Deliberately EMPTY by default: each user chooses their own model in their instance (Steward,
+    # 2026-11-12). Setting these lets the portal inject a fleet-wide model later without code changes.
+    ai_sandbox_model_api_key: str = os.getenv("AI_SANDBOX_MODEL_API_KEY", "").strip()
+    ai_sandbox_model: str = os.getenv("AI_SANDBOX_MODEL", "").strip()
+    ai_sandbox_model_url: str = os.getenv("AI_SANDBOX_MODEL_URL", "").strip()
+
     data_dir: str = "/data"
     backup_dir: str = os.getenv("BACKUP_DIR", "/data/backups")
 
