@@ -53,7 +53,15 @@ def _h(token):
 # ---- release service ----
 
 def test_release_service_picks_newest_semver(monkeypatch):
+    """The `highest` policy: newest semver among recent tags, and one HTTP hit thanks to the cache.
+
+    0.1.100 made the channel explicit, and the default is `stable` (which beats the highest number
+    when n8n's beta line is numerically ahead). This test is about the highest policy itself, so it
+    pins the channel instead of relying on what the default happens to be.
+    """
     from app.services import n8n_releases as nr
+    from app.config import settings
+    monkeypatch.setattr(settings, "n8n_release_channel", "highest")
     tags = [
         {"name": "latest", "last_updated": "2026-09-03T00:00:00Z"},
         {"name": "nightly", "last_updated": "2026-09-03T00:00:00Z"},

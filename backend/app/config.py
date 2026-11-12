@@ -73,6 +73,11 @@ class Settings:
     # reached, so provisioning never falls back to a floating tag.
     n8n_provision_tag: str = os.getenv("N8N_PROVISION_TAG", "").strip()
     n8n_fallback_tag: str = os.getenv("N8N_FALLBACK_TAG", "2.43.1").strip()
+    # Which n8n line a NEW workspace is pinned to (0.1.100). `stable` follows Docker Hub's own
+    # `stable` tag, which is NOT always the highest version number: on 2026-11-12 the maximum was
+    # 2.48.2 (the beta line) while stable was 2.47.5, so "highest" quietly put customers on beta.
+    # Values: stable (default) | beta | highest (the old behaviour).
+    n8n_release_channel: str = os.getenv("N8N_RELEASE_CHANNEL", "stable").strip()
 
     data_dir: str = "/data"
     backup_dir: str = os.getenv("BACKUP_DIR", "/data/backups")
